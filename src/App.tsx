@@ -53,6 +53,19 @@ function BulletIcon() {
   );
 }
 
+function TargetIcon() {
+  return (
+    <svg viewBox="0 0 32 32" className="h-8 w-8 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+      <circle cx="16" cy="16" r="12" fill="none" stroke="#ff3344" strokeWidth="2.5" />
+      <circle cx="16" cy="16" r="5" fill="#ff3344" />
+      <rect x="15" y="2" width="2" height="6" fill="#ff3344" />
+      <rect x="15" y="24" width="2" height="6" fill="#ff3344" />
+      <rect x="2" y="15" width="6" height="2" fill="#ff3344" />
+      <rect x="24" y="15" width="6" height="2" fill="#ff3344" />
+    </svg>
+  );
+}
+
 function KeyCap({ children }: { children: ReactNode }) {
   return (
     <span className="rounded-[4px] border border-white/30 bg-white/14 px-2 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-white shadow-[0_2px_0_rgba(0,0,0,0.25)]">
@@ -110,8 +123,7 @@ function ThreeDMenu({
 
   return (
     <div
-      className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-gradient-to-b from-[#9fdce8]/30 via-[#7fd9e6]/20 to-[#20417f]/35 px-4"
-      onPointerDown={onStart}
+      className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-gradient-to-b from-[#9fdce8]/30 via-[#7fd9e6]/20 to-[#20417f]/35 px-4"
     >
       <div className="menu-perspective">
         <div className="menu-rig">
@@ -148,8 +160,9 @@ function ThreeDMenu({
             <div className="mt-4 grid grid-cols-2 gap-3 text-sm font-black uppercase tracking-[0.12em] text-white/95">
               <div className="menu-chip">WASD Move</div>
               <div className="menu-chip">Mouse Aim</div>
-              <div className="menu-chip">Space/Q Alt</div>
-              <div className="menu-chip">Click Fire</div>
+              <div className="menu-chip">Space/Shift Alt</div>
+              <div className="menu-chip">L-Click Fire</div>
+              <div className="menu-chip col-span-2 text-center text-[#ff3344] bg-[#ff3344]/10 border-[#ff3344]/30 py-1.5 rounded-[5px] border">Q / R-Click Lock Salvo</div>
             </div>
           </div>
         </div>
@@ -182,6 +195,18 @@ export default function App() {
     multiplier: number;
     timer: number;
   } | null>(null);
+  const [statusInfo, setStatusInfo] = useState<{
+    damageBoost: number;
+    shield: number;
+    speedBoost: number;
+    threat: number;
+  } | null>(null);
+  const [salvoInfo, setSalvoInfo] = useState<{
+    locks: number;
+    cooldown: number;
+    isPainting: boolean;
+    ready: boolean;
+  } | null>(null);
 
   useEffect(() => {
     setHighScore(readHighScore());
@@ -199,18 +224,26 @@ export default function App() {
       setWaveMessage(e.detail.playing ? e.detail.message : null);
       setWeaponInfo(e.detail.weapon || null);
       setComboInfo(e.detail.combo || null);
-      setHighScore((prev) => {
-        if (nextScore <= prev) return prev;
+      setStatusInfo(e.detail.status || null);
+      setSalvoInfo(e.detail.salvo || null);
+
+      const storedHighScore = readHighScore();
+      if (nextScore > storedHighScore) {
         window.localStorage.setItem('helistrike:highScore', String(nextScore));
-        return nextScore;
-      });
+        setHighScore(nextScore);
+      }
     };
 
     const handleGameOver = (e: CustomEvent) => {
       const finalScore = e.detail.score;
       setMode('gameover');
-      setIsNewBest(finalScore >= readHighScore() && finalScore > 0);
-      setHighScore((prev) => Math.max(prev, finalScore));
+
+      const storedHighScore = readHighScore();
+      setIsNewBest(finalScore >= storedHighScore && finalScore > 0);
+      if (finalScore > storedHighScore) {
+        window.localStorage.setItem('helistrike:highScore', String(finalScore));
+        setHighScore(finalScore);
+      }
     };
 
     const handleStats = (e: CustomEvent) => {
@@ -232,6 +265,7 @@ export default function App() {
   }, []);
 
   const startRun = () => {
+    if (mode === 'playing') return;
     setMode('playing');
     setIsNewBest(false);
     engineRef.current?.startGame();
@@ -246,14 +280,22 @@ export default function App() {
   const coins = Math.floor(score / 100);
   const textShadow = { textShadow: '0 2px 0 rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.35)' };
   const hudDim = mode !== 'playing' ? 'opacity-35' : 'opacity-100';
+  const dangerOpacity = mode === 'playing' ? clampPercent(35 - health) / 100 : 0;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#9fdce8] font-sans text-white pointer-events-auto select-none">
-      <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full touch-none" />
-      <div className="arcade-scanlines pointer-events-none absolute inset-0" />
-      <div className="arcade-vignette pointer-events-none absolute inset-0" />
+      <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full touch-none z-0" />
+      <div className="arcade-scanlines pointer-events-none absolute inset-0 z-10" />
+      <div className="arcade-vignette pointer-events-none absolute inset-0 z-10" />
+      <div
+        className="pointer-events-none absolute inset-0 z-10 transition-opacity duration-300"
+        style={{
+          opacity: dangerOpacity,
+          background: 'radial-gradient(circle at center, transparent 45%, rgba(239,35,60,0.72) 100%)',
+        }}
+      />
 
-      <div className={`pointer-events-none absolute inset-0 transition-opacity duration-300 ${hudDim}`}>
+      <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
         <div className="arcade-marquee absolute left-1/2 top-0 hidden -translate-x-1/2 px-7 py-1 text-[11px] font-black uppercase tracking-[0.22em] text-[#ffe66d] sm:block">
           Heli-Strike Arcade Assault
         </div>
@@ -315,6 +357,61 @@ export default function App() {
           </div>
         )}
 
+        {/* Salvo HUD */}
+        {salvoInfo && mode === 'playing' && (
+          <div className="pointer-events-none absolute left-4 top-34 flex flex-col gap-1 sm:left-6 sm:top-38">
+            <div className="flex items-center gap-2">
+              <TargetIcon />
+              <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
+                Multi-Salvo
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              {salvoInfo.isPainting ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-black text-red-400 animate-pulse uppercase" style={textShadow}>
+                    Locking:
+                  </span>
+                  <div className="flex gap-0.5">
+                    {[0, 1, 2, 3, 4, 5].map((idx) => {
+                      const active = idx < salvoInfo.locks;
+                      return (
+                        <div
+                          key={idx}
+                          className={`h-4.5 w-3.5 border border-black/45 rounded-[2px] transition-all duration-150 ${
+                            active
+                              ? 'bg-[#ff3344] shadow-[0_0_8px_#ff3344] border-red-300'
+                              : 'bg-black/40'
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : salvoInfo.cooldown > 0 ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-black text-white/50" style={textShadow}>
+                    COOLDOWN
+                  </span>
+                  <div className="h-2 w-20 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+                    <div
+                      className="h-full bg-red-400/50 transition-all duration-300"
+                      style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-black text-white/60" style={textShadow}>
+                    {salvoInfo.cooldown}s
+                  </span>
+                </div>
+              ) : (
+                <span className="text-xs font-extrabold text-[#35e66d] animate-pulse" style={textShadow}>
+                  READY (HOLD Q / R-CLICK)
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Combo Display */}
         {comboInfo && comboInfo.count > 1 && mode === 'playing' && (
           <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 text-center">
@@ -324,6 +421,31 @@ export default function App() {
             <div className="text-sm font-bold text-yellow-200" style={textShadow}>
               x{comboInfo.multiplier.toFixed(1)} MULTIPLIER
             </div>
+          </div>
+        )}
+
+        {statusInfo && mode === 'playing' && (
+          <div className="pointer-events-none absolute right-4 top-28 flex flex-col items-end gap-1 text-xs font-black uppercase tracking-[0.12em] sm:right-6 sm:top-32">
+            {statusInfo.threat > 0.68 && (
+              <div className="rounded-[5px] border border-[#ff3344]/70 bg-[#40101a]/70 px-3 py-1 text-[#ffd3d7]" style={textShadow}>
+                Threat High
+              </div>
+            )}
+            {statusInfo.damageBoost > 0 && (
+              <div className="rounded-[5px] border border-[#ffe66d]/70 bg-[#3d2b08]/70 px-3 py-1 text-[#ffe66d]" style={textShadow}>
+                Damage {Math.ceil(statusInfo.damageBoost)}s
+              </div>
+            )}
+            {statusInfo.shield > 0 && (
+              <div className="rounded-[5px] border border-[#80d8ff]/70 bg-[#092a3f]/70 px-3 py-1 text-[#bfeeff]" style={textShadow}>
+                Shield {Math.ceil(statusInfo.shield)}s
+              </div>
+            )}
+            {statusInfo.speedBoost > 0 && (
+              <div className="rounded-[5px] border border-[#ff88ff]/70 bg-[#38113a]/70 px-3 py-1 text-[#ffd0ff]" style={textShadow}>
+                Boost {Math.ceil(statusInfo.speedBoost)}s
+              </div>
+            )}
           </div>
         )}
 
@@ -354,7 +476,7 @@ export default function App() {
       </div>
 
       {mode === 'playing' && waveMessage && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/10">
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/10">
           <h2 className="whitespace-pre-line text-center text-5xl font-black uppercase tracking-widest text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.55)] sm:text-6xl">
             {waveMessage}
           </h2>

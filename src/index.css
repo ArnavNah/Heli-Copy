@@ -46,7 +46,7 @@ body,
 }
 
 .menu-rig {
-  transform: rotateX(8deg) rotateY(-10deg);
+  transform: rotateX(8deg) rotateY(0deg);
   transform-style: preserve-3d;
   animation: menu-float 4.5s ease-in-out infinite;
 }
@@ -59,7 +59,7 @@ body,
   padding: 24px;
   box-shadow:
     0 8px 0 #16265f,
-    18px 22px 34px rgba(15, 35, 72, 0.38),
+    0px 22px 34px rgba(15, 35, 72, 0.38),
     inset 0 1px 0 rgba(255, 255, 255, 0.32);
   transform-style: preserve-3d;
 }
@@ -84,6 +84,7 @@ body,
   letter-spacing: 0.08em;
   text-transform: uppercase;
   text-shadow: 0 3px 0 rgba(0, 0, 0, 0.45);
+  text-align: center;
 }
 
 .menu-stat {
@@ -130,10 +131,10 @@ body,
 @keyframes menu-float {
   0%,
   100% {
-    transform: rotateX(8deg) rotateY(-10deg) translateY(0);
+    transform: rotateX(8deg) rotateY(0deg) translateY(0);
   }
   50% {
-    transform: rotateX(10deg) rotateY(-7deg) translateY(-8px);
+    transform: rotateX(10deg) rotateY(0deg) translateY(-8px);
   }
 }
 

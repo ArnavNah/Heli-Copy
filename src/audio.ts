@@ -8,9 +8,16 @@ export class AudioManager {
   
   // Looping engine sound
   private engineOsc: OscillatorNode | null = null;
+  private engineOsc2: OscillatorNode | null = null;
   private engineNoise: ScriptProcessorNode | null = null;
   private engineLfo: OscillatorNode | null = null;
   private engineGain: GainNode | null = null;
+
+  // Background Music Sequencer
+  private musicInterval: any = null;
+  private musicStep = 0;
+  
+  private lastExplosionTime = 0;
 
   constructor() {
     // Context is created lazily on first interaction
@@ -36,13 +43,21 @@ export class AudioManager {
   private setupEngine() {
     if (!this.ctx || !this.masterGain) return;
 
-    // Sub-bass carrier for weight
+    // Sub-bass carrier for weight (chopping sound)
     this.engineOsc = this.ctx.createOscillator();
-    this.engineOsc.type = 'sawtooth';
-    this.engineOsc.frequency.value = 40;
+    this.engineOsc.type = 'triangle';
+    this.engineOsc.frequency.value = 38;
     
     const oscGain = this.ctx.createGain();
-    oscGain.gain.value = 0.1;
+    oscGain.gain.value = 0.14;
+
+    // Secondary mid-bass hum carrier (turbine hum)
+    this.engineOsc2 = this.ctx.createOscillator();
+    this.engineOsc2.type = 'triangle';
+    this.engineOsc2.frequency.value = 76;
+    
+    const oscGain2 = this.ctx.createGain();
+    oscGain2.gain.value = 0.08;
 
     // Noise for rotor air movement
     const bufferSize = 4096;
@@ -57,18 +72,30 @@ export class AudioManager {
 
     const noiseFilter = this.ctx.createBiquadFilter();
     noiseFilter.type = 'lowpass';
-    noiseFilter.frequency.value = 400;
+    noiseFilter.frequency.value = 350;
 
     const noiseGain = this.ctx.createGain();
-    noiseGain.gain.value = 0.05;
+    noiseGain.gain.value = 0.07;
 
     // LFO for rotor RPM effect (pulsing)
     const lfo = this.ctx.createOscillator();
     lfo.type = 'sine';
-    lfo.frequency.value = 15; // 15 pulses per second
-    const lfoGain = this.ctx.createGain();
-    lfoGain.gain.value = 0.4;
+    lfo.frequency.value = 6.0; // 6 pulses per second base
     
+    // Pitch modulation for engineOsc (gives cyclic Doppler blade pitch sweep!)
+    const lfoPitchGain = this.ctx.createGain();
+    lfoPitchGain.gain.value = 5.0;
+    lfo.connect(lfoPitchGain);
+    lfoPitchGain.connect(this.engineOsc.frequency);
+
+    // Pitch modulation for engineOsc2
+    const lfoPitchGain2 = this.ctx.createGain();
+    lfoPitchGain2.gain.value = 3.0;
+    lfo.connect(lfoPitchGain2);
+    lfoPitchGain2.connect(this.engineOsc2.frequency);
+
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 0.06;
     lfo.connect(lfoGain);
     
     this.engineGain = this.ctx.createGain();
@@ -78,6 +105,9 @@ export class AudioManager {
 
     this.engineOsc.connect(oscGain);
     oscGain.connect(this.engineGain);
+
+    this.engineOsc2.connect(oscGain2);
+    oscGain2.connect(this.engineGain);
     
     noiseNode.connect(noiseFilter);
     noiseFilter.connect(noiseGain);
@@ -86,20 +116,27 @@ export class AudioManager {
     this.engineGain.connect(this.masterGain);
 
     this.engineOsc.start();
+    this.engineOsc2.start();
     this.engineLfo = lfo;
     lfo.start();
   }
 
   public updateEngine(speedFactor: number, altitude: number) {
-    if (!this.engineOsc || !this.engineGain || !this.ctx) return;
+    if (!this.engineOsc || !this.engineOsc2 || !this.engineGain || !this.engineLfo || !this.ctx) return;
     
-    // Pitch shift based on "load" (speed)
-    const pitch = 40 + (speedFactor * 30);
-    this.engineOsc.frequency.setTargetAtTime(pitch, this.ctx.currentTime, 0.1);
+    // Pitch scales with speed (load)
+    const pitch1 = 38 + (speedFactor * 16);
+    const pitch2 = 76 + (speedFactor * 32);
+    this.engineOsc.frequency.setTargetAtTime(pitch1, this.ctx.currentTime, 0.1);
+    this.engineOsc2.frequency.setTargetAtTime(pitch2, this.ctx.currentTime, 0.1);
+
+    // LFO frequency (rotor spin rate) increases dynamically under load
+    const lfoSpeed = 6.0 + (speedFactor * 3.0);
+    this.engineLfo.frequency.setTargetAtTime(lfoSpeed, this.ctx.currentTime, 0.12);
     
-    // Volume based on health/proximity (simple for now)
-    const targetVol = 0.15 + (speedFactor * 0.1);
-    this.engineGain.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.2);
+    // Volume scales up as speed increases
+    const targetVol = 0.14 + (speedFactor * 0.12);
+    this.engineGain.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.15);
   }
 
   public playLaser(x: number) {
@@ -288,7 +325,7 @@ export class AudioManager {
     osc.frequency.setValueAtTime(150, now);
     osc.frequency.exponentialRampToValueAtTime(20, now + 0.2);
     
-    g.gain.setValueAtTime(0.15, now);
+    g.gain.setValueAtTime(0.08, now);
     g.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
     
     osc.connect(g);
@@ -300,6 +337,8 @@ export class AudioManager {
   public playExplosion(intensity: number = 1.0) {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
+    if (now - this.lastExplosionTime < 0.1) return;
+    this.lastExplosionTime = now;
     
     // Noise burst
     const bufferSize = this.ctx.sampleRate * 0.5;
@@ -361,11 +400,109 @@ export class AudioManager {
     osc.stop(now + 0.05);
   }
 
+  public playLockBeep() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1400, now);
+    
+    g.gain.setValueAtTime(0.12, now);
+    g.gain.exponentialRampToValueAtTime(0.01, now + 0.075);
+    
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.08);
+  }
+
+  public startMusic() {
+    if (this.musicInterval) return;
+    this.resume();
+    this.musicStep = 0;
+    this.musicInterval = window.setInterval(this.musicTick, 115);
+  }
+
+  public stopMusic() {
+    if (this.musicInterval) {
+      window.clearInterval(this.musicInterval);
+      this.musicInterval = null;
+    }
+  }
+
+  private musicTick = () => {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    
+    // Bass note conversion (MIDI)
+    const bassMidi = [40, 40, 40, 40, 43, 43, 45, 45, 40, 40, 40, 40, 38, 38, 35, 37][this.musicStep % 16];
+    if (bassMidi > 0) {
+      const freq = 440 * Math.pow(2, (bassMidi - 69) / 12);
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now);
+      
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(180, now);
+      
+      g.gain.setValueAtTime(0.05, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(this.masterGain);
+      
+      osc.start(now);
+      osc.stop(now + 0.2);
+    }
+    
+    // Lead melody note conversion
+    const melodyMidi = [
+      64, 0, 67, 0, 69, 0, 71, 72, 71, 0, 69, 0, 67, 0, 64, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      64, 67, 69, 71, 72, 74, 76, 0, 76, 74, 72, 71, 69, 67, 64, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ][this.musicStep % 64];
+    
+    if (melodyMidi > 0) {
+      const freq = 440 * Math.pow(2, (melodyMidi - 69) / 12);
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now);
+      
+      g.gain.setValueAtTime(0.035, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      
+      osc.connect(g);
+      g.connect(this.masterGain);
+      
+      osc.start(now);
+      osc.stop(now + 0.3);
+    }
+    
+    this.musicStep++;
+  };
+
   public dispose() {
+    this.stopMusic();
+
     if (this.engineOsc) {
       this.engineOsc.stop();
       this.engineOsc.disconnect();
       this.engineOsc = null;
+    }
+
+    if (this.engineOsc2) {
+      this.engineOsc2.stop();
+      this.engineOsc2.disconnect();
+      this.engineOsc2 = null;
     }
 
     if (this.engineLfo) {

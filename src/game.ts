@@ -2,6 +2,23 @@ import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { AudioManager } from "./audio";
 
+// --- TEXTURE SYSTEM ---
+export class TextureManager {
+  static loader = new THREE.TextureLoader();
+  static textures: Record<string, THREE.Texture> = {};
+
+  static load(name: string, url: string): THREE.Texture {
+    if (this.textures[name]) return this.textures[name];
+    const texture = this.loader.load(url);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = 4;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    this.textures[name] = texture;
+    return texture;
+  }
+}
+
 // --- SHADERS ---
 
 const LowPolyVert = `
@@ -63,7 +80,10 @@ function createBox(
 ) {
   const geometry = new THREE.BoxGeometry(width, height, depth).toNonIndexed();
   geometry.computeVertexNormals();
-  return new THREE.Mesh(geometry, createLowPolyMaterial(colorHex));
+  const mesh = new THREE.Mesh(geometry, createLowPolyMaterial(colorHex));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
 }
 
 type RooftopSpot = {
@@ -84,6 +104,8 @@ type CityBlock = {
   hp: number;
   maxHp: number;
   destroyed: boolean;
+  collapseProgress?: number;
+  initialHeights?: number[];
 };
 
 type EnemyLock = {
@@ -110,6 +132,7 @@ class CityEnvironment {
   rooftopSpots: RooftopSpot[] = [];
   blocks: CityBlock[] = [];
   chunks: Map<number, WorldChunk> = new Map();
+  particles: any = null;
   cellSize = 22;
   chunkDepth = 132;
   halfWidthCells = 8;
@@ -144,7 +167,7 @@ class CityEnvironment {
       : this.getSpawnSpot(playerPos);
   }
 
-  update(playerZ: number, world: CANNON.World) {
+  update(playerZ: number, world: CANNON.World, delta = 0.016) {
     const center = Math.floor(playerZ / this.chunkDepth);
     for (let id = center - this.activeAhead; id <= center + this.activeBehind; id++) {
       if (!this.chunks.has(id)) this.generateChunk(id, world);
@@ -155,6 +178,29 @@ class CityEnvironment {
         this.group.remove(chunk.group);
         for (const body of chunk.bodies) world.removeBody(body);
         this.chunks.delete(id);
+      }
+    }
+
+    // Crumbling building animations
+    for (const block of this.blocks) {
+      if (block.destroyed && block.collapseProgress !== undefined && block.collapseProgress < 1.0) {
+        block.collapseProgress = Math.min(1.0, block.collapseProgress + delta * 2.0); // collapses over 0.5s
+        
+        block.meshes.forEach((mesh, idx) => {
+          const t = block.collapseProgress!;
+          const ease = t * t * (3 - 2 * t);
+          
+          const initialY = block.initialHeights ? block.initialHeights[idx] : mesh.position.y;
+          const targetY = Math.max(0.35, initialY * 0.18);
+          mesh.position.y = THREE.MathUtils.lerp(initialY, targetY, ease);
+          
+          mesh.scale.y = THREE.MathUtils.lerp(1.0, 0.18, ease);
+          
+          // Crumble shaking offset
+          const shakeFactor = (1.0 - ease) * 0.45;
+          mesh.position.x = block.x + (Math.random() - 0.5) * shakeFactor;
+          mesh.position.z = block.z + (Math.random() - 0.5) * shakeFactor;
+        });
       }
     }
 
@@ -341,6 +387,10 @@ class CityEnvironment {
       const helipad = createBox(Math.min(width, 10), 0.22, Math.min(depth, 10), 0x1b2740);
       helipad.position.set(x, height + 1.18, z);
       chunk.group.add(helipad);
+      
+      const hMarker = createBox(3.5, 0.28, 3.5, 0xe9df9a);
+      hMarker.position.set(x, height + 1.22, z);
+      chunk.group.add(hMarker);
     } else if (seed > 0.75) {
       const tower = createBox(0.8, 7, 0.8, 0x151b2c);
       tower.position.set(x + width * 0.22, height + 4.2, z - depth * 0.18);
@@ -349,10 +399,20 @@ class CityEnvironment {
       dish.position.set(tower.position.x, height + 8, tower.position.z);
       dish.rotation.z = Math.PI / 7;
       chunk.group.add(dish);
+    } else if (seed > 0.55) {
+      // Multiple AC Units
+      for (let i=0; i<3; i++) {
+        const ac = createBox(1.5, 1.4, 1.5, 0x222b39);
+        ac.position.set(x - width*0.15 + i*2.5, height + 1.7, z + depth*0.15);
+        chunk.group.add(ac);
+      }
     } else {
-      const vent = createBox(width * 0.36, 1.4, depth * 0.32, 0x222b39);
-      vent.position.set(x, height + 1.7, z);
-      chunk.group.add(vent);
+      // Water Tower
+      const legs = createBox(2, 3, 2, 0x222b39);
+      legs.position.set(x, height + 2.5, z);
+      const tank = createBox(2.8, 3, 2.8, 0x4a5369);
+      tank.position.set(x, height + 5.5, z);
+      chunk.group.add(legs, tank);
     }
   }
 
@@ -401,6 +461,22 @@ class CityEnvironment {
       const stripe = createBox(1.2, 0.09, 7, 0xe9df9a);
       stripe.position.set(roadX, -0.04, chunkCenterZ + i * 18);
       chunk.group.add(stripe);
+
+      // Ambient Traffic (Static Cars)
+      if (this.hash(id, i * 43) > 0.4) {
+        const isForward = this.hash(id, i * 17) > 0.5;
+        const carLane = isForward ? 4.5 : -4.5;
+        const carZ = chunkCenterZ + i * 18 + (this.hash(id, i * 11) - 0.5) * 10;
+        
+        const carColor = [0x992222, 0x225599, 0x999999, 0x222222, 0x887722][Math.floor(this.hash(id, i * 3) * 5)];
+        const carBody = createBox(2.8, 1.2, 5.5, carColor);
+        carBody.position.set(roadX + carLane, 0.6, carZ);
+        
+        const carRoof = createBox(2.4, 0.8, 3.0, 0x111111);
+        carRoof.position.set(roadX + carLane, 1.6, carZ - 0.5);
+        
+        chunk.group.add(carBody, carRoof);
+      }
     }
 
     const detailPalettes: Record<string, number[]> = {
@@ -524,13 +600,25 @@ class CityEnvironment {
 
     if (block.hp > 0 || block.destroyed) return;
     block.destroyed = true;
+    block.collapseProgress = 0;
+    block.initialHeights = block.meshes.map((m) => m.position.y);
+
+    if (this.particles) {
+      this.particles.spawnExplosion(
+        block.x,
+        block.height * 0.5,
+        block.z,
+        60, // large particle count
+        performance.now() / 1000,
+        block.width * 1.5, // large size scale
+      );
+    }
+
     if (block.body) {
       block.body.collisionFilterMask = 0;
       block.body.collisionResponse = false;
     }
     for (const mesh of block.meshes) {
-      mesh.scale.y = 0.18;
-      mesh.position.y = Math.max(0.35, mesh.position.y * 0.18);
       const mat = mesh.material;
       if (mat instanceof THREE.MeshLambertMaterial) {
         mat.color.setHex(0x26242a);
@@ -931,146 +1019,190 @@ class Helicopter extends Entity {
 
     const baseGroup = new THREE.Group();
 
-    const bodyMat = createLowPolyMaterial(0x2f4a35);
-    const darkBodyMat = createLowPolyMaterial(0x1b2a20);
-    const accentMat = createLowPolyMaterial(0xd13a2f);
-    const glassMat = createLowPolyMaterial(0x172f3d);
-    const metalMat = createLowPolyMaterial(0xaeb9b0);
-    const bladeMat = createLowPolyMaterial(0x161c19);
-    const ordnanceMat = createLowPolyMaterial(0x232b27);
+    // --- APACHE HELICOPTER REDESIGN ---
+    const bodyMat = createLowPolyMaterial(0x2d3a2e); // Dark Military Green
+    const darkBodyMat = createLowPolyMaterial(0x1a211a);
+    const glassMat = createLowPolyMaterial(0x1c2b33);
+    const metalMat = createLowPolyMaterial(0x5a6360);
+    const bladeMat = createLowPolyMaterial(0x161a18);
+    const ordnanceMat = createLowPolyMaterial(0x212b25);
+    const accentMat = createLowPolyMaterial(0xb33127);
 
-    const bodyMesh = createBox(2.55, 1.25, 3.9, 0x2f4a35);
-    bodyMesh.material = bodyMat;
-    bodyMesh.position.set(0, -0.05, 0.05);
-    baseGroup.add(bodyMesh);
+    // Main Fuselage
+    const fuselage = createBox(2.2, 1.6, 5.8, 0x2d3a2e);
+    fuselage.material = bodyMat;
+    fuselage.position.set(0, 0, -0.5);
+    baseGroup.add(fuselage);
 
-    const nose = createBox(1.45, 0.82, 1.55, 0x35523c);
+    // Nose & Sensor Pod
+    const nose = createBox(1.5, 1.2, 2.2, 0x2d3a2e);
     nose.material = bodyMat;
-    nose.position.set(0, -0.12, 2.65);
+    nose.position.set(0, -0.2, 3.5);
     baseGroup.add(nose);
+    
+    const sensorPod = createBox(0.8, 0.7, 1.0, 0x1a211a);
+    sensorPod.material = darkBodyMat;
+    sensorPod.position.set(0, -0.9, 4.0);
+    baseGroup.add(sensorPod);
 
-    const rearCanopy = createBox(1.25, 0.48, 0.95, 0x172f3d);
+    const chinGunMount = createBox(0.5, 0.6, 0.5, 0x212b25);
+    chinGunMount.material = ordnanceMat;
+    chinGunMount.position.set(0, -1.0, 3.2);
+    const chinBarrel = createBox(0.15, 0.15, 1.8, 0x161a18);
+    chinBarrel.material = bladeMat;
+    chinBarrel.position.set(0, -1.1, 4.0);
+    baseGroup.add(chinGunMount, chinBarrel);
+
+    // Tandem Cockpit
+    const rearCanopy = createBox(1.2, 0.8, 1.5, 0x1c2b33);
     rearCanopy.material = glassMat;
-    rearCanopy.position.set(0, 0.58, 0.9);
-    rearCanopy.rotation.x = -0.12;
+    rearCanopy.position.set(0, 0.9, 1.2);
+    rearCanopy.rotation.x = -0.05;
     baseGroup.add(rearCanopy);
 
-    const frontCanopy = createBox(1.05, 0.42, 0.82, 0x172f3d);
+    const frontCanopy = createBox(1.1, 0.6, 1.4, 0x1c2b33);
     frontCanopy.material = glassMat;
-    frontCanopy.position.set(0, 0.5, 1.85);
-    frontCanopy.rotation.x = -0.16;
+    frontCanopy.position.set(0, 0.6, 2.6);
+    frontCanopy.rotation.x = -0.15;
     baseGroup.add(frontCanopy);
 
-    const cheekLeft = createBox(0.42, 0.42, 1.25, 0x1b2a20);
-    cheekLeft.material = darkBodyMat;
-    cheekLeft.position.set(-0.95, -0.1, 1.65);
-    cheekLeft.rotation.z = 0.12;
-    const cheekRight = cheekLeft.clone();
-    cheekRight.position.x = 0.95;
-    cheekRight.rotation.z = -0.12;
-    baseGroup.add(cheekLeft, cheekRight);
+    // Engine Intakes (Sides)
+    const engineLeft = createBox(1.0, 0.9, 2.8, 0x1a211a);
+    engineLeft.material = darkBodyMat;
+    engineLeft.position.set(-1.4, 0.4, -0.8);
+    const engineRight = engineLeft.clone();
+    engineRight.position.x = 1.4;
+    baseGroup.add(engineLeft, engineRight);
 
-    const tail = createBox(0.48, 0.48, 4.6, 0x2f4a35);
-    tail.material = bodyMat;
-    tail.position.set(0, 0.04, -3.55);
-    baseGroup.add(tail);
+    // Tail Boom
+    const tailBoom = createBox(0.7, 0.9, 6.2, 0x2d3a2e);
+    tailBoom.material = bodyMat;
+    tailBoom.position.set(0, 0.1, -6.0);
+    baseGroup.add(tailBoom);
 
-    const tailFin = createBox(1.1, 1.85, 0.28, 0x1b2a20);
+    const tailFin = createBox(0.3, 2.4, 1.4, 0x1a211a);
     tailFin.material = darkBodyMat;
-    tailFin.position.set(0, 0.92, -5.95);
-    tailFin.rotation.z = 0.08;
+    tailFin.position.set(0, 1.1, -8.4);
+    tailFin.rotation.x = 0.15;
     baseGroup.add(tailFin);
 
-    const tailStabilizer = createBox(2.4, 0.16, 0.4, 0x1b2a20);
-    tailStabilizer.material = darkBodyMat;
-    tailStabilizer.position.set(0, 0.05, -5.55);
+    const tailStabilizer = createBox(3.0, 0.15, 0.8, 0x2d3a2e);
+    tailStabilizer.material = bodyMat;
+    tailStabilizer.position.set(0, 0.2, -7.8);
     baseGroup.add(tailStabilizer);
 
-    const mast = createBox(0.34, 0.78, 0.34, 0xaeb9b0);
+    // Stub Wings
+    const stubWingLeft = createBox(3.8, 0.25, 1.4, 0x2d3a2e);
+    stubWingLeft.material = bodyMat;
+    stubWingLeft.position.set(-2.5, -0.1, 0.2);
+    stubWingLeft.rotation.z = -0.05;
+    const stubWingRight = stubWingLeft.clone();
+    stubWingRight.position.x = 2.5;
+    stubWingRight.rotation.z = 0.05;
+    baseGroup.add(stubWingLeft, stubWingRight);
+
+    // Pylons and Missiles
+    const pylonOffsets = [-3.8, -2.6, 2.6, 3.8];
+    pylonOffsets.forEach((px) => {
+      const pylon = createBox(0.2, 0.5, 0.8, 0x212b25);
+      pylon.material = ordnanceMat;
+      pylon.position.set(px, -0.4, 0.2);
+      baseGroup.add(pylon);
+
+      // Rocket pod
+      const pod = createBox(0.6, 0.6, 1.4, 0x1a211a);
+      pod.material = darkBodyMat;
+      pod.position.set(px, -0.8, 0.2);
+      baseGroup.add(pod);
+
+      const tip = createBox(0.2, 0.2, 0.3, 0xb33127);
+      tip.material = accentMat;
+      tip.position.set(px, -0.8, 0.95);
+      baseGroup.add(tip);
+    });
+
+    // Landing Gear (Wheels)
+    const gearStrutL = createBox(0.2, 1.2, 0.2, 0x5a6360);
+    gearStrutL.material = metalMat;
+    gearStrutL.position.set(-1.2, -1.2, 1.5);
+    const gearStrutR = gearStrutL.clone();
+    gearStrutR.position.x = 1.2;
+    const gearStrutRear = createBox(0.2, 1.0, 0.2, 0x5a6360);
+    gearStrutRear.material = metalMat;
+    gearStrutRear.position.set(0, -0.8, -4.5);
+    baseGroup.add(gearStrutL, gearStrutR, gearStrutRear);
+
+    const wheelGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 8).toNonIndexed();
+    wheelGeo.computeVertexNormals();
+    const wheelMat = createLowPolyMaterial(0x111111);
+    const wheelL = new THREE.Mesh(wheelGeo, wheelMat);
+    wheelL.rotation.z = Math.PI / 2;
+    wheelL.position.set(-1.3, -1.8, 1.5);
+    const wheelR = wheelL.clone();
+    wheelR.position.x = 1.3;
+    const wheelRear = wheelL.clone();
+    wheelRear.position.set(0, -1.3, -4.5);
+    baseGroup.add(wheelL, wheelR, wheelRear);
+
+    // Mast & Rotor
+    const mast = createBox(0.6, 1.5, 0.6, 0x5a6360);
     mast.material = metalMat;
-    mast.position.set(0, 0.98, 0.05);
+    mast.position.set(0, 1.4, -0.2);
     baseGroup.add(mast);
 
     this.mainRotor = new THREE.Group();
-    this.mainRotor.position.set(0, 1.52, 0.05);
-    const blade1 = createBox(0.24, 0.07, 9.6, 0x161c19);
-    blade1.material = bladeMat;
-    const blade2 = createBox(9.6, 0.07, 0.24, 0x161c19);
-    blade2.material = bladeMat;
-    const blade3 = createBox(0.24, 0.07, 9.6, 0x161c19);
-    blade3.material = bladeMat;
-    blade3.rotation.y = Math.PI / 4;
-    const blade4 = createBox(9.6, 0.07, 0.24, 0x161c19);
-    blade4.material = bladeMat;
-    blade4.rotation.y = Math.PI / 4;
-    this.mainRotor.add(blade1, blade2, blade3, blade4);
+    this.mainRotor.position.set(0, 2.1, -0.2);
+    
+    // Rotor hub
+    const hub = createBox(1.2, 0.2, 1.2, 0x5a6360);
+    hub.material = metalMat;
+    this.mainRotor.add(hub);
+
+    for (let i = 0; i < 4; i++) {
+      const blade = createBox(0.35, 0.05, 11.0, 0x161a18);
+      blade.material = bladeMat;
+      blade.position.set(0, 0, 5.5); // Pivot at hub
+      
+      const bladePivot = new THREE.Group();
+      bladePivot.rotation.y = (Math.PI / 2) * i;
+      bladePivot.add(blade);
+      this.mainRotor.add(bladePivot);
+    }
+
+    // Rotor Blur Disc (Transparent)
+    const blurGeo = new THREE.CylinderGeometry(11.5, 11.5, 0.05, 16);
+    const blurMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.15, depthWrite: false });
+    const blurDisc = new THREE.Mesh(blurGeo, blurMat);
+    blurDisc.name = "rotorBlur";
+    blurDisc.visible = false;
+    this.mainRotor.add(blurDisc);
     baseGroup.add(this.mainRotor);
 
     this.tailRotor = new THREE.Group();
-    this.tailRotor.position.set(0.66, 0.48, -6.05);
-    const tailBladeA = createBox(0.1, 1.55, 0.18, 0x161c19);
-    tailBladeA.material = bladeMat;
-    const tailBladeB = createBox(0.1, 0.18, 1.55, 0x161c19);
-    tailBladeB.material = bladeMat;
-    this.tailRotor.add(tailBladeA, tailBladeB);
-    baseGroup.add(this.tailRotor);
+    this.tailRotor.position.set(0.3, 1.8, -8.5);
+    
+    const tailHub = createBox(0.2, 0.4, 0.4, 0x5a6360);
+    tailHub.material = metalMat;
+    this.tailRotor.add(tailHub);
 
-    const stubWingLeft = createBox(3.25, 0.22, 0.9, 0x1f3328);
-    stubWingLeft.material = darkBodyMat;
-    stubWingLeft.position.set(-1.9, -0.18, -0.35);
-    stubWingLeft.rotation.z = -0.08;
-    const stubWingRight = stubWingLeft.clone();
-    stubWingRight.position.x = 1.9;
-    stubWingRight.rotation.z = 0.08;
-    baseGroup.add(stubWingLeft, stubWingRight);
-
-    const podLeft = createBox(0.62, 0.62, 1.2, 0x232b27);
-    podLeft.material = ordnanceMat;
-    podLeft.position.set(-3.05, -0.28, -0.35);
-    const podRight = podLeft.clone();
-    podRight.position.x = 3.05;
-    baseGroup.add(podLeft, podRight);
-
-    for (let i = 0; i < 3; i++) {
-      const rocketL = createBox(0.16, 0.16, 0.9, 0xd13a2f);
-      rocketL.material = accentMat;
-      rocketL.position.set(-3.06 + (i - 1) * 0.19, -0.66, -0.35);
-      const rocketR = rocketL.clone();
-      rocketR.position.x = 3.06 + (i - 1) * 0.19;
-      baseGroup.add(rocketL, rocketR);
+    for (let i = 0; i < 4; i++) {
+      const blade = createBox(0.05, 1.8, 0.15, 0x161a18);
+      blade.material = bladeMat;
+      blade.position.set(0, 0.9, 0); // Pivot at hub
+      
+      const bladePivot = new THREE.Group();
+      bladePivot.rotation.x = (Math.PI / 2) * i;
+      bladePivot.add(blade);
+      this.tailRotor.add(bladePivot);
     }
-
-    const chinMount = createBox(0.48, 0.32, 0.42, 0x232b27);
-    chinMount.material = ordnanceMat;
-    chinMount.position.set(0, -0.78, 2.55);
-    const chinBarrel = createBox(0.16, 0.16, 1.15, 0x161c19);
-    chinBarrel.material = bladeMat;
-    chinBarrel.position.set(0, -0.82, 3.2);
-    baseGroup.add(chinMount, chinBarrel);
-
-    const skid1 = createBox(0.16, 0.14, 4.25, 0xaeb9b0);
-    skid1.material = metalMat;
-    skid1.position.set(1.15, -0.98, 0.15);
-    const skid2 = createBox(0.16, 0.14, 4.25, 0xaeb9b0);
-    skid2.material = metalMat;
-    skid2.position.set(-1.15, -0.98, 0.15);
-    const s1 = createBox(0.12, 0.82, 0.12, 0xaeb9b0);
-    s1.material = metalMat;
-    s1.position.set(1.15, -0.58, 1.35);
-    s1.rotation.z = Math.PI / 12;
-    const s2 = createBox(0.12, 0.82, 0.12, 0xaeb9b0);
-    s2.material = metalMat;
-    s2.position.set(1.15, -0.58, -1.25);
-    s2.rotation.z = Math.PI / 12;
-    const s3 = createBox(0.12, 0.82, 0.12, 0xaeb9b0);
-    s3.material = metalMat;
-    s3.position.set(-1.15, -0.58, 1.35);
-    s3.rotation.z = -Math.PI / 12;
-    const s4 = createBox(0.12, 0.82, 0.12, 0xaeb9b0);
-    s4.material = metalMat;
-    s4.position.set(-1.15, -0.58, -1.25);
-    s4.rotation.z = -Math.PI / 12;
-    baseGroup.add(skid1, skid2, s1, s2, s3, s4);
+    
+    const tailBlurGeo = new THREE.CylinderGeometry(1.9, 1.9, 0.05, 12);
+    const tailBlurDisc = new THREE.Mesh(tailBlurGeo, blurMat);
+    tailBlurDisc.rotation.z = Math.PI / 2;
+    tailBlurDisc.name = "tailBlur";
+    tailBlurDisc.visible = false;
+    this.tailRotor.add(tailBlurDisc);
+    baseGroup.add(this.tailRotor);
 
     this.mesh = baseGroup;
     this.mesh.rotation.order = "YXZ";
@@ -1303,25 +1435,58 @@ class Helicopter extends Entity {
     this.mesh.rotation.z +=
       (targetTiltZ - this.mesh.rotation.z) * tiltSmoothing;
 
-    // Spool up rotors based on load + Damage Jitter + Drooping
+    // Spool up rotors based on load + Damage Jitter
     const rotorJitter = this.rotorHealth < 30 ? Math.sin(time * 60) * 0.05 : 0;
-    this.mainRotor.position.y = 1.55 + rotorJitter;
+    this.mainRotor.position.y = 2.1 + rotorJitter; // Adjusted for Apache mast height
 
-    // Droop/Bend blades if damaged
-    const droopAmount = Math.max(0, (100 - this.rotorHealth) / 100) * 0.15;
-    this.mainRotor.children.forEach((blade, i) => {
-      if (blade instanceof THREE.Mesh) {
-        // Apply a slight individual tilt/bend to each blade
-        blade.rotation.x =
-          (i === 0 ? droopAmount : 0) + Math.sin(time * 2) * droopAmount * 0.5;
-        blade.rotation.z =
-          (i === 1 ? droopAmount : 0) + Math.cos(time * 2) * droopAmount * 0.5;
-      }
+    this.updatePhysics(this.body.velocity, targetTiltZ, delta);
+    this.animateRotors(inputSpeed, 60);
+  }
+  rotorSpeed: number = 0;
+
+  updatePhysics(velocity: CANNON.Vec3, bankingAngle: number, delta: number) {
+    if (this.active && this.mesh && this.body) {
+      this.mesh.position.copy(this.body.position as any);
+      
+      // Banking animation
+      this.mesh.rotation.z = THREE.MathUtils.lerp(
+        this.mesh.rotation.z,
+        bankingAngle * -0.35,
+        delta * 5.0
+      );
+      this.mesh.rotation.x = THREE.MathUtils.lerp(
+        this.mesh.rotation.x,
+        velocity.z * 0.02,
+        delta * 5.0
+      );
+    }
+  }
+
+  animateRotors(forceMag: number, maxForce: number) {
+    const rotorEff = this.rotorHealth / 100;
+    
+    // Accelerate rotor speed based on force
+    const targetSpeed = (0.75 + (forceMag / maxForce) * 0.45) * rotorEff;
+    this.rotorSpeed = THREE.MathUtils.lerp(this.rotorSpeed, targetSpeed, 0.05);
+
+    this.mainRotor.rotation.y += this.rotorSpeed;
+    this.tailRotor.rotation.x += this.rotorSpeed * 1.2;
+
+    // Toggle Blur meshes based on speed
+    const isFast = this.rotorSpeed > 0.4;
+    const blurDisc = this.mainRotor.getObjectByName("rotorBlur");
+    const tailBlurDisc = this.tailRotor.getObjectByName("tailBlur");
+    
+    if (blurDisc) blurDisc.visible = isFast;
+    if (tailBlurDisc) tailBlurDisc.visible = isFast;
+
+    // Hide distinct blades when fast for blur effect
+    this.mainRotor.children.forEach(c => {
+      if (c.name !== "rotorBlur" && c.type === "Group") c.visible = !isFast;
     });
-
-    this.mainRotor.rotation.y +=
-      (0.75 + (forceMag / maxForce) * 0.45) * rotorEff;
-    this.tailRotor.rotation.x += 0.85 * rotorEff;
+    this.tailRotor.children.forEach(c => {
+      if (c.name !== "tailBlur" && c.type === "Group") c.visible = !isFast;
+    });
   }
 }
 
@@ -1442,6 +1607,8 @@ class Enemy extends Entity {
   evadeTimer: number = 0;
   lastDecisionTime: number = 0;
   flankDir: number = 1;
+  enemyRotor: THREE.Group | null = null;
+  enemyTailRotor: THREE.Group | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -1492,39 +1659,132 @@ class Enemy extends Entity {
 
     this.hp = this.maxHp;
 
-    const pad = createBox(radius * 2.2, 0.45, radius * 2.2, 0x18265a);
-    pad.position.y = -0.55;
-    baseGroup.add(pad);
+    if (type === EnemyType.BOSS) {
+      // Big Boss Helicopter
+      this.ring = new THREE.Group();
+      this.ring.position.y = 0.2;
 
-    const base = createBox(radius * 1.5, 0.8, radius * 1.5, coreHex);
-    base.position.y = -0.05;
-    baseGroup.add(base);
+      const hull = createBox(radius * 1.1, radius * 0.75, radius * 1.9, coreHex);
+      this.ring.add(hull);
 
-    this.ring = new THREE.Group();
-    this.ring.position.y = 0.55;
+      const tailBoom = createBox(radius * 0.3, radius * 0.3, radius * 1.8, coreHex);
+      tailBoom.position.set(0, 0, -radius * 1.4);
+      this.ring.add(tailBoom);
 
-    const head = createBox(radius * 1.15, radius * 0.75, radius, coreHex);
-    this.ring.add(head);
+      const tailFin = createBox(radius * 0.12, radius * 0.75, radius * 0.35, accentHex);
+      tailFin.position.set(0, radius * 0.35, -radius * 2.1);
+      this.ring.add(tailFin);
 
-    const barrel = createBox(
-      radius * 0.35,
-      radius * 0.32,
-      radius * 1.9,
-      accentHex,
-    );
-    barrel.position.z = radius * 0.95;
-    this.ring.add(barrel);
+      const glass = createBox(radius * 0.6, radius * 0.4, radius * 0.7, 0x172f3d);
+      glass.position.set(0, radius * 0.2, radius * 0.95);
+      this.ring.add(glass);
 
-    const sight = createBox(
-      radius * 0.35,
-      radius * 0.35,
-      radius * 0.35,
-      0xffff7a,
-    );
-    sight.position.set(0, radius * 0.42, radius * 0.2);
-    this.ring.add(sight);
+      // Main rotor
+      const rotorGroup = new THREE.Group();
+      rotorGroup.position.set(0, radius * 0.65, 0);
+      for (let i = 0; i < 4; i++) {
+        const blade = createBox(radius * 0.12, radius * 0.03, radius * 1.5, 0x111111);
+        blade.rotation.y = (i * Math.PI) / 2;
+        blade.position.z = radius * 0.7;
+        rotorGroup.add(blade);
+      }
+      this.ring.add(rotorGroup);
+      this.enemyRotor = rotorGroup;
 
-    baseGroup.add(this.ring);
+      // Tail rotor
+      const tailRotorGroup = new THREE.Group();
+      tailRotorGroup.position.set(radius * 0.2, radius * 0.35, -radius * 2.1);
+      for (let i = 0; i < 2; i++) {
+        const blade = createBox(radius * 0.03, radius * 0.08, radius * 0.45, 0x111111);
+        blade.rotation.x = (i * Math.PI) / 2;
+        tailRotorGroup.add(blade);
+      }
+      this.ring.add(tailRotorGroup);
+      this.enemyTailRotor = tailRotorGroup;
+
+      baseGroup.add(this.ring);
+
+    } else if (type === EnemyType.TANK) {
+      // Flakpanzer (Anti-Air Tank)
+      this.ring = new THREE.Group();
+      
+      const tracksL = createBox(1.2, 0.6, 3.8, 0x111111);
+      tracksL.position.set(-1.4, -0.2, 0);
+      const tracksR = createBox(1.2, 0.6, 3.8, 0x111111);
+      tracksR.position.set(1.4, -0.2, 0);
+      
+      const hull = createBox(2.2, 0.9, 3.4, coreHex);
+      hull.position.set(0, 0.3, 0);
+      
+      const turret = createBox(1.8, 0.8, 2.0, accentHex);
+      turret.position.set(0, 1.1, -0.2);
+      
+      const barrelL = createBox(0.2, 0.2, 2.2, 0x333333);
+      barrelL.position.set(-0.5, 1.2, 1.6);
+      const barrelR = barrelL.clone();
+      barrelR.position.x = 0.5;
+      
+      this.ring.add(tracksL, tracksR, hull, turret, barrelL, barrelR);
+      baseGroup.add(this.ring);
+
+    } else if (type === EnemyType.DRONE) {
+      // Quadcopter
+      this.ring = new THREE.Group();
+      
+      const core = createBox(1.2, 0.5, 1.2, coreHex);
+      this.ring.add(core);
+      
+      const sensor = createBox(0.6, 0.4, 0.6, accentHex);
+      sensor.position.set(0, -0.3, 0.4);
+      this.ring.add(sensor);
+      
+      this.enemyRotor = new THREE.Group();
+      const armOffsets = [
+        [-1.3, -1.3], [1.3, -1.3], [-1.3, 1.3], [1.3, 1.3]
+      ];
+      
+      armOffsets.forEach(([px, pz]) => {
+        const arm = createBox(1.6, 0.15, 0.15, 0x333333);
+        arm.position.set(px/2, 0, pz/2);
+        arm.rotation.y = Math.atan2(pz, px);
+        this.ring.add(arm);
+        
+        const motor = createBox(0.4, 0.6, 0.4, accentHex);
+        motor.position.set(px, 0.1, pz);
+        this.ring.add(motor);
+        
+        const bladeGroup = new THREE.Group();
+        bladeGroup.position.set(px, 0.45, pz);
+        const blade = createBox(1.5, 0.05, 0.2, 0x111111);
+        bladeGroup.add(blade);
+        this.enemyRotor!.add(bladeGroup);
+      });
+      this.ring.add(this.enemyRotor);
+      baseGroup.add(this.ring);
+
+    } else {
+      // Heavy Gunship (SHOOTER & BASIC)
+      this.ring = new THREE.Group();
+      
+      const fuselage = createBox(radius * 0.9, radius * 0.7, radius * 2.2, coreHex);
+      this.ring.add(fuselage);
+      
+      const wing = createBox(radius * 2.8, radius * 0.15, radius * 0.6, coreHex);
+      wing.position.set(0, 0, -radius * 0.2);
+      this.ring.add(wing);
+      
+      const engineL = createBox(radius * 0.4, radius * 0.4, radius * 0.8, accentHex);
+      engineL.position.set(-radius * 0.9, 0, -radius * 0.2);
+      const engineR = engineL.clone();
+      engineR.position.x = radius * 0.9;
+      this.ring.add(engineL, engineR);
+      
+      const cockpit = createBox(radius * 0.5, radius * 0.4, radius * 0.8, 0x172f3d);
+      cockpit.position.set(0, radius * 0.4, radius * 0.6);
+      this.ring.add(cockpit);
+      
+      baseGroup.add(this.ring);
+    }
 
     this.mesh = baseGroup;
     scene.add(this.mesh);
@@ -1604,6 +1864,7 @@ class Enemy extends Entity {
     if (this.type === EnemyType.TANK) speed = 15;
     else if (this.type === EnemyType.SHOOTER) speed = 20;
     else if (this.type === EnemyType.BOSS) speed = 10;
+    else if (this.type === EnemyType.BASIC) speed = 18;
     
     if (dist > 35) {
       this.body.velocity.set(dirX * speed, 0, dirZ * speed);
@@ -1655,6 +1916,13 @@ class Enemy extends Entity {
     this.ring.rotation.y = Math.atan2(dirX, dirZ);
     this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.04;
 
+    if (this.enemyRotor) {
+      this.enemyRotor.rotation.y = time * 24.0;
+    }
+    if (this.enemyTailRotor) {
+      this.enemyTailRotor.rotation.x = time * 28.0;
+    }
+
     return fired;
   }
 }
@@ -1673,7 +1941,10 @@ class Projectile {
   lifetime = 1.35;
 
   constructor(scene: THREE.Scene, colorHex: number) {
-    let geom = new THREE.BoxGeometry(0.22, 0.22, 8.0).toNonIndexed();
+    let geom = new THREE.CylinderGeometry(0.04, 0.28, 7.5, 5).toNonIndexed();
+    geom.rotateX(Math.PI / 2); // Align with Z axis
+    geom.computeVertexNormals();
+
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       blending: THREE.AdditiveBlending,
@@ -1682,7 +1953,10 @@ class Projectile {
     });
     this.mesh = new THREE.Mesh(geom, mat);
 
-    const glowGeom = new THREE.BoxGeometry(0.75, 0.75, 10.5).toNonIndexed();
+    const glowGeom = new THREE.CylinderGeometry(0.18, 0.65, 9.5, 5).toNonIndexed();
+    glowGeom.rotateX(Math.PI / 2);
+    glowGeom.computeVertexNormals();
+
     const glowMat = new THREE.MeshBasicMaterial({
       color: colorHex,
       blending: THREE.AdditiveBlending,
@@ -1737,7 +2011,7 @@ class Projectile {
     this.mesh.rotation.y = angle;
   }
 
-  update(now: number, delta: number) {
+  update(now: number, delta: number, particles?: GPUParticleSystem) {
     this.prevPos.copy(this.pos);
 
     if (this.homingStrength > 0 && this.target?.active) {
@@ -1765,9 +2039,30 @@ class Projectile {
     this.pos.y += this.vel.y * delta;
     this.pos.z += this.vel.z * delta;
 
+    if (particles && this.active && this.blastRadius > 0) {
+      // Missile / Rocket Trails (Smoke and Engine Flame)
+      if (Math.random() < 0.6) {
+        particles.spawnSmoke(this.pos.x, this.pos.y, this.pos.z, now);
+      }
+      if (Math.random() < 0.25) {
+        particles.spawnSparks(this.pos.x, this.pos.y, this.pos.z, now);
+        particles.spawnSparks(this.pos.x, this.pos.y, this.pos.z, now); // Double sparks for engine flame
+      }
+    }
+
     this.mesh.position.set(this.pos.x, this.pos.y, this.pos.z);
     this.mesh.rotation.y = Math.atan2(this.vel.x, this.vel.z);
     this.mesh.updateMatrix();
+
+    // Dynamic fade-out over lifetime
+    const age = now - this.spawnTime;
+    const lifeRatio = age / this.lifetime;
+    this.mesh.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
+        const baseOpacity = child === this.mesh ? 0.95 : 0.22;
+        child.material.opacity = baseOpacity * Math.max(0, 1.0 - lifeRatio);
+      }
+    });
 
     if (now - this.spawnTime > this.lifetime) {
       this.deactivate();
@@ -1786,29 +2081,25 @@ function distancePointToProjectileSegmentSq(
   to: CANNON.Vec3,
 ) {
   const sx = to.x - from.x;
-  const sy = to.y - from.y;
   const sz = to.z - from.z;
-  const lenSq = sx * sx + sy * sy + sz * sz;
+  const lenSq = sx * sx + sz * sz;
   if (lenSq < 0.0001) {
     const dx = point.x - to.x;
-    const dy = point.y - to.y;
     const dz = point.z - to.z;
-    return dx * dx + dy * dy + dz * dz;
+    return dx * dx + dz * dz;
   }
 
   const t = THREE.MathUtils.clamp(
-    ((point.x - from.x) * sx + (point.y - from.y) * sy + (point.z - from.z) * sz) /
+    ((point.x - from.x) * sx + (point.z - from.z) * sz) /
       lenSq,
     0,
     1,
   );
   const closestX = from.x + sx * t;
-  const closestY = from.y + sy * t;
   const closestZ = from.z + sz * t;
   const dx = point.x - closestX;
-  const dy = point.y - closestY;
   const dz = point.z - closestZ;
-  return dx * dx + dy * dy + dz * dz;
+  return dx * dx + dz * dz;
 }
 
 // --- POWERUP CLASS ---
@@ -1934,9 +2225,9 @@ class ProjectilePool {
     }
   }
 
-  updatePositions(now: number, delta: number) {
+  updatePositions(now: number, delta: number, particles?: GPUParticleSystem) {
     for (const p of this.pool) {
-      if (p.active) p.update(now, delta);
+      if (p.active) p.update(now, delta, particles);
     }
   }
 
@@ -2047,6 +2338,8 @@ export class GameEngine {
   directorTimer = 0;
   battlefieldEventTimer = 18;
   lastSpawnSoundTime = 0;
+  lastBuildingHitSoundTime = 0;
+  lastEnemyFireSoundTime = 0;
 
   // Wave System
   currentWave: number = 0;
@@ -2082,6 +2375,14 @@ export class GameEngine {
   muzzleFlip: number = 1;
   reloadTimer: number = 0;
   isReloading: boolean = false;
+  isPaintingLocks: boolean = false;
+  salvoLocks: Enemy[] = [];
+  salvoCooldownTimer: number = 0;
+  lastLockPaintTime: number = 0;
+  salvoCooldown: number = 5.0;
+  lockPaintInterval: number = 0.18;
+  lockSearchRadius: number = 38;
+  salvoLockIndicators: Map<Enemy, THREE.Group> = new Map();
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -2092,6 +2393,9 @@ export class GameEngine {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setClearColor(0x9fdce8);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x9fdce8);
@@ -2115,6 +2419,15 @@ export class GameEngine {
 
     const softKey = new THREE.DirectionalLight(0xffffff, 0.7);
     softKey.position.set(-35, 70, 45);
+    softKey.castShadow = true;
+    softKey.shadow.camera.left = -150;
+    softKey.shadow.camera.right = 150;
+    softKey.shadow.camera.top = 150;
+    softKey.shadow.camera.bottom = -150;
+    softKey.shadow.camera.near = 0.5;
+    softKey.shadow.camera.far = 300;
+    softKey.shadow.mapSize.width = 2048;
+    softKey.shadow.mapSize.height = 2048;
     this.scene.add(softKey);
 
     this.city = new CityEnvironment(this.scene, this.world);
@@ -2127,6 +2440,7 @@ export class GameEngine {
 
     this.particles = new GPUParticleSystem(5000);
     this.scene.add(this.particles.mesh);
+    this.city.particles = this.particles;
 
     this.rain = new RainSystem(5000);
     this.scene.add(this.rain.mesh);
@@ -2175,6 +2489,7 @@ export class GameEngine {
     window.addEventListener("gamepadconnected", this.onGamepadConnected);
     window.addEventListener("gamepaddisconnected", this.onGamepadDisconnected);
     window.addEventListener("helistrike:settings", this.onSettingsChanged);
+    window.addEventListener("contextmenu", this.onContextMenu);
 
     this.lastTime = performance.now() / 1000;
 
@@ -2193,6 +2508,7 @@ export class GameEngine {
     this.isPlaying = true;
     try {
       this.audio.resume();
+      this.audio.startMusic();
     } catch {
       // Some browsers delay audio startup until the first canvas press.
     }
@@ -2210,6 +2526,11 @@ export class GameEngine {
     this.movementKeys.clear();
     this.lastTime = performance.now() / 1000;
     this.updateUI(this.lastTime);
+    if (paused) {
+      this.audio.stopMusic();
+    } else {
+      this.audio.startMusic();
+    }
   }
 
   resetGame() {
@@ -2248,6 +2569,8 @@ export class GameEngine {
     this.directorTimer = 0.6;
     this.battlefieldEventTimer = 16;
     this.lastSpawnSoundTime = 0;
+    this.lastBuildingHitSoundTime = 0;
+    this.lastEnemyFireSoundTime = 0;
     this.currentWave = 0;
     this.enemiesSpawnedInWave = 0;
     this.totalEnemiesInWave = 0;
@@ -2269,6 +2592,13 @@ export class GameEngine {
     this.speedBoostTimer = 0;
     this.hitMarkerTimer = 0;
     this.powerupSpawnTimer = 0;
+
+    this.isPaintingLocks = false;
+    this.salvoLocks = [];
+    this.salvoCooldownTimer = 0;
+    this.lastLockPaintTime = 0;
+    this.clearSalvoIndicators();
+
     this.updateUI(performance.now() / 1000);
     this.emitStatsIfChanged(true);
   }
@@ -2287,11 +2617,10 @@ export class GameEngine {
     window.removeEventListener("helistrike:left-stick", this.onLeftStick);
     window.removeEventListener("helistrike:right-stick", this.onRightStick);
     window.removeEventListener("gamepadconnected", this.onGamepadConnected);
-    window.removeEventListener(
-      "gamepaddisconnected",
-      this.onGamepadDisconnected,
-    );
+    window.removeEventListener("gamepaddisconnected", this.onGamepadDisconnected);
     window.removeEventListener("helistrike:settings", this.onSettingsChanged);
+    window.removeEventListener("contextmenu", this.onContextMenu);
+    this.clearSalvoIndicators();
     this.helicopter.body.removeEventListener(
       "collide",
       this.onHelicopterCollide,
@@ -2333,7 +2662,7 @@ export class GameEngine {
       const dz = enemy.body.position.z - origin.z;
       const dy = Math.abs(enemy.body.position.y - origin.y);
       const distSq = dx * dx + dz * dz;
-      if (distSq < 12 || distSq > maxDistance * maxDistance || dy > 60) continue;
+      if (distSq < 12 || distSq > maxDistance * maxDistance) continue;
 
       const dist = Math.sqrt(distSq);
       const aheadBias = (dx / dist) * forward.x + (dz / dist) * forward.z;
@@ -2471,18 +2800,27 @@ export class GameEngine {
     if (!this.isPlaying) return;
     if (e.target !== this.renderer.domElement) return;
     e.preventDefault();
-    this.isFiringMouse = true;
-    this.isMouseActive = true;
-    this.updateMouseAimFromEvent(e);
-    this.updateAutoAim();
     this.audio.resume();
-    if (this.health > 0) {
-      this.fireWeapons(performance.now() / 1000);
+
+    if (e.button === 2) {
+      this.startPaintingLocks();
+    } else {
+      this.isFiringMouse = true;
+      this.isMouseActive = true;
+      this.updateMouseAimFromEvent(e);
+      this.updateAutoAim();
+      if (this.health > 0) {
+        this.fireWeapons(performance.now() / 1000);
+      }
     }
   };
 
-  onPointerUp = () => {
-    this.isFiringMouse = false;
+  onPointerUp = (e: PointerEvent) => {
+    if (e.button === 2 || this.isPaintingLocks) {
+      this.releaseSalvo();
+    } else {
+      this.isFiringMouse = false;
+    }
   };
 
   onWheel = (e: WheelEvent) => {
@@ -2525,7 +2863,6 @@ export class GameEngine {
         " ",
         "spacebar",
         "shift",
-        "q",
         "e",
         "pageup",
         "pagedown",
@@ -2540,10 +2877,18 @@ export class GameEngine {
     if (key === "3") this.switchWeapon(WeaponType.ROCKET);
     if (key === "4") this.switchWeapon(WeaponType.SHOTGUN);
     if (key === "r") this.startReload();
+
+    if (key === "q") {
+      this.startPaintingLocks();
+    }
   };
 
   onKeyUp = (e: KeyboardEvent) => {
-    this.movementKeys.delete(e.key.toLowerCase());
+    const key = e.key.toLowerCase();
+    this.movementKeys.delete(key);
+    if (key === "q") {
+      this.releaseSalvo();
+    }
   };
 
   onLeftStick = (event: Event) => {
@@ -2754,17 +3099,23 @@ export class GameEngine {
     }
     if (weapon.count === 1) this.muzzleFlip *= -1;
 
-    // Spawn particles
-    this.particles.spawnExplosion(
-      this.helicopter.body.position.x + hDirX * noseOffset,
-      muzzleY,
-      this.helicopter.body.position.z + hDirZ * noseOffset,
-      5,
-      time,
-      5,
-    );
-
-    this.cameraShake = Math.max(this.cameraShake, 0.4);
+    // Weapon specific muzzle flash & shake
+    const fxX = this.helicopter.body.position.x + hDirX * noseOffset;
+    const fxZ = this.helicopter.body.position.z + hDirZ * noseOffset;
+    
+    if (weapon.spread > 0) { 
+      // Shotgun Flash
+      this.particles.spawnExplosion(fxX, muzzleY, fxZ, 15, time, 12);
+      this.cameraShake = Math.max(this.cameraShake, 0.5);
+    } else if (weapon.blastRadius > 0) {
+      // Missile / Rocket backblast
+      this.particles.spawnExplosion(fxX, muzzleY, fxZ, 8, time, 6);
+      this.cameraShake = Math.max(this.cameraShake, 0.6);
+    } else {
+      // Machine Gun Sparks
+      for(let s=0; s<2; s++) this.particles.spawnSparks(fxX, muzzleY, fxZ, time);
+      this.cameraShake = Math.max(this.cameraShake, 0.15);
+    }
 
     // Auto-reload if out of ammo
     if (weapon.ammo <= 0) {
@@ -2787,6 +3138,132 @@ export class GameEngine {
     this.reloadTimer = weapon.reloadTime;
     this.audio.playReload();
   };
+
+  onContextMenu = (e: Event) => {
+    e.preventDefault();
+  };
+
+  findSalvoTarget(centerPoint: THREE.Vector3, radius: number): Enemy | null {
+    let closestEnemy: Enemy | null = null;
+    let minDist = radius;
+    for (const enemy of this.enemies) {
+      if (!enemy.active) continue;
+      const dx = enemy.body.position.x - centerPoint.x;
+      const dz = enemy.body.position.z - centerPoint.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist < minDist) {
+        minDist = dist;
+        closestEnemy = enemy;
+      }
+    }
+    return closestEnemy;
+  }
+
+  updateSalvoIndicators(enemy: Enemy) {
+    let group = this.salvoLockIndicators.get(enemy);
+    if (!group) {
+      group = new THREE.Group();
+      group.position.copy(enemy.mesh.position);
+      this.scene.add(group);
+      this.salvoLockIndicators.set(enemy, group);
+    }
+
+    // Clear old rings in group
+    while (group.children.length > 0) {
+      const child = group.children[0] as THREE.Mesh;
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach((m) => m.dispose());
+        } else {
+          child.material.dispose();
+        }
+      }
+      group.remove(child);
+    }
+
+    const lockCount = this.salvoLocks.filter((e) => e === enemy).length;
+
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xff3344,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+
+    for (let i = 0; i < lockCount; i++) {
+      const r = 2.0 + i * 0.85;
+      const geom = new THREE.RingGeometry(r, r + 0.15, 4); // Spinning diamond
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      group.add(mesh);
+    }
+  }
+
+  clearSalvoIndicators() {
+    for (const group of this.salvoLockIndicators.values()) {
+      group.children.forEach((child: any) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m: any) => m.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      });
+      this.scene.remove(group);
+    }
+    this.salvoLockIndicators.clear();
+  }
+
+  startPaintingLocks() {
+    if (!this.isPlaying || this.salvoCooldownTimer > 0) return;
+    this.isPaintingLocks = true;
+  }
+
+  releaseSalvo() {
+    if (!this.isPaintingLocks) return;
+    this.isPaintingLocks = false;
+
+    if (this.salvoLocks.length > 0) {
+      const now = performance.now() / 1000;
+      this.salvoLocks.forEach((enemy, index) => {
+        const offsetAngle = (index / this.salvoLocks.length) * Math.PI * 2;
+        const spawnX = this.helicopter.body.position.x + Math.sin(offsetAngle) * 4.5;
+        const spawnZ = this.helicopter.body.position.z + Math.cos(offsetAngle) * 4.5;
+        const spawnY = this.helicopter.body.position.y - 1;
+
+        const dx = enemy.body.position.x - spawnX;
+        const dz = enemy.body.position.z - spawnZ;
+        const len = Math.sqrt(dx * dx + dz * dz) || 1;
+
+        // Spawn homing salvo missile
+        this.playerProjectiles.spawn(
+          spawnX,
+          spawnY,
+          spawnZ,
+          dx / len,
+          dz / len,
+          now,
+          265, // speed
+          55,  // damage
+          12,  // blastRadius
+          0xff3344, // colorHex
+          enemy, // target
+          8.0 // homingStrength
+        );
+      });
+
+      this.audio.playMissileLaunch();
+      this.cameraShake = Math.max(this.cameraShake, 1.4);
+      this.salvoCooldownTimer = this.salvoCooldown;
+      this.salvoLocks = [];
+      this.clearSalvoIndicators();
+      this.updateUI(now);
+    }
+  }
 
   dropPowerUp = (x: number, y: number, z: number) => {
     const rand = Math.random();
@@ -2903,6 +3380,18 @@ export class GameEngine {
             multiplier: this.comboMultiplier,
             timer: this.comboTimer,
           },
+          salvo: {
+            locks: this.salvoLocks.length,
+            cooldown: Math.ceil(this.salvoCooldownTimer),
+            isPainting: this.isPaintingLocks,
+            ready: this.salvoCooldownTimer <= 0 && this.isPlaying,
+          },
+          status: {
+            damageBoost: this.damageBoostTimer,
+            shield: this.shieldTimer,
+            speedBoost: this.speedBoostTimer,
+            threat: this.combatIntensity,
+          },
         },
       }),
     );
@@ -2938,6 +3427,7 @@ export class GameEngine {
     if (this.gameOverDispatched) return;
     this.gameOverDispatched = true;
     this.isPlaying = false;
+    this.audio.stopMusic();
     this.isFiringMouse = false;
     this.isFiringGamepad = false;
     this.leftStick = { x: 0, y: 0, active: false };
@@ -2988,6 +3478,7 @@ export class GameEngine {
     this.health = Math.min(100, this.health + healing); // Wave clear heal
     this.helicopter.repair(healing);
 
+    this.waveTransitionTimer = 3.5;
     this.updateUI(performance.now() / 1000);
   }
 
@@ -3013,10 +3504,53 @@ export class GameEngine {
     } else if (this.currentWave >= 2) {
       if (rand < 0.3) type = EnemyType.SHOOTER;
     }
-    const spot = this.getArcadeSpawnPoint(type, 0, 1);
+
+    let spot;
+    let attempts = 0;
+    this.camera.updateMatrixWorld();
+    const frustum = new THREE.Frustum();
+    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
+    const playerPos = this.helicopter.body.position;
+
+    // Safe Spawn Validation (Max 5 attempts)
+    while (attempts < 5) {
+      spot = this.getArcadeSpawnPoint(type, 0, 1);
+      
+      const point = new THREE.Vector3(spot.x, spot.y, spot.z);
+      // Ensure it's not popping in immediately in the frustum
+      if (frustum.containsPoint(point)) {
+        const distSq = (spot.x - playerPos.x) ** 2 + (spot.z - playerPos.z) ** 2;
+        if (distSq < 10000) { // Keep them out of immediate view
+          attempts++;
+          continue; 
+        }
+      }
+      
+      // Avoid spawn overlap
+      let overlap = false;
+      for (const enemy of this.enemies) {
+         if (enemy.active) {
+            const eDistSq = (spot.x - enemy.mesh.position.x) ** 2 + (spot.z - enemy.mesh.position.z) ** 2;
+            if (eDistSq < 144) { // 12 units
+               overlap = true;
+               break;
+            }
+         }
+      }
+      if (overlap) {
+         attempts++;
+         continue;
+      }
+
+      break;
+    }
+
+    if (!spot) spot = this.getArcadeSpawnPoint(type, 0, 1);
+
     this.enemies.push(
       new Enemy(this.scene, this.world, spot.x, spot.z, type, spot.y),
     );
+    this.enemiesSpawnedInWave++;
     this.playSpawnCue(performance.now() / 1000);
   }
 
@@ -3082,20 +3616,39 @@ export class GameEngine {
       1.3,
     );
 
-    this.currentWave = Math.max(1, Math.floor(this.survivalTime / 35) + 1);
-    this.directorTimer -= delta;
-    const maxEnemies = 12 + Math.floor(this.combatIntensity * 13);
-
-    if (this.directorTimer <= 0 && this.enemies.length < maxEnemies) {
-      const burst = 1 + Math.floor(this.combatIntensity * 3);
-      for (let i = 0; i < burst; i++) this.spawnDirectedEnemy(time, i, burst);
-      this.directorTimer = Math.max(0.35, 1.8 - this.combatIntensity * 0.95);
+    // Initial start
+    if (this.currentWave === 0) {
+      if (this.waveTransitionTimer <= 0) {
+        this.startNextWave();
+      }
+      return;
     }
 
+    // Pause spawning during wave transitions (which are also triggered by battlefield events)
+    if (this.waveTransitionTimer > 0) {
+      return;
+    }
+
+    // Wave spawning logic
+    if (this.enemiesSpawnedInWave < this.totalEnemiesInWave) {
+      this.spawnTimer -= delta;
+      // Cap active enemies to avoid overwhelming the player
+      const maxActiveEnemies = 8 + Math.floor(this.currentWave * 1.5);
+      if (this.spawnTimer <= 0 && this.enemies.length < maxActiveEnemies) {
+        this.spawnEnemy();
+        // Spawning gets slightly faster in later waves
+        this.spawnTimer = Math.max(0.6, 2.2 - this.currentWave * 0.12);
+      }
+    } else if (this.enemies.length === 0) {
+      // Wave cleared! Go to next wave
+      this.startNextWave();
+    }
+
+    // Trigger battlefield events at intervals during the wave if not in transition
     this.battlefieldEventTimer -= delta;
     if (this.battlefieldEventTimer <= 0) {
       this.triggerBattlefieldEvent(time);
-      this.battlefieldEventTimer = Math.max(9, 24 - this.combatIntensity * 10);
+      this.battlefieldEventTimer = Math.max(12, 28 - this.combatIntensity * 12);
     }
   }
 
@@ -3284,7 +3837,6 @@ export class GameEngine {
       moveY += 1;
     if (
       this.movementKeys.has("shift") ||
-      this.movementKeys.has("q") ||
       this.movementKeys.has("pagedown")
     )
       moveY -= 1;
@@ -3359,7 +3911,7 @@ export class GameEngine {
       this.helicopter.takeDamage(2 * delta);
     }
     this.emitStatsIfChanged();
-    this.city.update(this.helicopter.body.position.z, this.world);
+    this.city.update(this.helicopter.body.position.z, this.world, delta);
     this.updateAIDirector(time, delta);
 
     // Twin-stick aim has priority on mobile; desktop mouse fire uses auto-lock.
@@ -3370,6 +3922,68 @@ export class GameEngine {
     }
     this.innerRing.rotation.z += 0.05;
     this.outerRing.rotation.z -= 0.02;
+
+    // --- Salvo Cooldown Timer ---
+    if (this.salvoCooldownTimer > 0) {
+      this.salvoCooldownTimer = Math.max(0, this.salvoCooldownTimer - delta);
+    }
+
+    // --- Active Salvo Target Locking ---
+    if (this.isPaintingLocks && this.salvoCooldownTimer <= 0) {
+      if (time - this.lastLockPaintTime >= this.lockPaintInterval) {
+        const target = this.findSalvoTarget(this.aimPoint, this.lockSearchRadius);
+        if (target && this.salvoLocks.length < 6) {
+          const currentTargetLocks = this.salvoLocks.filter((e) => e === target).length;
+          if (currentTargetLocks < 3) {
+            this.salvoLocks.push(target);
+            this.lastLockPaintTime = time;
+            this.audio.playLockBeep();
+            this.updateSalvoIndicators(target);
+            this.updateUI(time);
+          }
+        }
+      }
+    }
+
+    // --- Clean Up Dead Enemies in Salvo Locks ---
+    this.salvoLocks = this.salvoLocks.filter((enemy) => enemy.active);
+
+    // --- Update Salvo Lock Indicator Visual Positions & Rotations ---
+    for (const [enemy, group] of this.salvoLockIndicators.entries()) {
+      if (!enemy.active) {
+        group.children.forEach((child: any) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material.dispose();
+            }
+          }
+        });
+        this.scene.remove(group);
+        this.salvoLockIndicators.delete(enemy);
+      } else {
+        group.position.copy(enemy.mesh.position);
+        group.children.forEach((child: any, index: number) => {
+          const rotationSpeed = 0.06 + index * 0.025;
+          const direction = index % 2 === 0 ? 1 : -1;
+          child.rotation.z += rotationSpeed * direction;
+        });
+      }
+    }
+
+    // --- Crosshair styling/pulsing during salvo painting ---
+    if (this.isPaintingLocks) {
+      (this.innerRing.material as THREE.MeshBasicMaterial).color.setHex(0xff3344);
+      (this.outerRing.material as THREE.MeshBasicMaterial).color.setHex(0xff3344);
+      const scale = 1.0 + Math.sin(time * 15) * 0.15;
+      this.targetGroup.scale.set(scale, scale, scale);
+    } else {
+      (this.innerRing.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+      (this.outerRing.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+      this.targetGroup.scale.set(1, 1, 1);
+    }
 
     // --- Survival encounter messaging ---
     if (this.waveTransitionTimer > 0) {
@@ -3477,7 +4091,10 @@ export class GameEngine {
         this.playerProjectiles.pool,
         this.enemies,
       );
-      if (fired) this.audio.playEnemyFire();
+      if (fired && time - this.lastEnemyFireSoundTime >= 0.15) {
+        this.audio.playEnemyFire();
+        this.lastEnemyFireSoundTime = time;
+      }
 
       // Ramming Check (Kamikaze)
       if (
@@ -3505,8 +4122,8 @@ export class GameEngine {
     }
 
     // --- Projectile Physics ---
-    this.playerProjectiles.updatePositions(time, delta);
-    this.enemyProjectiles.updatePositions(time, delta);
+    this.playerProjectiles.updatePositions(time, delta, this.particles);
+    this.enemyProjectiles.updatePositions(time, delta, this.particles);
 
     for (const proj of this.playerProjectiles.pool) {
       if (!proj.active) continue;
@@ -3517,15 +4134,19 @@ export class GameEngine {
       );
       if (!hitBlock) continue;
 
-      this.particles.spawnExplosion(
-        proj.pos.x,
-        proj.pos.y,
-        proj.pos.z,
-        proj.blastRadius > 0 ? 38 : 12,
-        time,
-        proj.blastRadius > 0 ? 22 : 8,
-      );
-      if (proj.blastRadius > 0) {
+      if (proj.blastRadius === 0) {
+        // Machine gun ricochet sparks
+        for (let s = 0; s < 3; s++) this.particles.spawnSparks(proj.pos.x, proj.pos.y, proj.pos.z, time);
+      } else {
+        // High explosive detonation
+        this.particles.spawnExplosion(
+          proj.pos.x,
+          proj.pos.y,
+          proj.pos.z,
+          38,
+          time,
+          22,
+        );
         this.city.damageNearby(
           proj.pos.x,
           proj.pos.z,
@@ -3533,7 +4154,12 @@ export class GameEngine {
           proj.damage * 0.85,
         );
       }
-      this.audio.playExplosion(proj.blastRadius > 0 ? 0.65 : 0.16);
+      if (proj.blastRadius > 0 || time - this.lastBuildingHitSoundTime >= 0.20) {
+        this.audio.playExplosion(proj.blastRadius > 0 ? 0.65 : 0.16);
+        if (proj.blastRadius <= 0) {
+          this.lastBuildingHitSoundTime = time;
+        }
+      }
       proj.deactivate();
     }
 
