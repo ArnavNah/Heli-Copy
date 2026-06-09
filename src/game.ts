@@ -1,5 +1,10 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { AudioManager } from "./audio";
 
 // --- TEXTURE SYSTEM ---
@@ -968,6 +973,113 @@ class GPUParticleSystem {
 
   update(time: number) {
     this.uniforms.uTime.value = time;
+  }
+}
+
+class VolumetricExplosions {
+  mesh: THREE.InstancedMesh;
+  maxParticles: number;
+  dummy = new THREE.Object3D();
+  
+  scales: Float32Array;
+  lifetimes: Float32Array;
+  maxLifetimes: Float32Array;
+  activeFlags: Uint8Array;
+  
+  constructor(scene: THREE.Scene, maxParticles = 400) {
+    this.maxParticles = maxParticles;
+    const geometry = new THREE.IcosahedronGeometry(1, 1);
+    const material = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    
+    this.mesh = new THREE.InstancedMesh(geometry, material, maxParticles);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxParticles * 3), 3);
+    
+    this.scales = new Float32Array(maxParticles);
+    this.lifetimes = new Float32Array(maxParticles);
+    this.maxLifetimes = new Float32Array(maxParticles);
+    this.activeFlags = new Uint8Array(maxParticles);
+    
+    for(let i=0; i<maxParticles; i++) {
+      this.dummy.position.set(0,-9999,0);
+      this.dummy.scale.set(0,0,0);
+      this.dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, this.dummy.matrix);
+      this.activeFlags[i] = 0;
+    }
+    
+    scene.add(this.mesh);
+  }
+  
+  spawn(x: number, y: number, z: number, count: number, size: number) {
+    let spawned = 0;
+    for(let i=0; i<this.maxParticles && spawned < count; i++) {
+      if (this.activeFlags[i] === 0) {
+        this.activeFlags[i] = 1;
+        this.lifetimes[i] = 0;
+        this.maxLifetimes[i] = 0.5 + Math.random() * 0.7;
+        this.scales[i] = size * (0.5 + Math.random() * 1.5);
+        
+        this.dummy.position.set(
+          x + (Math.random() - 0.5) * size * 1.5,
+          y + (Math.random() - 0.5) * size * 1.5,
+          z + (Math.random() - 0.5) * size * 1.5
+        );
+        this.dummy.scale.set(0.1, 0.1, 0.1);
+        this.dummy.updateMatrix();
+        this.mesh.setMatrixAt(i, this.dummy.matrix);
+        
+        spawned++;
+      }
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+  
+  update(delta: number) {
+    let needsUpdate = false;
+    const colorWhite = new THREE.Color(0xffffff);
+    const colorYellow = new THREE.Color(0xffaa00);
+    const colorOrange = new THREE.Color(0xff3300);
+    const colorGray = new THREE.Color(0x222222);
+    const tempColor = new THREE.Color();
+    
+    for(let i=0; i<this.maxParticles; i++) {
+      if (this.activeFlags[i] === 1) {
+        needsUpdate = true;
+        this.lifetimes[i] += delta;
+        const lifeRatio = this.lifetimes[i] / this.maxLifetimes[i];
+        
+        if (lifeRatio >= 1.0) {
+          this.activeFlags[i] = 0;
+          this.dummy.scale.set(0,0,0);
+          this.dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this.dummy.matrix);
+        } else {
+          const scaleCurve = lifeRatio < 0.2 ? lifeRatio * 5.0 : 1.0 - (lifeRatio - 0.2) * 0.5;
+          const s = this.scales[i] * scaleCurve;
+          
+          this.mesh.getMatrixAt(i, this.dummy.matrix);
+          this.dummy.matrix.decompose(this.dummy.position, this.dummy.quaternion, this.dummy.scale);
+          this.dummy.position.y += delta * 4.0;
+          this.dummy.scale.set(s,s,s);
+          this.dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this.dummy.matrix);
+          
+          if (lifeRatio < 0.1) tempColor.copy(colorWhite);
+          else if (lifeRatio < 0.3) tempColor.lerpColors(colorWhite, colorYellow, (lifeRatio-0.1)/0.2);
+          else if (lifeRatio < 0.5) tempColor.lerpColors(colorYellow, colorOrange, (lifeRatio-0.3)/0.2);
+          else tempColor.lerpColors(colorOrange, colorGray, (lifeRatio-0.5)/0.5);
+          
+          this.mesh.setColorAt(i, tempColor);
+        }
+      }
+    }
+    
+    if (needsUpdate) {
+      this.mesh.instanceMatrix.needsUpdate = true;
+      if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    }
   }
 }
 
@@ -2276,6 +2388,7 @@ export class GameEngine {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   renderer: THREE.WebGLRenderer;
+  composer: EffectComposer;
   world: CANNON.World;
   city: CityEnvironment;
 
@@ -2286,6 +2399,7 @@ export class GameEngine {
   enemyProjectiles: ProjectilePool;
 
   particles: GPUParticleSystem;
+  volumetricExplosions: VolumetricExplosions;
   rain: RainSystem;
   weather: WeatherSystem;
   audio: AudioManager;
@@ -2410,6 +2524,27 @@ export class GameEngine {
     this.camera.position.set(0, 62, 46);
     this.camera.lookAt(0, 0, 0);
 
+    // EffectComposer Setup
+    this.composer = new EffectComposer(this.renderer);
+    
+    const renderPass = new RenderPass(this.scene, this.camera);
+    this.composer.addPass(renderPass);
+
+    const ssaoPass = new SSAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
+    ssaoPass.kernelRadius = 16;
+    ssaoPass.minDistance = 0.005;
+    ssaoPass.maxDistance = 0.1;
+    this.composer.addPass(ssaoPass);
+
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+    bloomPass.threshold = 0.55; // High threshold so only explosions/particles glow
+    bloomPass.strength = 1.6;
+    bloomPass.radius = 0.5;
+    this.composer.addPass(bloomPass);
+
+    const outputPass = new OutputPass();
+    this.composer.addPass(outputPass);
+
     this.world = new CANNON.World();
     this.world.gravity.set(0, -9.82, 0);
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
@@ -2441,6 +2576,8 @@ export class GameEngine {
     this.particles = new GPUParticleSystem(5000);
     this.scene.add(this.particles.mesh);
     this.city.particles = this.particles;
+    
+    this.volumetricExplosions = new VolumetricExplosions(this.scene);
 
     this.rain = new RainSystem(5000);
     this.scene.add(this.rain.mesh);
@@ -2638,6 +2775,7 @@ export class GameEngine {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.composer.setSize(window.innerWidth, window.innerHeight);
   };
 
   private getFallbackFireDirection() {
@@ -3896,7 +4034,7 @@ export class GameEngine {
       this.helicopter.mainRotor.rotation.y += 0.25;
       this.helicopter.tailRotor.rotation.x += 0.25;
       this.updateCamera();
-      this.renderer.render(this.scene, this.camera);
+      this.composer.render();
       return;
     }
 
@@ -4139,20 +4277,9 @@ export class GameEngine {
         for (let s = 0; s < 3; s++) this.particles.spawnSparks(proj.pos.x, proj.pos.y, proj.pos.z, time);
       } else {
         // High explosive detonation
-        this.particles.spawnExplosion(
-          proj.pos.x,
-          proj.pos.y,
-          proj.pos.z,
-          38,
-          time,
-          22,
-        );
-        this.city.damageNearby(
-          proj.pos.x,
-          proj.pos.z,
-          proj.blastRadius,
-          proj.damage * 0.85,
-        );
+        this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 38, time, 22);
+        this.volumetricExplosions.spawn(proj.pos.x, proj.pos.y, proj.pos.z, 8, proj.blastRadius * 0.35);
+        this.city.damageNearby(proj.pos.x, proj.pos.z, proj.blastRadius, proj.damage * 0.85);
       }
       if (proj.blastRadius > 0 || time - this.lastBuildingHitSoundTime >= 0.20) {
         this.audio.playExplosion(proj.blastRadius > 0 ? 0.65 : 0.16);
@@ -4171,14 +4298,8 @@ export class GameEngine {
         18,
       );
       if (!hitBlock) continue;
-      this.particles.spawnExplosion(
-        proj.pos.x,
-        proj.pos.y,
-        proj.pos.z,
-        10,
-        time,
-        8,
-      );
+      this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 10, time, 8);
+      this.volumetricExplosions.spawn(proj.pos.x, proj.pos.y, proj.pos.z, 3, 2.0);
       proj.deactivate();
     }
 
@@ -4186,14 +4307,8 @@ export class GameEngine {
       const totalDmg = proj.damage * this.comboMultiplier;
       const died = enemy.takeDamage(totalDmg);
 
-      this.particles.spawnExplosion(
-        proj.pos.x,
-        proj.pos.y,
-        proj.pos.z,
-        15,
-        time,
-        10,
-      );
+      this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 15, time, 10);
+      this.volumetricExplosions.spawn(proj.pos.x, proj.pos.y, proj.pos.z, 6, proj.blastRadius > 0 ? 3.5 : 1.5);
       this.audio.playExplosion(0.2);
 
       if (proj.blastRadius > 0) {
@@ -4234,6 +4349,7 @@ export class GameEngine {
           time,
           30,
         );
+        this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, 12, 6.0);
         this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, 22, 95);
         this.audio.playExplosion(1.0);
       }
@@ -4326,13 +4442,15 @@ export class GameEngine {
     }
 
     this.particles.update(time);
+    this.volumetricExplosions.update(delta);
 
     // Update UI every and radar every frame for smoothness
     this.updateUI(time);
 
     this.updateCamera();
 
-    this.renderer.render(this.scene, this.camera);
+    // Use Composer instead of Renderer
+    this.composer.render();
   };
 
   updateCamera() {
