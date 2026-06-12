@@ -1632,7 +1632,7 @@ class Helicopter extends Entity {
     const ez = this.targetPosition.z - this.body.position.z;
     const distToTarget = Math.sqrt(ex * ex + ez * ez);
 
-    const maxCruiseSpeed = (44 + inputAgility * 18) * engineEff;
+    const maxCruiseSpeed = (50 + inputAgility * 22) * engineEff;
     let desiredVx = THREE.MathUtils.clamp(ex * 5.2, -maxCruiseSpeed, maxCruiseSpeed);
     let desiredVz = THREE.MathUtils.clamp(ez * 5.2, -maxCruiseSpeed, maxCruiseSpeed);
     const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
@@ -1641,7 +1641,7 @@ class Helicopter extends Entity {
       desiredVz = (desiredVz / desiredSpeed) * maxCruiseSpeed;
     }
 
-    const accelResponsiveness = (15 + inputAgility * 10) * rotorEff * engineEff;
+    const accelResponsiveness = (25 + inputAgility * 15) * rotorEff * engineEff;
     let fx = (desiredVx - this.body.velocity.x) * this.body.mass * accelResponsiveness;
     let fz = (desiredVz - this.body.velocity.z) * this.body.mass * accelResponsiveness;
 
@@ -1703,7 +1703,7 @@ class Helicopter extends Entity {
     while (diff > Math.PI) diff -= Math.PI * 2;
 
     // Turn faster when input is aggressive
-    const turnTurnSpeed = (0.14 + inputAgility * 0.1) * rotorEff;
+    const turnTurnSpeed = (0.22 + inputAgility * 0.15) * rotorEff;
     this.mesh.rotation.y += diff * turnTurnSpeed;
 
     this.mesh.position.copy(this.body.position as any);
@@ -1715,10 +1715,10 @@ class Helicopter extends Entity {
     const localVz = this.body.velocity.x * sy + this.body.velocity.z * cy;
 
     // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
-    const tiltMultiplier = isIdle ? 0.16 : 0.9;
+    const tiltMultiplier = isIdle ? 0.25 : 1.2;
 
     // Visual Tilting: Pitch DOWN when moving forward (Positive localVz), Roll INTO turn
-    const tiltCap = 0.34 + inputAgility * 0.14;
+    const tiltCap = 0.45 + inputAgility * 0.15;
     const targetTiltX =
       THREE.MathUtils.clamp(localVz * 0.045, -tiltCap, tiltCap) * tiltMultiplier;
     const targetTiltZ =
