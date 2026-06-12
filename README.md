@@ -1,14 +1,24 @@
 # Heli-Strike Arcade Assault
 
-![Gameplay](gameplay.png)
+![Gameplay](playtest-polished-action-1280x720.png)
 
-A 3D low-poly arcade helicopter game built with React, Vite, Three.js, and Cannon-es.
+A fast-paced, 3D low-poly arcade helicopter shooter built with React, Vite, Three.js, and Cannon-es. Survive endless waves of enemies, collect power-ups, and rack up high scores!
 
 ## Features
+
 - **Intense 3D Action**: Fly a military helicopter over procedurally generated cities, deserts, and forests.
 - **Multiple Weapons**: Switch between Machine Guns, Missiles, Rockets, and Shotguns to obliterate your enemies.
 - **Dynamic AI**: Face off against drones, tanks, shooters, and boss enemies that actively track and attack you.
+- **Power-Up System**: Fly over defeated enemies to collect Health, Fuel, Ammo, Damage Boosts, Shields, Speed Boosts, and Screen-clearing Bombs!
 - **Weather & Physics**: Experience thunderstorms, rain, and realistic rigid-body physics for explosive combat.
+
+## Screenshots
+
+### Main Menu
+![Main Menu](playtest-polished-menu-1280x720.png)
+
+### High-Octane Combat
+![Action](playtest-action-1280x720.png)
 
 ## How to Run Locally
 
@@ -24,8 +34,11 @@ A 3D low-poly arcade helicopter game built with React, Vite, Three.js, and Canno
    ```
 
 ## Controls
+
 - **W, A, S, D / Arrows**: Move Helicopter
 - **Mouse**: Aim crosshair
-- **Left Click**: Fire weapons
+- **Left Click**: Fire weapon
+- **Q / Right Click**: Lock-on Multi-Salvo
+- **Space / Alt**: Special Abilities
 - **1, 2, 3, 4**: Switch weapons (Machine Gun, Missile, Rocket, Shotgun)
 - **R**: Reload
