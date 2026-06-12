@@ -3,9 +3,15 @@ import * as CANNON from "cannon-es";
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { AudioManager } from "./audio";
+
+const SKY_CLEAR_COLOR = 0x78cfe0;
+const SKY_STORM_COLOR = 0x51647f;
+const FOG_CLEAR_COLOR = 0x86d4df;
+const FOG_STORM_COLOR = 0x29364f;
+const TARGET_RENDER_FPS = 60;
+const MAX_RENDER_PIXEL_RATIO = 1.0;
 
 // --- TEXTURE SYSTEM ---
 export class TextureManager {
@@ -72,9 +78,76 @@ function createLowPolyMaterial(colorHex: number) {
   const material = new THREE.MeshLambertMaterial({
     color: colorHex,
     flatShading: true,
+    emissive: colorHex,
+    emissiveIntensity: 0.025,
   });
   material.userData.baseColor = new THREE.Color(colorHex);
   return material;
+}
+
+function createGlowMaterial(colorHex: number, opacity = 0.72) {
+  return new THREE.MeshBasicMaterial({
+    color: colorHex,
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+}
+
+function createGlowBox(
+  width: number,
+  height: number,
+  depth: number,
+  colorHex: number,
+  opacity = 0.72,
+) {
+  const geometry = new THREE.BoxGeometry(width, height, depth).toNonIndexed();
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, createGlowMaterial(colorHex, opacity));
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  return mesh;
+}
+
+function createSkyDome() {
+  const geometry = new THREE.SphereGeometry(340, 32, 16);
+  const material = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    uniforms: {
+      topColor: { value: new THREE.Color(0x1f4f97) },
+      horizonColor: { value: new THREE.Color(0x78cfe0) },
+      sunColor: { value: new THREE.Color(0xffc66d) },
+    },
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 horizonColor;
+      uniform vec3 sunColor;
+      varying vec3 vWorldPosition;
+
+      void main() {
+        vec3 dir = normalize(vWorldPosition);
+        float horizon = smoothstep(-0.12, 0.72, dir.y);
+        vec3 color = mix(horizonColor, topColor, horizon);
+        float sun = pow(max(dot(dir, normalize(vec3(-0.38, 0.58, -0.72))), 0.0), 52.0);
+        color += sunColor * sun * 0.55;
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+  });
+  const dome = new THREE.Mesh(geometry, material);
+  dome.name = "ArcadeSkyDome";
+  dome.frustumCulled = false;
+  return dome;
 }
 
 function createBox(
@@ -140,9 +213,9 @@ class CityEnvironment {
   particles: any = null;
   cellSize = 22;
   chunkDepth = 132;
-  halfWidthCells = 8;
-  activeBehind = 2;
-  activeAhead = 7;
+  halfWidthCells = 5;
+  activeBehind = 1;
+  activeAhead = 2;
 
   constructor(scene: THREE.Scene, world: CANNON.World) {
     this.group.name = "ModularBlockCity";
@@ -174,8 +247,12 @@ class CityEnvironment {
 
   update(playerZ: number, world: CANNON.World, delta = 0.016) {
     const center = Math.floor(playerZ / this.chunkDepth);
+    let cacheDirty = false;
     for (let id = center - this.activeAhead; id <= center + this.activeBehind; id++) {
-      if (!this.chunks.has(id)) this.generateChunk(id, world);
+      if (!this.chunks.has(id)) {
+        this.generateChunk(id, world);
+        cacheDirty = true;
+      }
     }
 
     for (const [id, chunk] of this.chunks) {
@@ -183,6 +260,7 @@ class CityEnvironment {
         this.group.remove(chunk.group);
         for (const body of chunk.bodies) world.removeBody(body);
         this.chunks.delete(id);
+        cacheDirty = true;
       }
     }
 
@@ -209,7 +287,7 @@ class CityEnvironment {
       }
     }
 
-    this.rebuildCaches();
+    if (cacheDirty) this.rebuildCaches();
   }
 
   damageNearby(x: number, z: number, radius: number, amount: number) {
@@ -280,11 +358,11 @@ class CityEnvironment {
       forest: 0x3f8c5d,
       ruins: 0x7e7d86,
     };
-    const ground = createBox(420, 0.8, this.chunkDepth + 6, groundColors[zone]);
+    const ground = createBox(420, 0.8, this.chunkDepth - 0.4, groundColors[zone]);
     ground.position.set(0, -0.62, chunkCenterZ);
     chunk.group.add(ground);
 
-    const road = createBox(18, 0.12, this.chunkDepth + 8, 0x243044);
+    const road = createBox(18, 0.12, this.chunkDepth - 0.4, 0x243044);
     road.position.set(this.hash(id, 99) > 0.5 ? -34 : 34, -0.16, chunkCenterZ);
     chunk.group.add(road);
     this.addGroundDressing(chunk, zone, chunkCenterZ, road.position.x, id);
@@ -294,7 +372,7 @@ class CityEnvironment {
         const isFlightLane = Math.abs(gx) <= 1;
         if (isFlightLane && (id === 0 || this.hash(id, gx * 53 + local * 19) < 0.88)) continue;
         const roll = this.hash(id, gx * 13 + local * 37);
-        const density = zone === "desert" ? 0.42 : zone === "forest" ? 0.52 : 0.72;
+        const density = zone === "desert" ? 0.32 : zone === "forest" ? 0.4 : 0.5;
         if (roll > density) continue;
 
         const x = gx * this.cellSize + (this.hash(id, gx + local) - 0.5) * 4;
@@ -349,6 +427,17 @@ class CityEnvironment {
     cap.position.set(x, height + 0.5, z);
     chunk.group.add(cap);
 
+    const facadeDetails = this.addBuildingFacadeDetails(
+      chunk,
+      zone,
+      x,
+      z,
+      height,
+      width,
+      depth,
+      seed,
+    );
+
     const body = this.addStaticBox(
       world,
       width + 1.8,
@@ -368,7 +457,7 @@ class CityEnvironment {
       depth: depth + 1.8,
       height: height + 1,
       chunkId: chunk.id,
-      meshes: [building, cap],
+      meshes: [building, cap, ...facadeDetails],
       body,
       hp: maxHp,
       maxHp,
@@ -377,6 +466,60 @@ class CityEnvironment {
     chunk.spots.push({ x, y: height + 1.8, z });
 
     if (seed > 0.65) this.addRooftopDetail(chunk, x, z, height, width, depth, seed);
+  }
+
+  private addBuildingFacadeDetails(
+    chunk: WorldChunk,
+    zone: string,
+    x: number,
+    z: number,
+    height: number,
+    width: number,
+    depth: number,
+    seed: number,
+  ) {
+    const details: THREE.Mesh[] = [];
+    const isLitZone = zone === "city" || zone === "base" || zone === "refinery";
+    const windowColor =
+      zone === "refinery"
+        ? 0xff8f2a
+        : zone === "base"
+          ? 0xb8f1ff
+          : zone === "ruins"
+            ? 0x8bd0ff
+            : 0x9ff7ff;
+    const trimColor = zone === "desert" ? 0xf7d36f : zone === "forest" ? 0x5cc47a : 0x75b8ff;
+    const bandCount = isLitZone ? Math.max(1, Math.min(3, Math.floor(height / 10))) : 1;
+
+    for (let i = 0; i < bandCount; i++) {
+      const y = 3.4 + i * (height / (bandCount + 0.45));
+      const bandHeight = isLitZone ? 0.34 : 0.22;
+      const lit = isLitZone && this.hash(chunk.id, Math.floor(seed * 1000) + i * 29) > 0.18;
+      const materialColor = lit ? windowColor : trimColor;
+      const opacity = lit ? 0.62 : 0.28;
+
+      const front = createGlowBox(width * 0.62, bandHeight, 0.08, materialColor, opacity);
+      front.position.set(x, y, z + depth * 0.5 + 0.08);
+      chunk.group.add(front);
+      details.push(front);
+
+      if (isLitZone && i % 2 === 0) {
+        const side = seed > 0.5 ? 1 : -1;
+        const sideBand = createGlowBox(0.08, bandHeight, depth * 0.42, materialColor, opacity * 0.4);
+        sideBand.position.set(x + side * (width * 0.5 + 0.08), y, z);
+        chunk.group.add(sideBand);
+        details.push(sideBand);
+      }
+    }
+
+    if (height > 18 && seed > 0.42) {
+      const beacon = createGlowBox(1.2, 0.5, 1.2, seed > 0.7 ? 0xff3344 : 0xffe66d, 0.9);
+      beacon.position.set(x, height + 1.22, z + depth * 0.18);
+      chunk.group.add(beacon);
+      details.push(beacon);
+    }
+
+    return details;
   }
 
   private addRooftopDetail(
@@ -449,16 +592,14 @@ class CityEnvironment {
     roadX: number,
     id: number,
   ) {
-    const lane = createBox(44, 0.08, this.chunkDepth + 4, 0x34505f);
-    lane.position.set(0, -0.12, chunkCenterZ);
-    lane.material.transparent = true;
-    lane.material.opacity = 0.18;
+    const lane = createBox(44, 0.05, this.chunkDepth - 0.6, zone === "city" ? 0x5ac7d4 : 0x40576a);
+    lane.position.set(0, -0.04, chunkCenterZ);
     chunk.group.add(lane);
 
     const shoulderColor = zone === "desert" ? 0xb99643 : zone === "forest" ? 0x2f744e : 0x38495d;
     for (const side of [-1, 1]) {
-      const shoulder = createBox(4, 0.08, this.chunkDepth + 8, shoulderColor);
-      shoulder.position.set(roadX + side * 12.5, -0.09, chunkCenterZ);
+      const shoulder = createBox(4, 0.05, this.chunkDepth - 0.6, shoulderColor);
+      shoulder.position.set(roadX + side * 12.5, -0.02, chunkCenterZ);
       chunk.group.add(shoulder);
     }
 
@@ -466,6 +607,10 @@ class CityEnvironment {
       const stripe = createBox(1.2, 0.09, 7, 0xe9df9a);
       stripe.position.set(roadX, -0.04, chunkCenterZ + i * 18);
       chunk.group.add(stripe);
+
+      const runwayGlow = createGlowBox(0.75, 0.06, 2.5, i % 2 === 0 ? 0x7ff6ff : 0xffe66d, 0.34);
+      runwayGlow.position.set(roadX + (i % 2 === 0 ? -8.6 : 8.6), 0.03, chunkCenterZ + i * 18 + 5);
+      chunk.group.add(runwayGlow);
 
       // Ambient Traffic (Static Cars)
       if (this.hash(id, i * 43) > 0.4) {
@@ -479,8 +624,13 @@ class CityEnvironment {
         
         const carRoof = createBox(2.4, 0.8, 3.0, 0x111111);
         carRoof.position.set(roadX + carLane, 1.6, carZ - 0.5);
+
+        const headlightColor = isForward ? 0xfff3b0 : 0xff3344;
+        const headlightZ = carZ + (isForward ? -3.05 : 3.05);
+        const headlight = createGlowBox(2.2, 0.24, 0.18, headlightColor, 0.68);
+        headlight.position.set(roadX + carLane, 0.86, headlightZ);
         
-        chunk.group.add(carBody, carRoof);
+        chunk.group.add(carBody, carRoof, headlight);
       }
     }
 
@@ -502,14 +652,12 @@ class CityEnvironment {
 
       const patch = createBox(
         6 + this.hash(id, i * 71 + 19) * 18,
-        0.07,
+        0.06,
         5 + this.hash(id, i * 73 + 23) * 16,
         palette[Math.floor(seed * palette.length)],
       );
-      patch.position.set(x, -0.08 + seed * 0.015, z);
+      patch.position.set(x, -0.11 + seed * 0.006, z);
       patch.rotation.y = (seed - 0.5) * 0.45;
-      patch.material.transparent = true;
-      patch.material.opacity = 0.38;
       chunk.group.add(patch);
     }
 
@@ -533,12 +681,24 @@ class CityEnvironment {
       }
     }
 
+    for (let i = 0; i < 5; i++) {
+      const seed = this.hash(id, i * 109 + 51);
+      const side = seed > 0.5 ? 1 : -1;
+      const lampX = roadX + side * (15.5 + this.hash(id, i * 113) * 4);
+      const lampZ = chunkCenterZ - this.chunkDepth * 0.42 + this.hash(id, i * 127 + 53) * this.chunkDepth * 0.84;
+      const pole = createBox(0.28, 5.2, 0.28, 0x1a2333);
+      pole.position.set(lampX, 2.45, lampZ);
+      const arm = createBox(3.4, 0.18, 0.18, 0x1a2333);
+      arm.position.set(lampX - side * 1.5, 5.0, lampZ);
+      const lamp = createGlowBox(1.1, 0.38, 1.1, zone === "desert" ? 0xffd487 : 0x9ff7ff, 0.62);
+      lamp.position.set(lampX - side * 3.0, 4.88, lampZ);
+      chunk.group.add(pole, arm, lamp);
+    }
+
     if (Math.abs(id) % 3 === 1) {
-      const crater = createBox(16, 0.1, 12, 0x242831);
-      crater.position.set(roadX > 0 ? -84 : 84, -0.03, chunkCenterZ + (this.hash(id, 203) - 0.5) * 52);
+      const crater = createBox(16, 0.05, 12, 0x242831);
+      crater.position.set(roadX > 0 ? -84 : 84, -0.02, chunkCenterZ + (this.hash(id, 203) - 0.5) * 52);
       crater.rotation.y = this.hash(id, 211) * Math.PI;
-      crater.material.transparent = true;
-      crater.material.opacity = 0.52;
       chunk.group.add(crater);
     }
   }
@@ -697,7 +857,7 @@ const ParticleVert = `
       vec4 mvPosition = modelViewMatrix * vec4(currentPos, 1.0);
       
       // Sizes based on type
-      float sizeMult = pType == 1.0 ? 30.0 : (pType == 2.0 ? 5.0 : 20.0);
+      float sizeMult = pType == 1.0 ? 38.0 : (pType == 2.0 ? 6.5 : 24.0);
       gl_PointSize = (sizeMult * vLife) * (100.0 / length(mvPosition.xyz));
       gl_Position = projectionMatrix * mvPosition;
   }
@@ -709,28 +869,31 @@ const ParticleFrag = `
   void main() {
       if (vLife <= 0.0) discard;
       vec2 coord = gl_PointCoord - vec2(0.5);
-      if(length(coord) > 0.5) discard;
+      float dist = length(coord);
+      if(dist > 0.5) discard;
+      float softDisc = smoothstep(0.5, 0.08, dist);
       
       vec3 color;
-      float alpha = vLife * 0.8;
+      float alpha = vLife * 0.8 * softDisc;
 
       if (vType == 1.0) {
           // Smoke (starts grey, fades to dark)
-          color = mix(vec3(0.05, 0.05, 0.05), vec3(0.3, 0.3, 0.3), vLife);
-          alpha = vLife * 0.5;
+          color = mix(vec3(0.04, 0.045, 0.055), vec3(0.36, 0.38, 0.42), vLife);
+          alpha = vLife * 0.42 * softDisc;
       } else if (vType == 2.0) {
           // Sparks (white to orange)
           vec3 sparkStart = vec3(1.0, 1.0, 0.8);
           vec3 sparkEnd = vec3(1.0, 0.3, 0.0);
           color = mix(sparkEnd, sparkStart, vLife);
-          alpha = vLife;
+          alpha = vLife * softDisc;
       } else {
           // Default Explosion
-          vec3 startColor = vec3(1.0, 1.0, 0.8); // White-Hot
-          vec3 midColor = vec3(1.0, 0.5, 0.0);   // Orange
-          vec3 endColor = vec3(0.2, 0.2, 0.2);   // Smoke
+          vec3 startColor = vec3(1.0, 0.96, 0.72); // White-Hot
+          vec3 midColor = vec3(1.0, 0.36, 0.04);   // Orange
+          vec3 endColor = vec3(0.16, 0.17, 0.2);   // Smoke
           color = mix(endColor, midColor, smoothstep(0.0, 0.5, vLife));
           color = mix(color, startColor, smoothstep(0.5, 1.0, vLife));
+          color += vec3(1.0, 0.12, 0.02) * pow(1.0 - dist * 2.0, 3.0) * vLife;
       }
       
       gl_FragColor = vec4(color, alpha);
@@ -754,7 +917,7 @@ const RainVert = `
       pos = mod(pos - uPlayerPos + boxSize * 0.5, boxSize) - boxSize * 0.5 + uPlayerPos;
 
       vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-      gl_PointSize = 2.0 * (100.0 / length(mvPosition.xyz));
+      gl_PointSize = 2.8 * (100.0 / length(mvPosition.xyz));
       gl_Position = projectionMatrix * mvPosition;
   }
 `;
@@ -762,7 +925,9 @@ const RainVert = `
 const RainFrag = `
   varying float vLife;
   void main() {
-      gl_FragColor = vec4(0.5, 0.7, 1.0, 0.4);
+      vec2 coord = abs(gl_PointCoord - vec2(0.5));
+      float streak = smoothstep(0.5, 0.02, coord.x) * smoothstep(0.5, 0.0, coord.y);
+      gl_FragColor = vec4(0.58, 0.78, 1.0, 0.48 * streak);
   }
 `;
 
@@ -807,6 +972,7 @@ class RainSystem {
       fragmentShader: RainFrag,
       uniforms: this.uniforms,
       transparent: true,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
 
@@ -827,6 +993,11 @@ class WeatherSystem {
   fogColor: number = 0x06111a;
   lastLightningTime: number = 0;
   isLightning: boolean = false;
+  private clearColor = new THREE.Color(SKY_CLEAR_COLOR);
+  private stormColor = new THREE.Color(SKY_STORM_COLOR);
+  private clearFog = new THREE.Color(FOG_CLEAR_COLOR);
+  private stormFog = new THREE.Color(FOG_STORM_COLOR);
+  private tempColor = new THREE.Color();
 
   update(time: number, delta: number, scene: THREE.Scene) {
     // Transition intensity
@@ -834,8 +1005,13 @@ class WeatherSystem {
       (this.targetIntensity - this.stormIntensity) * delta * 0.1;
 
     // Fog management
-    const fogDensity = 0.009 + this.stormIntensity * 0.022;
-    (scene.fog as THREE.FogExp2).density = fogDensity;
+    const fogDensity = 0.0058 + this.stormIntensity * 0.018;
+    const fog = scene.fog as THREE.FogExp2;
+    fog.density = fogDensity;
+    fog.color.copy(this.tempColor.copy(this.clearFog).lerp(this.stormFog, this.stormIntensity));
+    if (scene.background instanceof THREE.Color) {
+      scene.background.copy(this.tempColor.copy(this.clearColor).lerp(this.stormColor, this.stormIntensity * 0.82));
+    }
 
     // Wind Turbulance
     const windScale = this.stormIntensity * 150;
@@ -1282,8 +1458,16 @@ class Helicopter extends Entity {
     }
 
     // Rotor Blur Disc (Transparent)
-    const blurGeo = new THREE.CylinderGeometry(11.5, 11.5, 0.05, 16);
-    const blurMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.15, depthWrite: false });
+    const blurGeo = new THREE.RingGeometry(3.2, 11.5, 56);
+    blurGeo.rotateX(-Math.PI / 2);
+    const blurMat = new THREE.MeshBasicMaterial({
+      color: 0xd8f6ff,
+      transparent: true,
+      opacity: 0.24,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
     const blurDisc = new THREE.Mesh(blurGeo, blurMat);
     blurDisc.name = "rotorBlur";
     blurDisc.visible = false;
@@ -1308,9 +1492,9 @@ class Helicopter extends Entity {
       this.tailRotor.add(bladePivot);
     }
     
-    const tailBlurGeo = new THREE.CylinderGeometry(1.9, 1.9, 0.05, 12);
+    const tailBlurGeo = new THREE.RingGeometry(0.45, 1.9, 28);
+    tailBlurGeo.rotateY(Math.PI / 2);
     const tailBlurDisc = new THREE.Mesh(tailBlurGeo, blurMat);
-    tailBlurDisc.rotation.z = Math.PI / 2;
     tailBlurDisc.name = "tailBlur";
     tailBlurDisc.visible = false;
     this.tailRotor.add(tailBlurDisc);
@@ -1552,7 +1736,7 @@ class Helicopter extends Entity {
     this.mainRotor.position.y = 2.1 + rotorJitter; // Adjusted for Apache mast height
 
     this.updatePhysics(this.body.velocity, targetTiltZ, delta);
-    this.animateRotors(inputSpeed, 60);
+    this.animateRotors(inputSpeed, 60, delta);
   }
   rotorSpeed: number = 0;
 
@@ -1574,30 +1758,35 @@ class Helicopter extends Entity {
     }
   }
 
-  animateRotors(forceMag: number, maxForce: number) {
+  animateRotors(forceMag: number, maxForce: number, delta: number) {
     const rotorEff = this.rotorHealth / 100;
     
-    // Accelerate rotor speed based on force
-    const targetSpeed = (0.75 + (forceMag / maxForce) * 0.45) * rotorEff;
-    this.rotorSpeed = THREE.MathUtils.lerp(this.rotorSpeed, targetSpeed, 0.05);
+    // Store angular speed in radians per second so animation is independent of frame rate.
+    const load = THREE.MathUtils.clamp(forceMag / Math.max(maxForce, 1), 0, 1);
+    const targetSpeed = (42 + load * 24) * rotorEff;
+    const spool = 1 - Math.exp(-delta * 8.0);
+    this.rotorSpeed = THREE.MathUtils.lerp(this.rotorSpeed, targetSpeed, spool);
 
-    this.mainRotor.rotation.y += this.rotorSpeed;
-    this.tailRotor.rotation.x += this.rotorSpeed * 1.2;
+    // Limit visual speed to prevent severe strobe/wagon-wheel effect at 60fps
+    // 25 rad/s = ~23 degrees per frame, which is safely under the 45 degree Nyquist limit for a 4-blade rotor.
+    const visualSpeed = Math.min(this.rotorSpeed, 25);
+    this.mainRotor.rotation.y -= visualSpeed * delta;
+    this.tailRotor.rotation.x -= visualSpeed * 1.35 * delta;
 
     // Toggle Blur meshes based on speed
-    const isFast = this.rotorSpeed > 0.4;
+    const isFast = this.rotorSpeed > 28;
     const blurDisc = this.mainRotor.getObjectByName("rotorBlur");
     const tailBlurDisc = this.tailRotor.getObjectByName("tailBlur");
     
     if (blurDisc) blurDisc.visible = isFast;
     if (tailBlurDisc) tailBlurDisc.visible = isFast;
 
-    // Hide distinct blades when fast for blur effect
+    // Do not hide blades, let them spin inside the blur disc for a better visual effect
     this.mainRotor.children.forEach(c => {
-      if (c.name !== "rotorBlur" && c.type === "Group") c.visible = !isFast;
+      if (c.name !== "rotorBlur" && c.type === "Group") c.visible = true;
     });
     this.tailRotor.children.forEach(c => {
-      if (c.name !== "tailBlur" && c.type === "Group") c.visible = !isFast;
+      if (c.name !== "tailBlur" && c.type === "Group") c.visible = true;
     });
   }
 }
@@ -2053,7 +2242,7 @@ class Projectile {
   lifetime = 1.35;
 
   constructor(scene: THREE.Scene, colorHex: number) {
-    let geom = new THREE.CylinderGeometry(0.04, 0.28, 7.5, 5).toNonIndexed();
+    let geom = new THREE.CylinderGeometry(0.035, 0.32, 8.8, 6).toNonIndexed();
     geom.rotateX(Math.PI / 2); // Align with Z axis
     geom.computeVertexNormals();
 
@@ -2065,7 +2254,7 @@ class Projectile {
     });
     this.mesh = new THREE.Mesh(geom, mat);
 
-    const glowGeom = new THREE.CylinderGeometry(0.18, 0.65, 9.5, 5).toNonIndexed();
+    const glowGeom = new THREE.CylinderGeometry(0.2, 0.82, 11.6, 6).toNonIndexed();
     glowGeom.rotateX(Math.PI / 2);
     glowGeom.computeVertexNormals();
 
@@ -2073,7 +2262,7 @@ class Projectile {
       color: colorHex,
       blending: THREE.AdditiveBlending,
       transparent: true,
-      opacity: 0.22,
+      opacity: 0.3,
       depthWrite: false,
     });
     const glow = new THREE.Mesh(glowGeom, glowMat);
@@ -2171,7 +2360,7 @@ class Projectile {
     const lifeRatio = age / this.lifetime;
     this.mesh.traverse((child) => {
       if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-        const baseOpacity = child === this.mesh ? 0.95 : 0.22;
+        const baseOpacity = child === this.mesh ? 0.95 : 0.3;
         child.material.opacity = baseOpacity * Math.max(0, 1.0 - lifeRatio);
       }
     });
@@ -2254,9 +2443,16 @@ class PowerUp {
       color,
       transparent: true,
       opacity: 0.8,
+      blending: THREE.AdditiveBlending,
     });
     const core = new THREE.Mesh(geom, mat);
     this.mesh.add(core);
+
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(2.0, 12, 8),
+      createGlowMaterial(color, 0.18),
+    );
+    this.mesh.add(halo);
 
     // Outer glow ring
     const ringGeom = new THREE.TorusGeometry(2.2, 0.15, 8, 16);
@@ -2264,10 +2460,16 @@ class PowerUp {
       color,
       transparent: true,
       opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
     const ring = new THREE.Mesh(ringGeom, ringMat);
     ring.rotation.x = Math.PI / 2;
     this.mesh.add(ring);
+
+    const verticalRing = new THREE.Mesh(ringGeom, ringMat.clone());
+    verticalRing.rotation.y = Math.PI / 2;
+    this.mesh.add(verticalRing);
 
     this.mesh.position.copy(this.position);
     scene.add(this.mesh);
@@ -2279,7 +2481,10 @@ class PowerUp {
     // Rotate and bob
     this.mesh.rotation.y += delta * 2;
     this.mesh.rotation.x += delta * 0.5;
+    this.mesh.rotation.z += delta * 0.35;
     this.mesh.position.y = this.position.y + Math.sin(time * 3) * 0.5;
+    const pulse = 1 + Math.sin(time * 6) * 0.08;
+    this.mesh.scale.setScalar(pulse);
 
     // Check lifetime
     if (time - this.spawnTime > this.lifetime) {
@@ -2287,15 +2492,18 @@ class PowerUp {
     }
   }
 
-  destroy(scene: THREE.Scene) {
+  destroy(scene: THREE.Scene) {
     this.active = false;
     scene.remove(this.mesh);
   }
 
   checkCollection(playerPos: THREE.Vector3): boolean {
     if (!this.active) return false;
-    const dist = this.mesh.position.distanceTo(playerPos);
-    return dist < 5;
+    // For arcade shooter feel, ignore the height (Y) difference and use a generous radius
+    const dx = this.mesh.position.x - playerPos.x;
+    const dz = this.mesh.position.z - playerPos.z;
+    const distSq = dx * dx + dz * dz;
+    return distSq < 100; // Radius of 10 for easier collection
   }
 }
 
@@ -2389,6 +2597,7 @@ export class GameEngine {
   camera: THREE.PerspectiveCamera;
   renderer: THREE.WebGLRenderer;
   composer: EffectComposer;
+  usePostProcessing = false;
   world: CANNON.World;
   city: CityEnvironment;
 
@@ -2446,6 +2655,7 @@ export class GameEngine {
   fuelDrainPerSecond = 0.85;
   lastStatsHealth = -1;
   lastStatsFuel = -1;
+  lastUiUpdateTime = -Infinity;
   autoScrollSpeed = 28;
   survivalTime = 0;
   combatIntensity = 0;
@@ -2505,21 +2715,24 @@ export class GameEngine {
       powerPreference: "high-performance",
     });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setClearColor(0x9fdce8);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO));
+    this.renderer.setClearColor(SKY_CLEAR_COLOR);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.02;
+    this.renderer.shadowMap.enabled = false;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x9fdce8);
-    this.scene.fog = new THREE.FogExp2(0x9fdce8, 0.009);
+    this.scene.background = new THREE.Color(SKY_CLEAR_COLOR);
+    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, 0.0058);
+    this.scene.add(createSkyDome());
 
     this.camera = new THREE.PerspectiveCamera(
       52,
       window.innerWidth / window.innerHeight,
       0.1,
-      360,
+      300,
     );
     this.camera.position.set(0, 62, 46);
     this.camera.lookAt(0, 0, 0);
@@ -2530,17 +2743,11 @@ export class GameEngine {
     const renderPass = new RenderPass(this.scene, this.camera);
     this.composer.addPass(renderPass);
 
-    const ssaoPass = new SSAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
-    ssaoPass.kernelRadius = 16;
-    ssaoPass.minDistance = 0.005;
-    ssaoPass.maxDistance = 0.1;
-    this.composer.addPass(ssaoPass);
-
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-    bloomPass.threshold = 0.55; // High threshold so only explosions/particles glow
-    bloomPass.strength = 1.6;
-    bloomPass.radius = 0.5;
-    this.composer.addPass(bloomPass);
+    bloomPass.threshold = 0.82;
+    bloomPass.strength = 0.72;
+    bloomPass.radius = 0.42;
+    if (this.usePostProcessing) this.composer.addPass(bloomPass);
 
     const outputPass = new OutputPass();
     this.composer.addPass(outputPass);
@@ -2549,21 +2756,34 @@ export class GameEngine {
     this.world.gravity.set(0, -9.82, 0);
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
 
-    const ambient = new THREE.HemisphereLight(0xdff7ff, 0x5c6eb4, 2.4);
+    const ambient = new THREE.HemisphereLight(0xe9fbff, 0x4a5576, 2.05);
     this.scene.add(ambient);
 
-    const softKey = new THREE.DirectionalLight(0xffffff, 0.7);
-    softKey.position.set(-35, 70, 45);
+    const softKey = new THREE.DirectionalLight(0xfff0cb, 1.18);
+    softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
-    softKey.shadow.camera.left = -150;
-    softKey.shadow.camera.right = 150;
-    softKey.shadow.camera.top = 150;
-    softKey.shadow.camera.bottom = -150;
+    softKey.shadow.camera.left = -180;
+    softKey.shadow.camera.right = 180;
+    softKey.shadow.camera.top = 180;
+    softKey.shadow.camera.bottom = -180;
     softKey.shadow.camera.near = 0.5;
-    softKey.shadow.camera.far = 300;
+    softKey.shadow.camera.far = 340;
     softKey.shadow.mapSize.width = 2048;
     softKey.shadow.mapSize.height = 2048;
+    softKey.shadow.bias = -0.00018;
     this.scene.add(softKey);
+
+    const rimLight = new THREE.DirectionalLight(0x8bd8ff, 0.62);
+    rimLight.position.set(65, 50, -85);
+    this.scene.add(rimLight);
+
+    const sunCore = new THREE.Mesh(
+      new THREE.SphereGeometry(8, 18, 10),
+      createGlowMaterial(0xffdd7a, 0.58),
+    );
+    sunCore.position.set(-116, 118, -178);
+    sunCore.renderOrder = -2;
+    this.scene.add(sunCore);
 
     this.city = new CityEnvironment(this.scene, this.world);
 
@@ -2595,7 +2815,9 @@ export class GameEngine {
       color: 0xffffff,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.58,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
     this.innerRing = new THREE.Mesh(
       new THREE.RingGeometry(1.0, 1.3, 16),
@@ -2607,6 +2829,16 @@ export class GameEngine {
       ringMat,
     );
     this.outerRing.rotation.x = -Math.PI / 2;
+
+    const pipMat = createGlowMaterial(0xffffff, 0.58);
+    for (let i = 0; i < 4; i++) {
+      const pip = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.04, 1.5), pipMat);
+      pip.position.z = 2.9;
+      const pivot = new THREE.Group();
+      pivot.rotation.y = (Math.PI / 2) * i;
+      pivot.add(pip);
+      this.targetGroup.add(pivot);
+    }
 
     this.targetGroup.add(this.innerRing, this.outerRing);
     this.scene.add(this.targetGroup);
@@ -2774,9 +3006,18 @@ export class GameEngine {
   onResize = () => {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.composer.setSize(window.innerWidth, window.innerHeight);
   };
+
+  private renderFrame() {
+    if (this.usePostProcessing) {
+      this.composer.render();
+      return;
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
 
   private getFallbackFireDirection() {
     if (this.mouseAimValid) {
@@ -3469,27 +3710,8 @@ export class GameEngine {
 
   updateUI(time: number) {
     this.emitStatsIfChanged();
-
-    const radar = {
-      player: {
-        x: this.helicopter.body.position.x,
-        z: this.helicopter.body.position.z,
-        rotation: this.helicopter.mesh.rotation.y,
-      },
-      enemies: this.enemies.map((e) => ({
-        x: e.body.position.x,
-        z: e.body.position.z,
-        type: e.type,
-      })),
-      projectiles: [
-        ...this.playerProjectiles.pool
-          .filter((p) => p.active)
-          .map((p) => ({ x: p.pos.x, z: p.pos.z, owner: "player" })),
-        ...this.enemyProjectiles.pool
-          .filter((p) => p.active)
-          .map((p) => ({ x: p.pos.x, z: p.pos.z, owner: "enemy" })),
-      ],
-    };
+    if (this.isPlaying && time - this.lastUiUpdateTime < 1 / 12) return;
+    this.lastUiUpdateTime = time;
 
     const weapon = this.weapons.get(this.currentWeapon);
 
@@ -3504,7 +3726,6 @@ export class GameEngine {
           wave: this.currentWave,
           message: this.waveTransitionTimer > 0 ? this.waveMessage : null,
           playing: this.isPlaying,
-          radar,
           weapon: weapon ? {
             name: weapon.name,
             ammo: weapon.ammo,
@@ -4031,10 +4252,9 @@ export class GameEngine {
     if (!this.isPlaying) {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
-      this.helicopter.mainRotor.rotation.y += 0.25;
-      this.helicopter.tailRotor.rotation.x += 0.25;
+      this.helicopter.animateRotors(0, 60, Math.max(delta, 1 / TARGET_RENDER_FPS));
       this.updateCamera();
-      this.composer.render();
+      this.renderFrame();
       return;
     }
 
@@ -4178,7 +4398,7 @@ export class GameEngine {
         window.clearTimeout(this.lightningTimeout);
       }
       this.lightningTimeout = window.setTimeout(() => {
-        if (!this.disposed) this.renderer.setClearColor(0x9fdce8);
+        if (!this.disposed) this.renderer.setClearColor(SKY_CLEAR_COLOR);
         this.lightningTimeout = null;
       }, 50);
     }
@@ -4449,8 +4669,7 @@ export class GameEngine {
 
     this.updateCamera();
 
-    // Use Composer instead of Renderer
-    this.composer.render();
+    this.renderFrame();
   };
 
   updateCamera() {

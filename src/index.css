@@ -7,26 +7,28 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #9fdce8;
+  background: #97dff0;
 }
 
 .arcade-scanlines {
   background:
+    linear-gradient(rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.035)),
     repeating-linear-gradient(
       to bottom,
-      rgba(255, 255, 255, 0.08) 0,
-      rgba(255, 255, 255, 0.08) 1px,
+      rgba(255, 255, 255, 0.1) 0,
+      rgba(255, 255, 255, 0.1) 1px,
       transparent 1px,
-      transparent 5px
+      transparent 4px
     );
-  mix-blend-mode: soft-light;
-  opacity: 0.45;
+  mix-blend-mode: overlay;
+  opacity: 0.34;
 }
 
 .arcade-vignette {
   background:
-    radial-gradient(circle at center, transparent 42%, rgba(6, 13, 35, 0.18) 72%, rgba(3, 8, 22, 0.42) 100%),
-    linear-gradient(90deg, rgba(255, 44, 68, 0.12), transparent 18%, transparent 82%, rgba(255, 230, 109, 0.12));
+    radial-gradient(circle at 50% 42%, transparent 36%, rgba(6, 13, 35, 0.14) 70%, rgba(2, 5, 16, 0.46) 100%),
+    linear-gradient(90deg, rgba(255, 44, 68, 0.1), transparent 16%, transparent 84%, rgba(255, 230, 109, 0.1)),
+    linear-gradient(to bottom, rgba(255, 247, 210, 0.14), transparent 18%, transparent 74%, rgba(4, 11, 28, 0.22));
 }
 
 .arcade-marquee {
@@ -55,13 +57,18 @@ body,
   width: min(520px, calc(100vw - 32px));
   border: 3px solid rgba(255, 255, 255, 0.72);
   border-radius: 8px;
-  background: linear-gradient(160deg, rgba(38, 84, 177, 0.88), rgba(23, 45, 108, 0.9));
+  background:
+    linear-gradient(160deg, rgba(48, 104, 204, 0.86), rgba(20, 42, 103, 0.92)),
+    radial-gradient(circle at 18% 0%, rgba(255, 230, 109, 0.26), transparent 32%);
   padding: 24px;
   box-shadow:
     0 8px 0 #16265f,
     0px 22px 34px rgba(15, 35, 72, 0.38),
-    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+    0 0 46px rgba(127, 246, 255, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 -22px 42px rgba(3, 12, 39, 0.22);
   transform-style: preserve-3d;
+  backdrop-filter: blur(8px) saturate(1.12);
 }
 
 .menu-title-slab {
@@ -72,7 +79,10 @@ body,
   border: 3px solid rgba(255, 255, 255, 0.78);
   border-radius: 6px;
   background: #ef233c;
-  box-shadow: 0 7px 0 #8f1421;
+  box-shadow:
+    0 7px 0 #8f1421,
+    0 0 22px rgba(255, 51, 68, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.34);
   transform: translateZ(34px);
 }
 
@@ -90,9 +100,11 @@ body,
 .menu-stat {
   border: 2px solid rgba(255, 255, 255, 0.42);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
   padding: 10px 8px;
-  box-shadow: 0 4px 0 rgba(18, 31, 77, 0.6);
+  box-shadow:
+    0 4px 0 rgba(18, 31, 77, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
   transform: translateZ(18px);
 }
 
@@ -122,10 +134,12 @@ body,
 .menu-chip {
   border: 2px solid rgba(255, 255, 255, 0.28);
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(5, 16, 48, 0.22);
   padding: 8px 10px;
   text-align: center;
-  box-shadow: 0 3px 0 rgba(18, 31, 77, 0.5);
+  box-shadow:
+    0 3px 0 rgba(18, 31, 77, 0.5),
+    inset 0 0 16px rgba(127, 246, 255, 0.08);
 }
 
 @keyframes menu-float {

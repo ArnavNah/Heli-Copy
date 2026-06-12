@@ -283,7 +283,7 @@ export default function App() {
   const dangerOpacity = mode === 'playing' ? clampPercent(35 - health) / 100 : 0;
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#9fdce8] font-sans text-white pointer-events-auto select-none">
+    <div className="relative h-screen w-screen overflow-hidden bg-[#97dff0] font-sans text-white pointer-events-auto select-none">
       <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full touch-none z-0" />
       <div className="arcade-scanlines pointer-events-none absolute inset-0 z-10" />
       <div className="arcade-vignette pointer-events-none absolute inset-0 z-10" />
