@@ -225,6 +225,19 @@ class CityEnvironment {
     this.update(0, world);
   }
 
+  reset(world: CANNON.World) {
+    for (const chunk of this.chunks.values()) {
+      this.group.remove(chunk.group);
+      for (const body of chunk.bodies) {
+        world.removeBody(body);
+      }
+    }
+    this.chunks.clear();
+    this.blocks = [];
+    this.rooftopSpots = [];
+    this.update(0, world);
+  }
+
   getSpawnSpot(playerPos: CANNON.Vec3): RooftopSpot {
     const candidates = this.rooftopSpots.filter((spot) => {
       const dx = spot.x - playerPos.x;
@@ -976,7 +989,8 @@ class WeatherSystem {
       (this.targetIntensity - this.stormIntensity) * delta * 0.1;
 
     // Fog management
-    const fogDensity = 0.0058 + this.stormIntensity * 0.018;
+    // Cap maximum fog density at 0.011 so skyscraper silhouettes stay visible during heavy storms
+    const fogDensity = 0.0058 + this.stormIntensity * 0.0052;
     const fog = scene.fog as THREE.FogExp2;
     fog.density = fogDensity;
     fog.color.copy(this.tempColor.copy(this.clearFog).lerp(this.stormFog, this.stormIntensity));
@@ -1487,6 +1501,19 @@ class Helicopter extends Entity {
     tailBlurDisc.visible = false;
     this.tailRotor.add(tailBlurDisc);
     baseGroup.add(this.tailRotor);
+    // Shield Bubble Mesh
+    const shieldGeo = new THREE.SphereGeometry(3.6, 16, 16);
+    const shieldMat = new THREE.MeshBasicMaterial({
+      color: 0x4488ff,
+      transparent: true,
+      opacity: 0.28,
+      wireframe: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.shieldMesh = new THREE.Mesh(shieldGeo, shieldMat);
+    this.shieldMesh.visible = false;
+    baseGroup.add(this.shieldMesh);
 
     this.mesh = baseGroup;
     this.mesh.rotation.order = "YXZ";
@@ -1560,8 +1587,35 @@ class Helicopter extends Entity {
     delta: number = 0.016,
     windForce?: CANNON.Vec3,
     particles?: GPUParticleSystem,
+    shieldActive: boolean = false,
+    speedBoostActive: boolean = false,
+    hasInput: boolean = false,
+    autoScrollSpeed: number = 28,
   ) {
     if (!this.active) return;
+
+    // Toggle and animate shield bubble
+    if (this.shieldMesh) {
+      this.shieldMesh.visible = shieldActive;
+      if (shieldActive) {
+        this.shieldMesh.rotation.y = time * 2;
+        this.shieldMesh.rotation.x = time * 0.5;
+        const scale = 1.0 + Math.sin(time * 6) * 0.05;
+        this.shieldMesh.scale.set(scale, scale, scale);
+      }
+    }
+
+    // Speed Boost visual trails from wingtips
+    if (particles && speedBoostActive && Math.random() < 0.3) {
+      const leftTip = new THREE.Vector3(-1.9, 0.4, 0.2).applyMatrix4(this.mesh.matrixWorld);
+      const rightTip = new THREE.Vector3(1.9, 0.4, 0.2).applyMatrix4(this.mesh.matrixWorld);
+      particles.spawnSmoke(leftTip.x, leftTip.y, leftTip.z, time);
+      particles.spawnSmoke(rightTip.x, rightTip.y, rightTip.z, time);
+      if (Math.random() < 0.4) {
+        particles.spawnSparks(leftTip.x, leftTip.y, leftTip.z, time);
+        particles.spawnSparks(rightTip.x, rightTip.y, rightTip.z, time);
+      }
+    }
 
     if (this.dashTimer > 0) {
       this.dashTimer -= delta;
@@ -1655,9 +1709,9 @@ class Helicopter extends Entity {
       }
     }
 
-    // Calculate player input agility (reticle speed)
+    // Calculate player input agility (reticle speed) - exclude auto scroll
     const dxInput = this.targetPosition.x - this.lastTargetPosition.x;
-    const dzInput = this.targetPosition.z - this.lastTargetPosition.z;
+    const dzInput = (this.targetPosition.z - this.lastTargetPosition.z) + (autoScrollSpeed * delta);
     const inputSpeed =
       Math.sqrt(dxInput * dxInput + dzInput * dzInput) / Math.max(delta, 0.001);
     this.lastTargetPosition.copy(this.targetPosition);
@@ -1670,17 +1724,17 @@ class Helicopter extends Entity {
     const distToTarget = Math.sqrt(ex * ex + ez * ez);
 
     const maxCruiseSpeed = (45 + inputAgility * 15) * engineEff;
-    // Arcade style: very aggressive position tracking (high factor ensures we track the target closely)
-    let desiredVx = THREE.MathUtils.clamp(ex * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
-    let desiredVz = THREE.MathUtils.clamp(ez * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
+    // Smoother target tracking: position tracking multiplier scaled down to 6.0
+    let desiredVx = THREE.MathUtils.clamp(ex * 6.0, -maxCruiseSpeed, maxCruiseSpeed);
+    let desiredVz = THREE.MathUtils.clamp(ez * 6.0, -maxCruiseSpeed, maxCruiseSpeed);
     const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
     if (desiredSpeed > maxCruiseSpeed) {
       desiredVx = (desiredVx / desiredSpeed) * maxCruiseSpeed;
       desiredVz = (desiredVz / desiredSpeed) * maxCruiseSpeed;
     }
 
-    // Arcade style: high acceleration responsiveness (snappy start/stop) but tuned to show off braking tilt
-    const accelResponsiveness = (75 + inputAgility * 25) * rotorEff * engineEff;
+    // Smoother flight: lower accelResponsiveness (7.5 to 12.0 instead of 75 to 100)
+    const accelResponsiveness = (7.5 + inputAgility * 4.5) * rotorEff * engineEff;
     let fx = (desiredVx - this.body.velocity.x) * this.body.mass * accelResponsiveness;
     let fz = (desiredVz - this.body.velocity.z) * this.body.mass * accelResponsiveness;
 
@@ -1690,13 +1744,13 @@ class Helicopter extends Entity {
       fz += windForce.z * 0.35;
     }
 
-    // Organic hover drifting
-    const speed = Math.sqrt(
-      this.body.velocity.x ** 2 + this.body.velocity.z ** 2,
+    // Organic hover drifting (relative speed excludes autoScrollSpeed)
+    const relativeSpeed = Math.sqrt(
+      this.body.velocity.x ** 2 + (this.body.velocity.z + autoScrollSpeed) ** 2,
     );
-    const isIdle = inputSpeed < 2.0 && distToTarget < 3.0; // Is the player resting?
+    const isIdle = !hasInput && distToTarget < 5.0; // Is the player resting?
 
-    const idleFactor = Math.max(0, 1.0 - speed / 8.0);
+    const idleFactor = Math.max(0, 1.0 - relativeSpeed / 8.0);
 
     const driftX = Math.sin(time * 1.2) * Math.cos(time * 0.7);
     const driftZ = Math.cos(time * 1.5) * Math.sin(time * 0.8);
@@ -1704,7 +1758,7 @@ class Helicopter extends Entity {
     fx += driftX * idleFactor * 9;
     fz += driftZ * idleFactor * 9;
 
-    // Arcade style: allow sufficient force to achieve the desired velocity instantly
+    // Allow force to be applied without clipping
     const maxForce = (2500 + inputAgility * 500) * engineEff;
     const forceMag = Math.sqrt(fx * fx + fz * fz);
     if (forceMag > maxForce) {
@@ -1766,10 +1820,11 @@ class Helicopter extends Entity {
     // Visual Tilting: Pitch DOWN when accelerating forward (positive localVz/negative localFz)
     // and pitch UP (flare) when braking. Roll INTO turns based on lateral forces.
     const tiltCap = 0.52;
+    // Increased force coefficients to match the smoothed, smaller force values
     const targetTiltX =
-      THREE.MathUtils.clamp(localFz * 0.00028 + localVz * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
+      THREE.MathUtils.clamp(localFz * 0.0025 + localVz * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
     const targetTiltZ =
-      -THREE.MathUtils.clamp(localFx * 0.00028 + localVx * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
+      -THREE.MathUtils.clamp(localFx * 0.0025 + localVx * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
 
     const tiltSmoothing =
       (isIdle ? 0.055 : 0.16 + inputAgility * 0.08) * rotorEff;
@@ -1931,6 +1986,7 @@ class Enemy extends Entity {
   type: EnemyType;
   lastShotTime: number = 0;
   basePoints: number = 50;
+  radius: number = 2.2;
 
   personalityOffset: number;
   evadeTimer: number = 0;
@@ -1987,6 +2043,7 @@ class Enemy extends Entity {
     }
 
     this.hp = this.maxHp;
+    this.radius = radius;
 
     if (type === EnemyType.BOSS) {
       // Big Boss Helicopter
@@ -2147,8 +2204,82 @@ class Enemy extends Entity {
     enemyProjectilePool: ProjectilePool,
     playerBullets: Projectile[],
     allEnemies: Enemy[],
+    city: CityEnvironment,
   ) {
     if (!this.active) return false;
+
+    // Boids horizontal repulsion force to prevent enemies from stacking
+    let repelForceX = 0;
+    let repelForceZ = 0;
+    for (const other of allEnemies) {
+      if (other === this || !other.active) continue;
+      const dxOther = this.body.position.x - other.body.position.x;
+      const dzOther = this.body.position.z - other.body.position.z;
+      const distOther = Math.sqrt(dxOther * dxOther + dzOther * dzOther);
+      const minDist = (this.radius + other.radius) * 1.35;
+      if (distOther < minDist && distOther > 0.001) {
+        const force = (1.0 - distOther / minDist) * 16.0;
+        repelForceX += (dxOther / distOther) * force;
+        repelForceZ += (dzOther / distOther) * force;
+      }
+    }
+
+    // AABB Building Collision Resolution
+    for (const block of city.blocks) {
+      if (block.destroyed) continue;
+
+      const dxBlock = this.body.position.x - block.x;
+      const dzBlock = this.body.position.z - block.z;
+      const rangeX = block.width / 2 + this.radius + 5;
+      const rangeZ = block.depth / 2 + this.radius + 5;
+
+      if (Math.abs(dxBlock) > rangeX || Math.abs(dzBlock) > rangeZ) {
+        continue;
+      }
+
+      const enemyMinX = this.body.position.x - this.radius;
+      const enemyMaxX = this.body.position.x + this.radius;
+      const enemyMinY = this.body.position.y - this.radius * 0.75;
+      const enemyMaxY = this.body.position.y + this.radius * 0.75;
+      const enemyMinZ = this.body.position.z - this.radius;
+      const enemyMaxZ = this.body.position.z + this.radius;
+
+      const blockMinX = block.x - block.width / 2;
+      const blockMaxX = block.x + block.width / 2;
+      const blockMinY = 0;
+      const blockMaxY = block.height;
+      const blockMinZ = block.z - block.depth / 2;
+      const blockMaxZ = block.z + block.depth / 2;
+
+      const overlapX = Math.min(enemyMaxX, blockMaxX) - Math.max(enemyMinX, blockMinX);
+      const overlapY = Math.min(enemyMaxY, blockMaxY) - Math.max(enemyMinY, blockMinY);
+      const overlapZ = Math.min(enemyMaxZ, blockMaxZ) - Math.max(enemyMinZ, blockMinZ);
+
+      if (overlapX > 0 && overlapY > 0 && overlapZ > 0) {
+        // We have an intersection! Find the minimum penetration axis
+        if (overlapY < overlapX && overlapY < overlapZ) {
+          // Push upwards onto the roof
+          this.body.position.y += overlapY;
+          this.body.velocity.y = Math.max(0, this.body.velocity.y);
+        } else if (overlapX < overlapZ) {
+          // Push along X axis
+          if (this.body.position.x < block.x) {
+            this.body.position.x -= overlapX;
+          } else {
+            this.body.position.x += overlapX;
+          }
+          this.body.velocity.x = 0;
+        } else {
+          // Push along Z axis
+          if (this.body.position.z < block.z) {
+            this.body.position.z -= overlapZ;
+          } else {
+            this.body.position.z += overlapZ;
+          }
+          this.body.velocity.z = 0;
+        }
+      }
+    }
 
     const dx = targetPos.x - this.body.position.x;
     const dz = targetPos.z - this.body.position.z;
@@ -2162,7 +2293,7 @@ class Enemy extends Entity {
       const speed = 35;
       const swoopX = Math.cos(time * 2 + this.personalityOffset) * 15;
       const swoopZ = Math.sin(time * 2 + this.personalityOffset) * 15;
-      this.body.velocity.set(dirX * speed + swoopX, 0, dirZ * speed + swoopZ);
+      this.body.velocity.set(dirX * speed + swoopX + repelForceX, 0, dirZ * speed + swoopZ + repelForceZ);
 
       // Drones fire rapidly at close range
       let fired = false;
@@ -2213,13 +2344,13 @@ class Enemy extends Entity {
 
     if (dist > 45) {
       // Approach directly
-      this.body.velocity.set(dirX * speed, 0, dirZ * speed);
+      this.body.velocity.set(dirX * speed + repelForceX, 0, dirZ * speed + repelForceZ);
     } else if (dist < 20 || isEvading) {
       // Evade / back away and strafe
-      this.body.velocity.set((-dirX + tangentX * 1.5) * speed * 0.7, 0, (-dirZ + tangentZ * 1.5) * speed * 0.7);
+      this.body.velocity.set((-dirX + tangentX * 1.5) * speed * 0.7 + repelForceX, 0, (-dirZ + tangentZ * 1.5) * speed * 0.7 + repelForceZ);
     } else {
       // Orbit (strafe)
-      this.body.velocity.set((tangentX + dirX * 0.2) * speed * 0.6, 0, (tangentZ + dirZ * 0.2) * speed * 0.6);
+      this.body.velocity.set((tangentX + dirX * 0.2) * speed * 0.6 + repelForceX, 0, (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ);
     }
 
     // Firing Logic
@@ -3017,6 +3148,7 @@ export class GameEngine {
   }
 
   resetGame() {
+    this.city.reset(this.world);
     for (const enemy of this.enemies) {
       enemy.destroy();
     }
@@ -3936,6 +4068,7 @@ export class GameEngine {
               time,
               40,
             );
+            this.city.damageNearby(e.body.position.x, e.body.position.z, 25, 120);
           }
         }
         this.audio.playExplosion(2.0);
@@ -4475,10 +4608,13 @@ export class GameEngine {
       normZ = moveZ / mag;
     }
 
-    // Arcade style: instant snap to the desired input vector with no acceleration ramp
+    // Smooth input ramp for keyboard controls to prevent instant jerks
     const targetMag = Math.min(1, mag);
-    this.keyboardVelocity.x = normX * targetMag;
-    this.keyboardVelocity.y = normZ * targetMag;
+    const targetVelocityX = normX * targetMag;
+    const targetVelocityY = normZ * targetMag;
+    const inputLerpFactor = 1 - Math.exp(-delta * 9.5); // Fast but smooth ramp
+    this.keyboardVelocity.x = THREE.MathUtils.lerp(this.keyboardVelocity.x, targetVelocityX, inputLerpFactor);
+    this.keyboardVelocity.y = THREE.MathUtils.lerp(this.keyboardVelocity.y, targetVelocityY, inputLerpFactor);
 
     const inputLength = this.keyboardVelocity.length();
     if (inputLength > 0.005) {
@@ -4576,9 +4712,18 @@ export class GameEngine {
 
     // Apply unified post-input target decay back to player position when idle
     if (!this.hasInputThisFrame) {
-      // Arcade style: Instant snap to body position for immediate braking
-      this.movementTarget.x = this.helicopter.body.position.x;
-      this.movementTarget.z = this.helicopter.body.position.z;
+      // Let the horizontal target smoothly decay towards the body position rather than snapping instantly
+      const targetLerp = 1 - Math.exp(-delta * 8.0);
+      this.movementTarget.x = THREE.MathUtils.lerp(
+        this.movementTarget.x,
+        this.helicopter.body.position.x,
+        targetLerp
+      );
+      this.movementTarget.z = THREE.MathUtils.lerp(
+        this.movementTarget.z,
+        this.helicopter.body.position.z - (this.autoScrollSpeed / 12.0),
+        targetLerp
+      );
     }
     this.clampMovementTarget();
     this.currentFuel = Math.max(
@@ -4719,9 +4864,17 @@ export class GameEngine {
         window.clearTimeout(this.lightningTimeout);
       }
       this.lightningTimeout = window.setTimeout(() => {
-        if (!this.disposed) this.renderer.setClearColor(SKY_CLEAR_COLOR);
+        if (!this.disposed) {
+          const fogColor = (this.scene.fog as THREE.FogExp2).color;
+          this.renderer.setClearColor(fogColor);
+        }
         this.lightningTimeout = null;
       }, 50);
+    } else {
+      if (this.lightningTimeout === null) {
+        const fogColor = (this.scene.fog as THREE.FogExp2).color;
+        this.renderer.setClearColor(fogColor);
+      }
     }
 
     this.world.step(1 / 60, delta, 3);
@@ -4737,7 +4890,7 @@ export class GameEngine {
       1.5,
     );
     this.helicopter.setHoverFloor(hoverFloor);
-    this.helicopter.update(time, delta, windCannon, this.particles);
+    this.helicopter.update(time, delta, windCannon, this.particles, this.shieldTimer > 0, this.speedBoostTimer > 0, this.hasInputThisFrame, this.autoScrollSpeed);
 
     // Engine sound based on speed
     const currentSpeed = Math.sqrt(
@@ -4769,6 +4922,7 @@ export class GameEngine {
         this.enemyProjectiles,
         this.playerProjectiles.pool,
         this.enemies,
+        this.city,
       );
       if (fired && time - this.lastEnemyFireSoundTime >= 0.15) {
         this.audio.playEnemyFire();
