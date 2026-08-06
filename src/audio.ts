@@ -9,9 +9,10 @@ export class AudioManager {
   // Looping engine sound
   private engineOsc: OscillatorNode | null = null;
   private engineOsc2: OscillatorNode | null = null;
-  private engineNoise: ScriptProcessorNode | null = null;
+  private engineNoise: AudioBufferSourceNode | null = null;
   private engineLfo: OscillatorNode | null = null;
   private engineGain: GainNode | null = null;
+  private volume = 0.8;
 
   // Background Music Sequencer
   private musicInterval: any = null;
@@ -27,7 +28,7 @@ export class AudioManager {
     if (this.ctx) return;
     this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.5;
+    this.masterGain.gain.value = this.volume * 0.5;
     this.masterGain.connect(this.ctx.destination);
     
     this.setupEngine();
@@ -37,6 +38,13 @@ export class AudioManager {
     if (!this.ctx) this.init();
     if (this.ctx && this.ctx.state === 'suspended') {
       this.ctx.resume();
+    }
+  }
+
+  public setVolume(level: number) {
+    this.volume = Math.max(0, Math.min(1, level));
+    if (this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(this.volume * 0.5, this.ctx ? this.ctx.currentTime : 0, 0.05);
     }
   }
 
@@ -59,15 +67,16 @@ export class AudioManager {
     const oscGain2 = this.ctx.createGain();
     oscGain2.gain.value = 0.08;
 
-    // Noise for rotor air movement
-    const bufferSize = 4096;
-    const noiseNode = this.ctx.createScriptProcessor(bufferSize, 1, 1);
-    noiseNode.onaudioprocess = (e) => {
-      const output = e.outputBuffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        output[i] = Math.random() * 2 - 1;
-      }
-    };
+    // Noise for rotor air movement (pre-rendered looping buffer — avoids deprecated ScriptProcessorNode)
+    const noiseBufferSize = Math.floor(this.ctx.sampleRate * 2); // 2 second loop
+    const noiseBuffer = this.ctx.createBuffer(1, noiseBufferSize, this.ctx.sampleRate);
+    const noiseData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < noiseBufferSize; i++) {
+      noiseData[i] = Math.random() * 2 - 1;
+    }
+    const noiseNode = this.ctx.createBufferSource();
+    noiseNode.buffer = noiseBuffer;
+    noiseNode.loop = true;
     this.engineNoise = noiseNode;
 
     const noiseFilter = this.ctx.createBiquadFilter();
@@ -118,6 +127,7 @@ export class AudioManager {
     this.engineOsc.start();
     this.engineOsc2.start();
     this.engineLfo = lfo;
+    noiseNode.start();
     lfo.start();
   }
 
@@ -381,6 +391,40 @@ export class AudioManager {
     osc.stop(now + 0.3);
   }
 
+  public playHonk() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    // Classic two-tone car horn — dual saws a minor third apart, ~0.35s
+    const osc = this.ctx.createOscillator();
+    const osc2 = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+    osc.type = 'sawtooth';
+    osc2.type = 'sawtooth';
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.linearRampToValueAtTime(430, now + 0.04);
+    osc.frequency.setValueAtTime(430, now + 0.2);
+    osc.frequency.linearRampToValueAtTime(370, now + 0.3);
+    osc2.frequency.setValueAtTime(286, now);
+    osc2.frequency.linearRampToValueAtTime(362, now + 0.04);
+    osc2.frequency.setValueAtTime(362, now + 0.2);
+    osc2.frequency.linearRampToValueAtTime(310, now + 0.3);
+    filter.type = 'lowpass';
+    filter.frequency.value = 2200;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.11, now + 0.03);
+    g.gain.setValueAtTime(0.11, now + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    osc.connect(filter);
+    osc2.connect(filter);
+    filter.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.34);
+    osc2.start(now);
+    osc2.stop(now + 0.34);
+  }
+
   public playHit() {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
@@ -416,6 +460,44 @@ export class AudioManager {
     g.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 0.08);
+  }
+
+  public playKillCombo(tier: number) {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const base = 440 + tier * 160;
+    for (let i = 0; i < 3; i++) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = base * (1 + i * 0.25);
+      g.gain.setValueAtTime(0.0001, now + i * 0.06);
+      g.gain.exponentialRampToValueAtTime(0.12, now + i * 0.06 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.06 + 0.12);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(now + i * 0.06);
+      osc.stop(now + i * 0.06 + 0.14);
+    }
+  }
+
+  public playUpgrade() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((freq, i) => {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, now + i * 0.07);
+      g.gain.exponentialRampToValueAtTime(0.16, now + i * 0.07 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.07 + 0.3);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(now + i * 0.07);
+      osc.stop(now + i * 0.07 + 0.32);
+    });
   }
 
   public startMusic() {
@@ -512,8 +594,12 @@ export class AudioManager {
     }
 
     if (this.engineNoise) {
+      try {
+        this.engineNoise.stop();
+      } catch {
+        // Already stopped
+      }
       this.engineNoise.disconnect();
-      this.engineNoise.onaudioprocess = null;
       this.engineNoise = null;
     }
 
