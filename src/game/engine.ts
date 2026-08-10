@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { AudioManager } from "../audio";
 import { createGlowMaterial, createSkyDome } from "./materials";
-import { Enemy, Helicopter, Objective, PowerUp, Projectile, ProjectilePool } from "./entities";
+import { Enemy, Helicopter, MOVEMENT_CONFIG, Objective, PowerUp, Projectile, ProjectilePool } from "./entities";
 import { CityEnvironment } from "./city";
 import { GPUParticleSystem, RainSystem, VolumetricExplosions, WeatherSystem } from "./particles";
 import {
@@ -14,6 +14,7 @@ import {
   EnemyModifier,
   EnemyType,
   FOG_CLEAR_COLOR,
+  FOG_DENSITY,
   GameSettings,
   HelicopterModel,
   MAX_RENDER_PIXEL_RATIO,
@@ -33,6 +34,7 @@ import {
   bossVolleyConfig,
   comboMultiplier,
   DIFFICULTIES,
+  MAX_RUN_LEVEL,
   MAX_WEAPON_LEVEL,
   objectiveConfig,
   pickUpgrades,
@@ -45,6 +47,9 @@ import {
   weaponLevelBonus,
   weaponLevelForXp,
   multikillTier,
+  runLevelForXp,
+  runXpForLevel,
+  xpForEnemyType,
   writeMastery,
 } from "./logic";
 import type { Difficulty as DifficultySetting, UpgradeId, UpgradeOption } from "./logic";
@@ -95,6 +100,11 @@ export class GameEngine {
   movementTarget: THREE.Vector3 = new THREE.Vector3(0, 26, 0);
   keyboardVelocity: THREE.Vector2 = new THREE.Vector2(0, 0);
   hasInputThisFrame: boolean = false;
+
+  // Phase 2: vertical input -1..1 (Space/Alt) with lerp smoothing; gamepad stick
+  // movement (non-touch) fed into updateKeyboardMovement for consistant normalization.
+  verticalInput: number = 0;
+  gamepadMove: { x: number; z: number } = { x: 0, z: 0 };
   aimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -35);
   mouseAimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -55);
   mouseAimValid: boolean = false;
@@ -117,6 +127,23 @@ export class GameEngine {
   disposed = false;
   isPlaying = false;
   gameOverDispatched = false;
+
+  // Perf overlay support (Pass 10 cleanup): a cheap rolling FPS counter and a
+  // public getPerfStats() so the HUD can show renderer.info without polling GL.
+  fpsFrames = 0;
+  fpsAccum = 0;
+  fps = 60;
+
+  // Phase 1: reused wind vector — was allocated every frame in tick().
+  private windCannon = new CANNON.Vec3();
+
+  // Phase 1: dev-only memory monitor (Step 9). Opt-in via
+  // localStorage 'helistrike:memmon' = '1'; compile-time stripped in prod
+  // builds. Logs a resource snapshot every 2s.
+  private memMon = import.meta.env.DEV
+    && typeof localStorage !== "undefined"
+    && localStorage.getItem("helistrike:memmon") === "1";
+  private memMonTimer = 0;
   isFiringMouse = false;
   isFiringGamepad = false;
   cameraShake = 0;
@@ -129,6 +156,23 @@ export class GameEngine {
   currentFuel = 100;
   maxFuel = 100;
   fuelDrainPerSecond = 0.85;
+
+  // Camera shake: the base camera position is kept separate from the shake
+  // offset so a decaying shake never corrupts the follow-lerp base or the
+  // occlusion ray origin (Pass 3 ghosting). Shake is composed per-frame as
+  // base + offset and decays frame-rate-independently.
+  private baseCamPos = new THREE.Vector3(0, 62, 46);
+  private shakeOffset = new THREE.Vector3();
+  private static readonly SHAKE_DECAY_RATE = 12; // per second, exp decay
+
+  // Phase 3 — ONE controlled camera-impulse system. Only heavy one-shot
+  // events call addCameraImpulse (bomb, boss slam, major collapse, heavy hit,
+  // crash). Machine-gun shots, normal bullets, movement, rotors, pickups and
+  // small explosions never set it. The value is set once (strongest wins while
+  // decaying) and the camera applies a restrained, X/Y-only positional offset
+  // that decays smoothly to zero — the base follow is never modified.
+  private static readonly CAMERA_IMPULSE_SCALE = 0.4; // restrain amplitude
+  private static readonly CAMERA_IMPULSE_MAX = 3.2; // absolute cap
   lastStatsHealth = -1;
   lastStatsFuel = -1;
   lastUiUpdateTime = -Infinity;
@@ -149,6 +193,22 @@ export class GameEngine {
   waveTimer: number = 0; // Seconds elapsed in the current time-driven wave
   waveMessage: string = "GET READY";
   minibossSpawnedThisWave: boolean = false;
+
+  // Phase 3: bounded spawn queue — horde bursts drain ONE enemy per cadence
+  // tick (frame budget = 1) so large groups stream in instead of constructing
+  // several full procedural models in a single frame.
+  private pendingSpawns = 0;
+  /** Phase 3: lightweight event/escort spawn descriptors (no Enemy is
+   *  constructed until drained) so convoy ambushes, air raids and boss escorts
+   *  stagger across frames instead of spiking one frame. */
+  private pendingEventSpawns: Array<{
+    type: EnemyType;
+    x: number;
+    z: number;
+    y: number;
+    modifier?: EnemyModifier;
+    pattern?: AttackPattern;
+  }> = [];
 
   // Destroyable objectives (SAM sites, radar towers, ammo depots)
   objectives: Objective[] = [];
@@ -233,6 +293,13 @@ export class GameEngine {
   comboMultiplier: number = 1;
   maxCombo: number = 0;
 
+  // Run-level XP (Vampire-Survivors style): collect XP gems dropped by enemies
+  // to fill a run level bar; each level-up opens the 1-of-3 upgrade roulette.
+  runLevel: number = 1;
+  runXp: number = 0;
+  /** Level-ups queued when one gem crosses several thresholds (boss gems). */
+  pendingLevelUps: number = 0;
+
   // Damage Boost & Shield
   damageBoostTimer: number = 0;
   shieldTimer: number = 0;
@@ -288,13 +355,13 @@ export class GameEngine {
     this.renderer.setClearColor(SKY_CLEAR_COLOR);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.02;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.shadowMap.enabled = false;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(SKY_CLEAR_COLOR);
-    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, 0.005);
+    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, FOG_DENSITY);
     this.scene.add(createSkyDome());
 
     this.camera = new THREE.PerspectiveCamera(
@@ -313,9 +380,10 @@ export class GameEngine {
     this.composer.addPass(renderPass);
 
     this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-    this.bloomPass.threshold = 0.82;
-    this.bloomPass.strength = 0.72;
-    this.bloomPass.radius = 0.42;
+    // Toned-down bloom: subtler glow so the scene doesn't wash out.
+    this.bloomPass.threshold = 0.88;
+    this.bloomPass.strength = 0.32;
+    this.bloomPass.radius = 0.35;
     this.bloomPass.enabled = this.settings.quality === 'high';
     this.composer.addPass(this.bloomPass);
 
@@ -326,10 +394,13 @@ export class GameEngine {
     this.world.gravity.set(0, -9.82, 0);
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
 
-    const ambient = new THREE.HemisphereLight(0xe9fbff, 0x4a5576, 2.05);
+    // Pass 8 lighting: warm key + neutral ambient + cool fill. Warm sunlit
+    // faces against cool shadow faces gives every low-poly box a clear
+    // lit / midtone / shadow read without flat blue silhouettes.
+    const ambient = new THREE.HemisphereLight(0xf3e8d6, 0x5f6b66, 1.05);
     this.scene.add(ambient);
 
-    const softKey = new THREE.DirectionalLight(0xfff0cb, 1.18);
+    const softKey = new THREE.DirectionalLight(0xffe7c4, 1.45);
     softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
     softKey.shadow.camera.left = -180;
@@ -343,7 +414,7 @@ export class GameEngine {
     softKey.shadow.bias = -0.00018;
     this.scene.add(softKey);
 
-    const rimLight = new THREE.DirectionalLight(0x8bd8ff, 0.62);
+    const rimLight = new THREE.DirectionalLight(0x9fc4e8, 0.4);
     rimLight.position.set(65, 50, -85);
     this.scene.add(rimLight);
 
@@ -366,7 +437,8 @@ export class GameEngine {
       if (this.audio) {
         this.audio.playExplosion(1.0);
       }
-      this.cameraShake = Math.max(this.cameraShake, 3.5);
+      // Major building collapse — allowed heavy impulse.
+      this.addCameraImpulse(3.5);
       this.score += Math.floor(50 * this.comboMultiplier);
       this.triggerHitStop(0.12, 0.04); // Crunchy freeze on building collapse
     };
@@ -448,6 +520,7 @@ export class GameEngine {
     window.addEventListener("helistrike:fire", this.onFireChange);
     window.addEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.addEventListener("helistrike:player-model", this.onPlayerModelChanged);
+    window.addEventListener("helistrike:env-debug", this.onEnvDebug);
 
     this.lastTime = performance.now() / 1000;
 
@@ -524,6 +597,7 @@ export class GameEngine {
     this.isFiringMouse = false;
     this.isFiringGamepad = false;
     this.cameraShake = 0;
+    this.baseCamPos.copy(this.camera.position);
     this.score = 0;
     this.totalKills = 0;
     this.shotsFired = 0;
@@ -548,6 +622,9 @@ export class GameEngine {
     this.waveTimer = 0;
     this.waveTransitionTimer = 2.2;
     this.waveMessage = "GET READY";
+    // Phase 3: pending spawns must not survive a restart.
+    this.pendingSpawns = 0;
+    this.pendingEventSpawns.length = 0;
     this.weather.stormIntensity = 0;
     this.weather.targetIntensity = 0;
     this.rain.mesh.visible = false;
@@ -557,6 +634,9 @@ export class GameEngine {
     this.comboTimer = 0;
     this.comboMultiplier = 1;
     this.maxCombo = 0;
+    this.runLevel = 1;
+    this.runXp = 0;
+    this.pendingLevelUps = 0;
     this.muzzleFlip = 1;
     this.damageBoostTimer = 0;
     this.shieldTimer = 0;
@@ -602,6 +682,7 @@ export class GameEngine {
   }
 
   dispose() {
+    if (this.disposed) return; // Phase 1: safe to call more than once
     this.disposed = true;
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("pointermove", this.onPointerMove);
@@ -621,6 +702,7 @@ export class GameEngine {
     window.removeEventListener("helistrike:fire", this.onFireChange);
     window.removeEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.removeEventListener("helistrike:player-model", this.onPlayerModelChanged);
+    window.removeEventListener("helistrike:env-debug", this.onEnvDebug);
     this.clearSalvoIndicators();
     this.helicopter.body.removeEventListener(
       "collide",
@@ -647,6 +729,56 @@ export class GameEngine {
     return this.settings.quality === 'high'
       ? Math.min(window.devicePixelRatio, 2)
       : Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO);
+  }
+
+  /** Live renderer stats for the on-screen perf overlay (zero GL cost — reads three's counters). */
+  getPerfStats() {
+    const info = this.renderer.info;
+    return {
+      fps: this.fps,
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      programs: info.programs ? info.programs.length : 0,
+      quality: this.settings.quality,
+      enemies: this.enemies.length,
+      powerups: this.powerups.length,
+      objectives: this.objectives.length,
+    };
+  }
+
+  /**
+   * Phase 1 dev memory monitor (Step 9). Called at a 2s cadence from tick()
+   * when enabled (DEV + localStorage 'helistrike:memmon'). Counts active
+   * runtime objects and reads renderer.info to spot unbounded growth while
+   * flying/streaming. Objects/geometries should plateau, never climb forever.
+   */
+  private monitorMemory(time: number) {
+    const info = this.renderer.info;
+    let sceneObjects = 0;
+    this.scene.traverse(() => {
+      sceneObjects++;
+    });
+    let traffic = 0;
+    for (const cars of this.city.chunkTraffic.values()) traffic += cars.length;
+    let playerProj = 0;
+    let enemyProj = 0;
+    for (const p of this.playerProjectiles.pool) if (p.active) playerProj++;
+    for (const p of this.enemyProjectiles.pool) if (p.active) enemyProj++;
+    let particles = 0;
+    const startAttr = this.particles.startTimeAttr;
+    for (let i = 0; i < this.particles.maxParticles; i++) {
+      if (startAttr.getX(i) > -9000) particles++;
+    }
+    console.info(
+      `[Heli-Strike mem] t=${time.toFixed(1)}s fps=${this.fps} ` +
+        `chunks=${this.city.chunks.size} sceneObj=${sceneObjects} blocks=${this.city.blocks.length} ` +
+        `enemies=${this.enemies.length} proj=${playerProj}/${enemyProj} particles=${particles} ` +
+        `powerups=${this.powerups.length} traffic=${traffic} turrets=${this.city.turrets.length} ` +
+        `geoms=${info.memory.geometries} textures=${info.memory.textures} ` +
+        `calls=${info.render.calls} tris=${info.render.triangles}`,
+    );
   }
 
   applySettings() {
@@ -744,25 +876,28 @@ export class GameEngine {
       this.targetGroup.position.set(targetPos.x, targetPos.y + 1.2, targetPos.z);
       const scale = this.autoAimTarget.type === EnemyType.TANK || this.autoAimTarget.type === EnemyType.BOSS ? 1.5 : 1.0;
       this.targetGroup.scale.setScalar(scale);
+    } else if (this.mouseAimValid) {
+      // No enemy in range — the chin gun physically tracks the mouse aim
+      // point instead of the body swinging around twin-stick style.
+      this.aimPoint.copy(this.mouseAimPoint);
+      this.aimPoint.y = aimHeight;
+      this.helicopter.setGunAim(this.aimPoint.x, aimHeight, this.aimPoint.z, true);
+      this.targetGroup.visible = true;
+      this.targetGroup.position.set(this.aimPoint.x, aimHeight + 0.3, this.aimPoint.z);
+      this.targetGroup.scale.setScalar(0.82);
     } else {
+      // No aim source at all — gun eases back to neutral, fire falls back to
+      // the travel direction.
       this.helicopter.setGunAim(0, 0, 0, false);
-      if (this.mouseAimValid) {
-        this.aimPoint.copy(this.mouseAimPoint);
-        this.aimPoint.y = aimHeight;
-        this.targetGroup.visible = true;
-        this.targetGroup.position.set(this.aimPoint.x, aimHeight + 0.3, this.aimPoint.z);
-        this.targetGroup.scale.setScalar(0.82);
-      } else {
-        const fallback = this.getFallbackFireDirection();
-        this.aimPoint.set(
-          this.helicopter.body.position.x + fallback.x * 65,
-          aimHeight,
-          this.helicopter.body.position.z + fallback.z * 65,
-        );
-        this.targetGroup.visible = true;
-        this.targetGroup.position.set(this.aimPoint.x, aimHeight + 0.3, this.aimPoint.z);
-        this.targetGroup.scale.setScalar(0.78);
-      }
+      const fallback = this.getFallbackFireDirection();
+      this.aimPoint.set(
+        this.helicopter.body.position.x + fallback.x * 65,
+        aimHeight,
+        this.helicopter.body.position.z + fallback.z * 65,
+      );
+      this.targetGroup.visible = true;
+      this.targetGroup.position.set(this.aimPoint.x, aimHeight + 0.3, this.aimPoint.z);
+      this.targetGroup.scale.setScalar(0.78);
     }
   }
 
@@ -822,6 +957,9 @@ export class GameEngine {
       aimHeight,
       this.helicopter.body.position.z + dirZ * aimDistance,
     );
+    // The chin gun tracks the stick aim — the body flies on course and never
+    // swings toward where the player is aiming.
+    this.helicopter.setGunAim(this.aimPoint.x, aimHeight, this.aimPoint.z, true);
     this.targetGroup.visible = false;
     this.isFiringMouse = true;
   }
@@ -1020,6 +1158,13 @@ export class GameEngine {
       if (isBuilding) {
         // Crash severity: a gentle scrape costs a little, a full-speed slam hurts
         const isSlam = impact >= 12;
+        // A dash must never plow through buildings: cancel it on a hard slam so the
+        // rebound + PD controller take over cleanly (no repeated slams, no stuck wall).
+        if (isSlam && this.dashActiveTimer > 0) {
+          this.dashActiveTimer = 0;
+          this.dashCooldownTimer = 0.75;
+          this.helicopter.dashTimer = 0;
+        }
         dmg = isSlam
           ? Math.min(28, Math.round(10 + impact * 0.8))
           : Math.min(12, Math.round(3 + impact * 0.7));
@@ -1068,7 +1213,7 @@ export class GameEngine {
           this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
           this.volumetricExplosions.spawn(spawnX, spawnY, spawnZ, 26, 8);
           this.audio.playExplosion(1.3);
-          this.cameraShake = Math.max(this.cameraShake, 8);
+          this.addCameraImpulse(8); // full crash — capped by CAMERA_IMPULSE_MAX
           this.triggerHitStop(0.18, 0.06);
           this.crashSmokeTimer = 1.1;
           this.crashSmokePos = { x: spawnX, y: spawnY, z: spawnZ };
@@ -1078,7 +1223,7 @@ export class GameEngine {
           this.particles.spawnSparks(spawnX, spawnY, spawnZ, now);
           this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
           this.audio.playHit();
-          this.cameraShake = Math.max(this.cameraShake, 2.2);
+          // Scrape — no camera impulse (would re-arm while grinding a wall).
           this.helicopter.triggerCrashTilt(0.35);
         }
 
@@ -1091,24 +1236,9 @@ export class GameEngine {
         this.helicopter.body.velocity.x = nx * rebound;
         this.helicopter.body.velocity.z = nz * rebound;
 
-        this.movementTarget.set(
-          this.helicopter.body.position.x + nx * 18,
-          this.movementTarget.y,
-          this.helicopter.body.position.z + nz * 18,
-        );
-        this.helicopter.setTarget(
-          this.movementTarget.x,
-          this.movementTarget.y,
-          this.movementTarget.z,
-        );
       } else {
-        this.cameraShake = Math.max(this.cameraShake, Math.min(1.8, impact * 0.25));
+
         this.audio.playHit();
-        this.movementTarget.set(
-          this.helicopter.body.position.x,
-          Math.max(this.helicopter.body.position.y, this.movementTarget.y),
-          this.helicopter.body.position.z,
-        );
       }
 
       if (this.dashActiveTimer > 0) {
@@ -1158,6 +1288,12 @@ export class GameEngine {
     }
     this.settings = next;
     this.applySettings();
+  };
+
+  /** Toggle the environment debug overlay (chunk/road/combat/landmark cells). */
+  onEnvDebug = (e: Event) => {
+    const detail = (e as CustomEvent<{ on?: boolean }>).detail;
+    this.city.setEnvDebug(Boolean(detail?.on));
   };
 
   readPlayerModel(): HelicopterModel {
@@ -1212,6 +1348,8 @@ export class GameEngine {
     this.applyRunUpgrade(detail.id);
     this.upgradePaused = false;
     this.isPlaying = true;
+    // If a boss gem queued several level-ups, immediately offer the next pick
+    this.offerNextLevelUp();
     this.updateUI(performance.now() / 1000);
   };
 
@@ -1320,21 +1458,32 @@ export class GameEngine {
     this.lastFiredWeapon = this.currentWeapon;
     this.lastFireTimestamp = time;
 
-    // Fire origin: the rotating chin turret when auto-aim is locked on — but only
-    // for the Machine Gun; missiles/rockets keep their wing/nose pod spawns.
-    const gunWorld = new THREE.Vector3();
+    // Fire origin: the rotating chin turret whenever the gun is tracking an
+    // aim point (enemy auto-aim, mouse, or touch stick) — Machine Gun rounds
+    // leave the muzzle and fly exactly where the physical gun points.
+    // Missiles/rockets keep their wing/nose pod spawns.
     const usingGun =
-      (this.autoAimTarget?.active ?? false) && this.currentWeapon === WeaponType.MACHINE_GUN;
-    if (usingGun) this.helicopter.gunMount.getWorldPosition(gunWorld);
-    const originX = usingGun ? gunWorld.x : this.helicopter.body.position.x;
-    const originY = usingGun
-      ? gunWorld.y - 0.25
-      : this.helicopter.body.position.y -
+      this.helicopter.gunAimMode && this.currentWeapon === WeaponType.MACHINE_GUN;
+    let originX: number, originY: number, originZ: number;
+    let hDirX: number, hDirZ: number;
+    if (usingGun) {
+      const muzzlePos = this.helicopter.getMuzzlePosition(new THREE.Vector3());
+      const muzzleDir = this.helicopter.getMuzzleDirection(new THREE.Vector3());
+      originX = muzzlePos.x;
+      originY = muzzlePos.y - 0.25;
+      originZ = muzzlePos.z;
+      // Bullets fly in the actual gun direction (muzzle forward), not toward
+      // the aim point — keeps the visual + gameplay alignment correct.
+      hDirX = muzzleDir.x;
+      hDirZ = muzzleDir.z;
+    } else {
+      originX = this.helicopter.body.position.x;
+      originY = this.helicopter.body.position.y -
         (this.currentWeapon === WeaponType.MISSILE || this.currentWeapon === WeaponType.ROCKET ? -0.75 : -0.45);
-    const originZ = usingGun ? gunWorld.z : this.helicopter.body.position.z;
-
-    let hDirX = this.aimPoint.x - originX;
-    let hDirZ = this.aimPoint.z - originZ;
+      originZ = this.helicopter.body.position.z;
+      hDirX = this.aimPoint.x - originX;
+      hDirZ = this.aimPoint.z - originZ;
+    }
     const aimLen = Math.sqrt(hDirX * hDirX + hDirZ * hDirZ);
     if (aimLen > 0.001) {
       hDirX /= aimLen;
@@ -1367,8 +1516,10 @@ export class GameEngine {
 
     // Play appropriate sound
     switch (this.currentWeapon) {
-      case WeaponType.MISSILE:
-        this.audio.playMissileLaunch();
+      case WeaponType.MISSILE:      this.audio.playMissileLaunch();
+      this.helicopter.triggerFirePitch(0.05); // salvo launch — tiny nose kick
+
+
         break;
       case WeaponType.ROCKET:
         this.audio.playRocketLaunch();
@@ -1451,18 +1602,19 @@ export class GameEngine {
     const fxY = usingGun ? originY : muzzleY;
     const fxZ = originZ + hDirZ * noseOffset;
     
-    if (weapon.spread > 0) { 
-      // Shotgun Flash
+    // NOTE: MACHINE_GUN carries a small spread value (0.015 bullet spread), so
+    // the shotgun branch must be keyed on the weapon TYPE, not spread > 0.
+    if (this.currentWeapon === WeaponType.SHOTGUN) {
+      // Shotgun Flash — no camera shake
       this.particles.spawnExplosion(fxX, fxY, fxZ, 15, time, 12);
-      this.cameraShake = Math.max(this.cameraShake, 0.5);
     } else if (weapon.blastRadius > 0) {
-      // Missile / Rocket backblast
+      // Missile / Rocket backblast — tiny visual nose kick, no camera shake
       this.particles.spawnExplosion(fxX, fxY, fxZ, 8, time, 6);
-      this.cameraShake = Math.max(this.cameraShake, 0.8);
+      this.helicopter.triggerFirePitch(0.06);
     } else {
-      // Machine Gun Sparks
+      // Machine Gun Sparks + barrel recoil (visual only — no camera shake)
       for(let s=0; s<2; s++) this.particles.spawnSparks(fxX, fxY, fxZ, time);
-      this.cameraShake = Math.max(this.cameraShake, 0.06); // Reduced machine gun shake for smooth arcade shooting
+      this.helicopter.triggerRecoil(0.22);
     }
 
     // Auto-reload if out of ammo
@@ -1506,8 +1658,17 @@ export class GameEngine {
     const stopScale = enemy.type === EnemyType.BOSS ? 0.02 : 0.05;
     this.triggerHitStop(stopDuration, stopScale);
 
-    // Drop power-up chance (increased for arcade shoot-em-up intensity)
-    const dropChance = enemy.type === EnemyType.TANK ? 0.65 : enemy.type === EnemyType.BOSS ? 1.0 : 0.35;
+    // Vampire-Survivors style: every kill drops an XP gem you fly through.
+    // Gems are the upgrade currency — collect them to level up and roll.
+    this.dropXpGem(
+      enemy.body.position.x,
+      enemy.body.position.y,
+      enemy.body.position.z,
+      xpForEnemyType(enemy.type, enemy.isElite),
+    );
+
+    // Occasional bonus power-ups (health/fuel/ammo/etc.) stay as a treat
+    const dropChance = enemy.type === EnemyType.TANK ? 0.3 : enemy.type === EnemyType.BOSS ? 1.0 : 0.14;
     if (Math.random() < dropChance) {
       this.dropPowerUp(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z);
     }
@@ -1535,7 +1696,11 @@ export class GameEngine {
     this.audio.playExplosion(enemy.type === EnemyType.BOSS ? 2.5 : 1.5);
   }
 
-  /** Grant weapon XP for a kill; level-ups open the upgrade roulette. */
+  /**
+   * Grant weapon XP for a kill. Weapon levels persist to meta-progression
+   * (hangar mastery) and passively buff that weapon — but they no longer open
+   * the upgrade roulette. Run-level XP (collected gems) drives the roulette.
+   */
   private grantWeaponXp(weapon: WeaponType) {
     const xp = (this.weaponXp.get(weapon) ?? 0) + 1;
     this.weaponXp.set(weapon, xp);
@@ -1553,16 +1718,37 @@ export class GameEngine {
           : `+${Math.round((after - 1) * 18)}% DMG`,
         "#7ee0ff",
       );
-      this.audio.playUpgrade();
-      if (!altFire) {
-        this.offerUpgrade();
-      } else {
+      if (altFire) {
         // Rank 5 is the cap — reward instead of a roulette
         this.maxHealth += 10;
         this.health = Math.min(this.maxHealth, this.health + 10);
-        this.audio.playUpgrade();
       }
+      this.audio.playUpgrade();
     }
+  }
+
+  /**
+   * Grant run-level XP from a collected gem. Each level crossed queues an
+   * upgrade roulette — a big gem can queue several, offered one after another
+   * so the player never skips a pick (VS boss-gem behavior).
+   */
+  private grantRunXp(amount: number, time: number) {
+    this.runXp += amount;
+    const nextLevel = runLevelForXp(this.runXp, MAX_RUN_LEVEL);
+    if (nextLevel > this.runLevel) {
+      this.pendingLevelUps += nextLevel - this.runLevel;
+      this.runLevel = nextLevel;
+      this.audio.playUpgrade();
+      this.offerNextLevelUp();
+    }
+  }
+
+  /** Open a roulette for one queued level-up (if any). */
+  private offerNextLevelUp() {
+    if (this.pendingLevelUps <= 0 || this.upgradePaused) return;
+    this.pendingLevelUps--;
+    this.announce("LEVEL UP!", `LV.${this.runLevel} — choose an upgrade`, "#7ee0ff");
+    this.offerUpgrade();
   }
 
   switchWeapon = (weaponType: WeaponType) => {
@@ -1702,7 +1888,7 @@ export class GameEngine {
       });
 
       this.audio.playMissileLaunch();
-      this.cameraShake = Math.max(this.cameraShake, 1.4);
+      this.helicopter.triggerFirePitch(0.05); // salvo launch — tiny nose kick
       this.salvoCooldownTimer = this.getEffectiveSalvoCooldown();
       this.salvoLocks = [];
       this.clearSalvoIndicators();
@@ -1740,6 +1926,14 @@ export class GameEngine {
     this.powerups.push(pu);
   };
 
+  /** Drop a small XP gem worth `value` run XP (VS-style upgrade currency). */
+  dropXpGem = (x: number, y: number, z: number, value: number) => {
+    const pu = new PowerUp(this.scene, x, y + 2, z, PowerUpType.XP_GEM);
+    pu.value = value;
+    pu.spawnTime = performance.now() / 1000;
+    this.powerups.push(pu);
+  };
+
   applyPowerUp = (type: PowerUpType, time: number) => {
     switch (type) {
       case PowerUpType.HEALTH:
@@ -1766,28 +1960,77 @@ export class GameEngine {
         this.currentFuel = Math.min(this.maxFuel, this.currentFuel + 35);
         break;
       case PowerUpType.BOMB:
-        // Kill all enemies on screen
+        // Kill all enemies on screen — through the FULL reward pipeline so a
+        // nuke feeds progression (XP gems, weapon XP, combo/risk scoring,
+        // kill streaks) instead of just clearing the screen for flat points.
+        let bombKills = 0;
         for (const e of this.enemies) {
-          if (e.active) {
-            e.active = false;
-            this.score += e.basePoints;
-            this.particles.spawnExplosion(
-              e.body.position.x,
-              e.body.position.y,
-              e.body.position.z,
-              100,
-              time,
-              40,
-            );
-            this.city.damageNearby(e.body.position.x, e.body.position.z, 25, 120);
+          if (!e.active) continue;
+          bombKills++;
+          this.totalKills++;
+          this.grantWeaponXp(this.lastFiredWeapon);
+          if (time - this.lastKillTime < 1.4) this.killStreakCount++;
+          else this.killStreakCount = 1;
+          this.lastKillTime = time;
+          const risk = riskMultiplier(this.health, this.maxHealth, this.difficulty.maxRisk);
+          this.score += Math.floor(e.basePoints * this.comboMultiplier * risk);
+          this.dropXpGem(
+            e.body.position.x,
+            e.body.position.y,
+            e.body.position.z,
+            xpForEnemyType(e.type, e.isElite),
+          );
+          // Mirror the normal kill drop rules (boss guaranteed, tank likely, elites always)
+          const dropChance = e.type === EnemyType.TANK ? 0.3 : e.type === EnemyType.BOSS ? 1.0 : 0.14;
+          if (Math.random() < dropChance || e.isElite) {
+            this.dropPowerUp(e.body.position.x, e.body.position.y, e.body.position.z);
+          }
+          e.active = false;
+          this.particles.spawnExplosion(
+            e.body.position.x,
+            e.body.position.y,
+            e.body.position.z,
+            80,
+            time,
+            30,
+          );
+          this.city.damageNearby(e.body.position.x, e.body.position.z, 22, 95);
+        }
+        // One combined streak announcement + hit-stop for the whole nuke
+        if (bombKills > 0) {
+          const tier = multikillTier(this.killStreakCount);
+          if (tier) {
+            this.announce(tier.label, "", tier.color);
+            this.audio.playKillCombo(Math.min(this.killStreakCount, 5));
+            if (this.killStreakCount >= 3) this.triggerHitStop(0.25, 0.2);
           }
         }
+        this.score += 150;
+        // Mega payoff at the player: big blast + shockwave so the bomb always reads
+        const bx = this.helicopter.body.position.x;
+        const by = this.helicopter.body.position.y;
+        const bz = this.helicopter.body.position.z;
+        this.particles.spawnExplosion(bx, by, bz, 160, time, 60);
+        this.volumetricExplosions.spawn(bx, by, bz, 26, 10);
         this.audio.playExplosion(2.0);
-        this.cameraShake = 3.0;
+        this.addCameraImpulse(4.5); // BOMB payoff at the player
+        this.announce(
+          '💥 BOMB AWAY!',
+          bombKills > 0 ? `Wiped out ${bombKills} enemies` : '+150 PTS — no enemies in range',
+          '#ff8800',
+        );
         break;
     }
     this.updateUI(time);
   };
+
+  /** 0..1 progress toward the next run level (for the HUD XP bar). */
+  runXpProgress(): number {
+    if (this.runLevel >= MAX_RUN_LEVEL) return 1;
+    const current = runXpForLevel(this.runLevel);
+    const next = runXpForLevel(this.runLevel + 1);
+    return Math.min(1, Math.max(0, (this.runXp - current) / (next - current)));
+  }
 
   updateUI(time: number) {
     this.emitStatsIfChanged();
@@ -1825,6 +2068,8 @@ export class GameEngine {
           wave: this.currentWave,
           message: this.waveTransitionTimer > 0 ? this.waveMessage : null,
           playing: this.isPlaying,
+          runLevel: this.runLevel,
+          runXpProgress: this.runXpProgress(),
           weapon: weapon ? {
             name: weapon.name,
             ammo: weapon.ammo,
@@ -2069,8 +2314,12 @@ export class GameEngine {
 
     const obj = new Objective(this.scene, this.world, laneX, y, z, type);
     obj.spawnTime = performance.now() / 1000;
-    // Difficulty-scaled objective hull
-    const hpMult = this.difficulty.objectiveHp;
+    // Ground-level objectives get a type-aware emplacement (Pass 7): military
+    // pad for SAM sites, technical layout for radar towers, supply yard for
+    // depots. The group is detached automatically when the objective dies.
+    if (y <= 3.5) obj.propGroup = this.city.addObjectiveProps(laneX, z, obj.type);
+    // Difficulty-scaled objective hull (capped so objectives never become sponges)
+    const hpMult = Math.min(1.2, this.difficulty.objectiveHp);
     if (hpMult !== 1) {
       obj.maxHp = Math.max(40, Math.round(obj.maxHp * hpMult));
       obj.hp = obj.maxHp;
@@ -2092,7 +2341,7 @@ export class GameEngine {
     this.score += Math.floor(obj.basePoints * this.comboMultiplier);
     this.particles.spawnExplosion(obj.position.x, obj.position.y, obj.position.z, 160, time, 50);
     this.volumetricExplosions.spawn(obj.position.x, obj.position.y, obj.position.z, 22, 9);
-    this.cameraShake = Math.max(this.cameraShake, 4.5);
+    this.addExplosionImpulse(obj.position.x, obj.position.y, obj.position.z, 4.5);
     this.audio.playExplosion(2.0);
     this.triggerHitStop(0.24, 0.05);
 
@@ -2108,8 +2357,16 @@ export class GameEngine {
       }
       this.announce("RADAR TOWER DOWN", "EMP pulse hits all enemies", "#7ee0ff");
     } else {
-      // AMMO_DEPOT: bomb power-up + ammo refill
-      this.dropPowerUp(obj.position.x, obj.position.y, obj.position.z);
+      // AMMO_DEPOT: guaranteed bomb power-up (as advertised) + ammo refill
+      const bomb = new PowerUp(
+        this.scene,
+        obj.position.x,
+        obj.position.y + 2,
+        obj.position.z,
+        PowerUpType.BOMB,
+      );
+      bomb.spawnTime = time;
+      this.powerups.push(bomb);
       const weapon = this.weapons.get(this.currentWeapon);
       if (weapon) weapon.ammo = weapon.maxAmmo;
       this.announce("AMMO DEPOT SECURED", "Bomb drop + ammo refill", "#ffaa33");
@@ -2279,7 +2536,7 @@ export class GameEngine {
     this.enemies.push(elite);
     this.particles.spawnExplosion(spot.x, spot.y, spot.z, 50, time, 20);
     this.audio.playEnemySpawn();
-    this.cameraShake = Math.max(this.cameraShake, 2.5);
+    this.addCameraImpulse(2.5);
     this.announce("ELITE MINIBOSS", "Brace for impact", "#ffdd55");
   }
 
@@ -2317,26 +2574,24 @@ export class GameEngine {
     this.scaleEnemyForDifficulty(boss);
     this.enemies.push(boss);
 
-    // Escort squad so it isn't a lonely duel
+    // Escort squad so it isn't a lonely duel — queued so the escort models
+    // construct over the next frames instead of spiking in the boss's frame.
     for (let i = 0; i < 3; i++) {
       const escortType = i % 2 === 0 ? EnemyType.SHOOTER : EnemyType.DRONE;
       const eSpot = this.getArcadeSpawnPoint(escortType, i, 3);
-      const escort = new Enemy(
-        this.scene,
-        this.world,
-        eSpot.x + (Math.random() - 0.5) * 30,
-        eSpot.z + i * 14,
-        escortType,
-        Math.max(2.4, eSpot.y),
-        { modifier: EnemyModifier.NONE, pattern: AttackPattern.CHASE },
-      );
-      this.scaleEnemyForDifficulty(escort);
-      this.enemies.push(escort);
+      this.pendingEventSpawns.push({
+        type: escortType,
+        x: eSpot.x + (Math.random() - 0.5) * 30,
+        z: eSpot.z + i * 14,
+        y: Math.max(2.4, eSpot.y),
+        modifier: EnemyModifier.NONE,
+        pattern: AttackPattern.CHASE,
+      });
     }
 
     this.particles.spawnExplosion(spot.x, spot.y, spot.z, 70, time, 30);
     this.audio.playEnemySpawn();
-    this.cameraShake = Math.max(this.cameraShake, 4.0);
+    this.addCameraImpulse(4.0);
     this.triggerHitStop(0.35, 0.05);
     this.announce("⚠ BOSS BATTLE ⚠", "Three phases. No mercy.", "#ff3366");
   }
@@ -2399,6 +2654,31 @@ export class GameEngine {
     this.audio.playEnemySpawn();
   }
 
+  /**
+   * Phase 3 — drain the bounded event/escort spawn queue. Constructs at most
+   * two models per call (drones are lightweight; tanks/bosses count heavier
+   * and pause the drain), so convoy ambushes, air raids and boss escorts
+   * arrive as a staggered stream instead of a single-frame model spike.
+   */
+  private drainEventSpawns(time: number) {
+    let drained = 0;
+    while (drained < 2 && this.pendingEventSpawns.length > 0) {
+      const d = this.pendingEventSpawns.shift()!;
+      const enemy = new Enemy(this.scene, this.world, d.x, d.z, d.type, d.y, {
+        modifier: d.modifier ?? EnemyModifier.NONE,
+        pattern: d.pattern ?? AttackPattern.CHASE,
+      });
+      this.scaleEnemyForDifficulty(enemy);
+      this.enemies.push(enemy);
+      this.particles.spawnExplosion(d.x, d.y, d.z, 20, time, 10);
+      this.playSpawnCue(time);
+      if (this.isPlaying) this.enemiesSpawnedInWave++;
+      drained++;
+      // Tanks/bosses are the heaviest models — one per tick keeps frames smooth.
+      if (d.type === EnemyType.TANK || d.type === EnemyType.BOSS) break;
+    }
+  }
+
   updateAIDirector(time: number, delta: number) {
     this.survivalTime += delta;
     const pressureFromTime = Math.min(1, this.survivalTime / 180);
@@ -2448,25 +2728,42 @@ export class GameEngine {
       this.spawnMiniboss(time);
     }
 
-    // Continuous horde spawning — never stops, only ramps
+    // Continuous horde spawning — never stops, only ramps. Bursts are queued
+    // and drained ONE per cadence tick (frame budget = 1) so hordes stream in
+    // smoothly instead of popping in as a group. The interval is unchanged, so
+    // the per-second spawn rate — and the difficulty curve — is preserved.
     this.spawnTimer -= delta;
     const maxActiveEnemies = Math.min(
       72,
       Math.round((26 + Math.floor(this.currentWave * 3.2)) * this.difficulty.spawnRate),
     );
-    if (this.spawnTimer <= 0 && this.enemies.length < maxActiveEnemies) {
-      // Spawn 1-3 at a time (more as waves climb) so hordes pack in and surround
-      const count = Math.min(
-        maxActiveEnemies - this.enemies.length,
-        1 + Math.floor(Math.random() * (1 + Math.min(2, Math.floor(this.currentWave / 4)))),
-      );
-      for (let i = 0; i < count; i++) {
+    const hordeInterval = Math.max(
+      0.16,
+      (0.62 - this.currentWave * 0.045) * (2 - this.difficulty.spawnRate) * (1.15 - this.combatIntensity * 0.35),
+    );
+    if (this.spawnTimer <= 0) {
+      if (this.pendingEventSpawns.length > 0) {
+        // Event/escort spawns take priority and drain on a short stagger.
+        this.drainEventSpawns(time);
+        this.spawnTimer = 0.18;
+      } else if (this.pendingSpawns > 0) {
+        // One enemy per tick from the queued burst.
         this.spawnEnemy();
+        this.pendingSpawns--;
+        this.spawnTimer = hordeInterval;
+      } else if (this.enemies.length < maxActiveEnemies) {
+        // Queue a fresh burst (same sizes as before — the queue distributes
+        // them across time instead of constructing them all this frame).
+        this.pendingSpawns = Math.min(
+          maxActiveEnemies - this.enemies.length,
+          1 + Math.floor(Math.random() * (1 + Math.min(2, Math.floor(this.currentWave / 4)))),
+        );
+        if (this.pendingSpawns <= 0) this.pendingSpawns = 1;
+        this.spawnTimer = hordeInterval;
+      } else {
+        // At the active cap — wait and re-check.
+        this.spawnTimer = 0.25;
       }
-      this.spawnTimer = Math.max(
-        0.16,
-        (0.62 - this.currentWave * 0.045) * (2 - this.difficulty.spawnRate) * (1.15 - this.combatIntensity * 0.35),
-      );
     }
 
     // Trigger battlefield events at intervals during the wave if not in transition
@@ -2548,7 +2845,6 @@ export class GameEngine {
     const player = this.helicopter.body.position;
     const eventRoll = Math.random();
     const eventZ = player.z - 95 - Math.random() * 80;
-    this.cameraShake = Math.max(this.cameraShake, 1.2 + this.combatIntensity);
 
     if (eventRoll < 0.34) {
       this.waveMessage = "MISSILE STORM";
@@ -2564,38 +2860,29 @@ export class GameEngine {
     } else if (eventRoll < 0.68) {
       this.waveMessage = "CONVOY AMBUSH";
       this.waveTransitionTimer = 1.4;
+      // Queue the convoy — tanks/shooters construct and arrive over the next
+      // few seconds instead of 4-8 full models in this single frame.
       for (let i = 0; i < 4 + this.combatIntensity * 4; i++) {
-        const enemy = new Enemy(
-          this.scene,
-          this.world,
-          -70 + i * 35,
-          eventZ - i * 12,
-          i % 2 === 0 ? EnemyType.TANK : EnemyType.SHOOTER,
-          7,
-        );
-        this.enemies.push(enemy);
-        if (this.isPlaying) {
-          this.enemiesSpawnedInWave++;
-          this.totalEnemiesInWave++;
-        }
+        this.pendingEventSpawns.push({
+          type: i % 2 === 0 ? EnemyType.TANK : EnemyType.SHOOTER,
+          x: -70 + i * 35,
+          z: eventZ - i * 12,
+          y: 7,
+        });
+        if (this.isPlaying) this.totalEnemiesInWave++;
       }
     } else {
       this.waveMessage = "AIR RAID";
       this.waveTransitionTimer = 1.4;
+      // Queue the raid — drones trickle in rather than an 8-14 model spike.
       for (let i = 0; i < 8 + this.combatIntensity * 6; i++) {
-        const enemy = new Enemy(
-          this.scene,
-          this.world,
-          player.x + (Math.random() - 0.5) * 160,
-          eventZ - Math.random() * 130,
-          EnemyType.DRONE,
-          player.y + 2 + Math.random() * 14,
-        );
-        this.enemies.push(enemy);
-        if (this.isPlaying) {
-          this.enemiesSpawnedInWave++;
-          this.totalEnemiesInWave++;
-        }
+        this.pendingEventSpawns.push({
+          type: EnemyType.DRONE,
+          x: player.x + (Math.random() - 0.5) * 160,
+          z: eventZ - Math.random() * 130,
+          y: player.y + 2 + Math.random() * 14,
+        });
+        if (this.isPlaying) this.totalEnemiesInWave++;
       }
     }
   }
@@ -2632,20 +2919,22 @@ export class GameEngine {
       const normY = aimY / mag;
       const curvedMag = Math.pow((mag - DEADZONE) / (1 - DEADZONE), 1.2);
 
-      const moveSpeed = 150 * delta * this.settings.gamepadSensitivity;
-      this.movementTarget.x += normX * curvedMag * moveSpeed;
-
-      const yMove = this.settings.invertedY ? -normY : normY;
-      this.movementTarget.z += yMove * curvedMag * moveSpeed;
+      const sens = this.settings.gamepadSensitivity;
+      this.gamepadMove.x = normX * curvedMag * sens;
+      this.gamepadMove.z = (this.settings.invertedY ? -normY : normY) * curvedMag * sens;
 
       // Resume audio on stick move
       this.audio.resume();
 
       // Disable mouse logic if gamepad is active
       this.isMouseActive = false;
-    } else if (hasGamepadInput) {
-      // Even if just buttons, maybe keep mouse logic off to avoid snapping?
-      this.isMouseActive = false;
+    } else {
+      this.gamepadMove.x = 0;
+      this.gamepadMove.z = 0;
+      if (hasGamepadInput) {
+        // Even if just buttons, maybe keep mouse logic off to avoid snapping?
+        this.isMouseActive = false;
+      }
     }
 
     // Buttons (A or R2 to fire)
@@ -2659,7 +2948,14 @@ export class GameEngine {
   }
 
   updateKeyboardMovement(delta: number) {
-    if (this.dashActiveTimer > 0) return;
+    if (this.dashActiveTimer > 0) {
+      // During a dash don't accumulate new input, but let the input ramp settle so
+      // the ship doesn't ghost-drift in the dash direction once the dash ends.
+      const settle = 1 - Math.exp(-delta * 12.0);
+      this.keyboardVelocity.x *= 1 - settle;
+      this.keyboardVelocity.y *= 1 - settle;
+      return;
+    }
     let moveX = 0;
     let moveZ = 0;
 
@@ -2675,6 +2971,11 @@ export class GameEngine {
     if (this.leftStick.active) {
       moveX += this.leftStick.x;
       moveZ += this.leftStick.y;
+    }
+    // Phase 2: route gamepad stick input into the same normalization pipeline.
+    if (this.gamepadMove.x !== 0 || this.gamepadMove.z !== 0) {
+      moveX += this.gamepadMove.x;
+      moveZ += this.gamepadMove.z;
     }
 
     let moveY = 0;
@@ -2700,11 +3001,13 @@ export class GameEngine {
       normZ = moveZ / mag;
     }
 
-    // Smooth input ramp for keyboard controls to prevent instant jerks
+    // Keyboard is digital — ramp it near-instantly (response 24/s, 90% in
+    // ~0.1s) so input feels immediate; the velocity-level exp response in
+    // Helicopter.update does the real smoothing. Analog sticks still glide.
     const targetMag = Math.min(1, mag);
     const targetVelocityX = normX * targetMag;
     const targetVelocityY = normZ * targetMag;
-    const inputLerpFactor = 1 - Math.exp(-delta * 9.5); // Fast but smooth ramp
+    const inputLerpFactor = 1 - Math.exp(-delta * 24.0);
     this.keyboardVelocity.x = THREE.MathUtils.lerp(this.keyboardVelocity.x, targetVelocityX, inputLerpFactor);
     this.keyboardVelocity.y = THREE.MathUtils.lerp(this.keyboardVelocity.y, targetVelocityY, inputLerpFactor);
 
@@ -2714,9 +3017,8 @@ export class GameEngine {
       const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1;
       const afterburnerBoost = this.afterburnerActive ? 1.55 : 1;
       // Arcade style: High target speed so the target jumps to the tight clamp boundary almost instantly
-      const moveSpeed = 220 * speedBoost * afterburnerBoost;
-      this.movementTarget.x += this.keyboardVelocity.x * moveSpeed * delta;
-      this.movementTarget.z += this.keyboardVelocity.y * moveSpeed * delta;
+      // Phase 2: keyboardVelocity is now the movement command direction (no
+      // position-target integration) — the helicopter applies it directly.
     }
 
     // Afterburner: hold Shift to burn fuel for speed + damage
@@ -2725,50 +3027,49 @@ export class GameEngine {
       this.currentFuel > 1 &&
       this.isPlaying;
 
-    // WASD-only flight: the ship moves only while keys are held — no auto-scroll
-    // dragging it forward, so releasing the keys lets it hover and breathe.
-
-    if (moveY !== 0) {
-      this.hasInputThisFrame = true;
-      const climbSpeed = 34;
-      this.movementTarget.y += moveY * climbSpeed * delta;
-    } else {
-      this.movementTarget.y +=
-        (this.helicopter.body.position.y - this.movementTarget.y) *
-        Math.min(1, delta * 8.0);
-    }
+    // Phase 2: vertical is fully separate from horizontal — Space = climb,
+    // Alt = descend, each with velocity-based accel/brake in the helicopter.
+    // The engine just conveys the input direction (-1..1, lerp-smoothed).
+    if (moveY !== 0) this.hasInputThisFrame = true;
+    const vLerp = 1 - Math.exp(-delta * 18.0); // 90% in ~0.13s
+    this.verticalInput = THREE.MathUtils.lerp(this.verticalInput, moveY, vLerp);
   }
 
-  clampMovementTarget() {
-    // 1. Clamp to global screen boundary constraints (wider city = wider flight corridor)
-    this.movementTarget.x = Math.max(
-      -210,
-      Math.min(210, this.movementTarget.x),
-    );
-    
-    // 2. Clamp relative to helicopter's actual physical position
-    // Arcade style: keep the target very close to the helicopter so direction changes are near-instantaneous
-    const hPos = this.helicopter.body.position;
-    this.movementTarget.x = Math.max(
-      hPos.x - 12,
-      Math.min(hPos.x + 12, this.movementTarget.x),
-    );
-    this.movementTarget.z = Math.max(
-      hPos.z - 12,
-      Math.min(hPos.z + 12, this.movementTarget.z),
-    );
-    this.movementTarget.y = Math.max(
-      Math.max(15, hPos.y - 12),
-      Math.min(Math.min(58, hPos.y + 12), this.movementTarget.y),
-    );
-  }
+
 
   tick = () => {
+    // Phase 1: never re-schedule after dispose — a stale rAF (StrictMode/HMR
+    // unmount race) must not spin a second game loop against a dead renderer.
+    if (this.disposed) return;
     this.animationFrame = requestAnimationFrame(this.tick);
 
     const time = performance.now() / 1000;
-    const realDelta = Math.min(time - this.lastTime, 0.1);
+    // Phase 1: clamp frame spikes so a 0.2–2s hitch (tab switch, GC, driver
+    // stall) can't launch entities across the world. 0.05s = exactly the 3
+    // fixed substeps of world.step(1/60, dt, 3), so physics stays in sync up
+    // to the clamp. Negative/NaN deltas (clock jumps) are treated as 0.
+    let realDelta = time - this.lastTime;
     this.lastTime = time;
+    if (!Number.isFinite(realDelta) || realDelta < 0) realDelta = 0;
+    realDelta = Math.min(realDelta, 0.05);
+
+    // Rolling FPS (read-only, no allocations)
+    this.fpsFrames++;
+    this.fpsAccum += realDelta;
+    if (this.fpsAccum >= 0.5) {
+      this.fps = Math.round(this.fpsFrames / this.fpsAccum);
+      this.fpsFrames = 0;
+      this.fpsAccum = 0;
+    }
+
+    // Phase 1 dev memory monitor (Step 9) — every 2s, DEV only, opt-in.
+    if (this.memMon) {
+      this.memMonTimer += realDelta;
+      if (this.memMonTimer >= 2.0) {
+        this.memMonTimer = 0;
+        this.monitorMemory(time);
+      }
+    }
 
     // Process Hit-Stop timer using real unscaled time
     if (this.hitStopTimer > 0) {
@@ -2784,7 +3085,7 @@ export class GameEngine {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
       this.helicopter.animateRotors(0, 60, Math.max(delta, 1 / TARGET_RENDER_FPS));
-      this.updateCamera();
+      this.updateCamera(delta);
       this.renderFrame();
       return;
     }
@@ -2800,31 +3101,23 @@ export class GameEngine {
     if (this.dashActiveTimer > 0) {
       this.dashActiveTimer -= delta;
       const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1.0;
-      const dashSpeed = 155 * speedBoost;
+      // Bell-curve speed: surge to max mid-dash, ease back out — the ship arrives
+      // at a crawl so the PD controller handoff is seamless instead of a hard yank.
+      const dashTotal = 0.28;
+      const progress = 1 - Math.max(0, this.dashActiveTimer) / dashTotal;
+      const dashSpeed = 155 * speedBoost * Math.sin(Math.min(1, progress) * Math.PI);
       this.helicopter.body.velocity.x = this.dashDirection.x * dashSpeed;
       this.helicopter.body.velocity.z = this.dashDirection.z * dashSpeed;
-      
-      // Match the target position directly to prevent drag-back when dash ends
+
+      // Claim this frame as input so the idle target-decay doesn't fight the dash
+      // handoff (the target tracks the body, then hands off to the controller).
+      this.hasInputThisFrame = true;
       this.movementTarget.x = this.helicopter.body.position.x;
       this.movementTarget.z = this.helicopter.body.position.z;
     }
 
-    // Apply unified post-input target decay back to player position when idle,
-    // so the ship settles into a true hover instead of creeping forward.
-    if (!this.hasInputThisFrame) {
-      const targetLerp = 1 - Math.exp(-delta * 8.0);
-      this.movementTarget.x = THREE.MathUtils.lerp(
-        this.movementTarget.x,
-        this.helicopter.body.position.x,
-        targetLerp
-      );
-      this.movementTarget.z = THREE.MathUtils.lerp(
-        this.movementTarget.z,
-        this.helicopter.body.position.z,
-        targetLerp
-      );
-    }
-    this.clampMovementTarget();
+    // Phase 2: no idle-decay or position-target clamp — movement is
+    // velocity-controlled; the body is the source of truth.
 
     // Fuel drain (afterburner burns much faster; fuel-efficiency upgrade slows it)
     const fuelEfficiencyMult = Math.max(0.4, 1 - this.runUpgrades.fuelEfficiency * 0.3);
@@ -2852,7 +3145,7 @@ export class GameEngine {
     const playerZ = this.helicopter.body.position.z;
     for (let i = this.objectives.length - 1; i >= 0; i--) {
       const obj = this.objectives[i];
-      obj.update(time);
+      obj.update(time, delta);
       // Show beacon + label only when near (avoids clutter at distance)
       const dist = obj.distanceTo(playerX, playerZ);
       const showMarker = dist < 260;
@@ -2995,10 +3288,12 @@ export class GameEngine {
       this.fireWeapons(time);
     }
 
-    this.helicopter.setTarget(
-      this.movementTarget.x,
-      this.movementTarget.y,
-      this.movementTarget.z,
+    // Phase 2: sync movementTarget to the body (used only as a safe
+    // fallback for NaN recovery now — movement is velocity-controlled).
+    this.movementTarget.set(
+      this.helicopter.body.position.x,
+      this.helicopter.body.position.y,
+      this.helicopter.body.position.z,
     );
     this.helicopter.setAim(this.aimPoint.x, this.aimPoint.z);
 
@@ -3007,12 +3302,15 @@ export class GameEngine {
     this.rain.update(time, this.helicopter.mesh.position);
     (this.rain.mesh.material as THREE.ShaderMaterial).uniforms.uTime.value =
       time; // redundancy check
+    // Pass 8: rain keeps a visibility floor at any storm strength so weather
+    // reads, while the cap protects player/enemy silhouettes (additive rain
+    // washes contrast fast).
     (this.rain.mesh.material as THREE.ShaderMaterial).opacity =
-      this.weather.stormIntensity * 0.5;
+      0.12 + this.weather.stormIntensity * 0.25;
 
     if (this.weather.isLightning) {
       this.renderer.setClearColor(0xffffff);
-      this.cameraShake = Math.max(this.cameraShake, 2.0);
+
       this.audio.playExplosion(2.0); // Thunder
 
       // Small EMP damage chance
@@ -3037,20 +3335,58 @@ export class GameEngine {
       }
     }
 
+    // Phase 1 NaN guard: one invalid Vector3 propagates into every body, mesh
+    // and camera in the scene and the run is unrecoverable — recover to a safe
+    // state (movement target, zero velocity) instead of corrupting the sim.
+    const hp = this.helicopter.body.position;
+    const hv = this.helicopter.body.velocity;
+    if (
+      !Number.isFinite(hp.x) || !Number.isFinite(hp.y) || !Number.isFinite(hp.z) ||
+      !Number.isFinite(hv.x) || !Number.isFinite(hv.y) || !Number.isFinite(hv.z)
+    ) {
+      if (import.meta.env.DEV) {
+        console.warn(
+          "[Heli-Strike] NaN in helicopter body — recovering",
+          { pos: [hp.x, hp.y, hp.z], vel: [hv.x, hv.y, hv.z], dt: delta, time },
+        );
+      }
+      hp.set(this.movementTarget.x, this.movementTarget.y, this.movementTarget.z);
+      hv.set(0, 0, 0);
+      this.helicopter.body.angularVelocity.set(0, 0, 0);
+      this.helicopter.mesh.position.copy(hp as any);
+    }
+
     this.world.step(1 / 60, delta, 3);
 
-    const windCannon = new CANNON.Vec3(
-      this.weather.windForce.x,
-      0,
-      this.weather.windForce.z,
-    );
+    this.windCannon.set(this.weather.windForce.x, 0, this.weather.windForce.z);
     const hoverFloor = this.city.getHeightAt(
       this.helicopter.body.position.x,
       this.helicopter.body.position.z,
       1.5,
     );
     this.helicopter.setHoverFloor(hoverFloor);
-    this.helicopter.update(time, delta, windCannon, this.particles, this.shieldTimer > 0, this.speedBoostTimer > 0, this.hasInputThisFrame, 0);
+    this.helicopter.update(
+      time, delta, this.windCannon, this.particles,
+      this.shieldTimer > 0, this.speedBoostTimer > 0, this.hasInputThisFrame,
+      {
+        x: this.keyboardVelocity.x,
+        z: this.keyboardVelocity.y,
+        y: this.verticalInput,
+        afterburner: this.afterburnerActive
+          ? MOVEMENT_CONFIG.afterburnerMultiplier
+          : 1,
+      },
+    );
+    // World-bound clamp (the city scrolls forever in z; x has a hard boundary).
+    const bx = this.helicopter.body.position.x;
+    const BOUND = 210;
+    if (bx > BOUND) {
+      this.helicopter.body.position.x = BOUND;
+      if (this.helicopter.body.velocity.x > 0) this.helicopter.body.velocity.x = 0;
+    } else if (bx < -BOUND) {
+      this.helicopter.body.position.x = -BOUND;
+      if (this.helicopter.body.velocity.x < 0) this.helicopter.body.velocity.x = 0;
+    }
 
     // Engine sound based on speed
     const currentSpeed = Math.sqrt(
@@ -3063,6 +3399,26 @@ export class GameEngine {
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (!e.active) {
+        e.destroy();
+        this.enemies.splice(i, 1);
+        continue;
+      }
+      // Phase 1 NaN guard: an invalid enemy body corrupts every system that
+      // reads it (boids, homing missiles, avoidance) — drop it cleanly.
+      if (
+        !Number.isFinite(e.body.position.x) ||
+        !Number.isFinite(e.body.position.y) ||
+        !Number.isFinite(e.body.position.z) ||
+        !Number.isFinite(e.body.velocity.x) ||
+        !Number.isFinite(e.body.velocity.y) ||
+        !Number.isFinite(e.body.velocity.z)
+      ) {
+        if (import.meta.env.DEV) {
+          console.warn(
+            "[Heli-Strike] NaN in enemy body — removing",
+            { type: e.type, pos: [e.body.position.x, e.body.position.y, e.body.position.z] },
+          );
+        }
         e.destroy();
         this.enemies.splice(i, 1);
         continue;
@@ -3091,6 +3447,7 @@ export class GameEngine {
         this.enemies,
         this.city,
         enemyFireRateMult,
+        delta,
       );
       // Only announce when the boss LOSES a phase (never on spawn)
       if (e.type === EnemyType.BOSS && e.phase < prevPhase) {
@@ -3100,7 +3457,7 @@ export class GameEngine {
           "#ff3366",
         );
         this.audio.playUpgrade();
-        this.cameraShake = Math.max(this.cameraShake, 2.0);
+        this.addCameraImpulse(2.0); // boss phase slam
         this.triggerHitStop(0.2, 0.4);
       }
       if (fired && time - this.lastEnemyFireSoundTime >= 0.15) {
@@ -3123,7 +3480,7 @@ export class GameEngine {
           30,
         );
         this.audio.playExplosion(1.5);
-        this.cameraShake = 2.5;
+        this.addCameraImpulse(2.5); // kamikaze ram — heavy hit
 
         // Tanks do massive ram damage
         const dmg = e.type === EnemyType.TANK ? 30 : 10;
@@ -3281,7 +3638,9 @@ export class GameEngine {
           const dmg = Math.round(proj.damage * this.difficulty.enemyDamage * (proj.waveDamageMult ?? 1));
           this.health = Math.max(0, this.health - dmg);
           this.helicopter.takeDamage(dmg);
-          this.cameraShake = 1.0;
+          // Heavy hits only (artillery/rams) get a small impulse — normal
+          // projectile ticks never shake the camera.
+          if (dmg >= 12) this.addCameraImpulse(1.2);
           this.particles.spawnExplosion(
             proj.pos.x,
             proj.pos.y,
@@ -3306,8 +3665,23 @@ export class GameEngine {
     }
 
     // --- Update Power-ups ---
+    const playerPos = this.helicopter.mesh.position;
     for (let i = this.powerups.length - 1; i >= 0; i--) {
       const pu = this.powerups[i];
+
+      // Gentle magnet: XP gems drift toward the player when close (VS feel)
+      if (pu.type === PowerUpType.XP_GEM) {
+        const dx = playerPos.x - pu.mesh.position.x;
+        const dz = playerPos.z - pu.mesh.position.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        const magnetRadius = 22;
+        if (dist > 0.1 && dist < magnetRadius) {
+          const pull = (1 - dist / magnetRadius) * 26 * delta;
+          pu.position.x += (dx / dist) * pull;
+          pu.position.z += (dz / dist) * pull;
+        }
+      }
+
       pu.update(time, delta);
 
       if (!pu.active) {
@@ -3317,8 +3691,12 @@ export class GameEngine {
       }
 
       // Check collection
-      if (pu.checkCollection(this.helicopter.mesh.position)) {
-        this.applyPowerUp(pu.type, time);
+      if (pu.checkCollection(playerPos)) {
+        if (pu.type === PowerUpType.XP_GEM) {
+          this.grantRunXp(pu.value, time);
+        } else {
+          this.applyPowerUp(pu.type, time);
+        }
         pu.destroy(this.scene);
         this.powerups.splice(i, 1);
         this.audio.playPickup();
@@ -3355,46 +3733,128 @@ export class GameEngine {
     // Update UI every and radar every frame for smoothness
     this.updateUI(time);
 
-    this.updateCamera();
+    this.updateCamera(delta);
 
     this.renderFrame();
   };
 
-  updateCamera() {
+  /**
+   * Phase 3 — single controlled camera-impulse entry point. Heavy one-shot
+   * events only (bomb, boss slam, major collapse, heavy hit, crash); sets the
+   * impulse value once (strongest wins while decaying). The camera applies a
+   * restrained scaled offset that decays to zero — never modifies the base.
+   */
+  addCameraImpulse(strength: number) {
+    this.cameraShake = Math.min(
+      GameEngine.CAMERA_IMPULSE_MAX,
+      Math.max(this.cameraShake, strength),
+    );
+  }
+
+  /** Distance-falloff explosion impulse: far → none, nearby → small, very
+   *  close + large → stronger but capped. */
+  addExplosionImpulse(x: number, y: number, z: number, strength: number, radius = 90) {
+    const dx = x - this.helicopter.body.position.x;
+    const dz = z - this.helicopter.body.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist >= radius) return;
+    const falloff = 1 - dist / radius;
+    this.addCameraImpulse(strength * falloff * falloff);
+  }
+
+  updateCamera(delta: number) {
     const speed = Math.sqrt(
       this.helicopter.body.velocity.x ** 2 + this.helicopter.body.velocity.z ** 2,
     );
     let camTargetX = this.helicopter.body.position.x;
-    let camTargetZ = this.helicopter.body.position.z + 52 + this.combatIntensity * 8;
+    // Pulled closer (44 vs 52) so near-field buildings occupy less of the frame
+    let camTargetZ = this.helicopter.body.position.z + 44 + this.combatIntensity * 8;
 
     // Keep the velocity feed-forward mild so direction reversals don't overshoot
-    camTargetX += this.helicopter.body.velocity.x * 0.32;
-    camTargetZ += this.helicopter.body.velocity.z * 0.3;
+    camTargetX += this.helicopter.body.velocity.x * 0.24;
+    camTargetZ += this.helicopter.body.velocity.z * 0.24;
 
-    const camLerp = this.isPlaying ? 0.1 : 0.035;
-    this.camera.position.x += (camTargetX - this.camera.position.x) * camLerp;
-    this.camera.position.z += (camTargetZ - this.camera.position.z) * camLerp;
+    // Delta-aware follow response: snappier than the old fixed 0.1/frame
+    // (~6.3/s at 60fps → ~9/s now) so the camera keeps up with the faster
+    // player without feeling twitchy. One smoothing layer, applied once.
+    const camLerp = 1 - Math.exp(-(this.isPlaying ? 9.0 : 3.5) * delta);
+    this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camLerp;
+    this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camLerp;
 
-    const camTargetY = 62 + Math.min(speed * 0.1, 9) + this.combatIntensity * 5;
-    this.camera.position.y += (camTargetY - this.camera.position.y) * 0.05;
+    // Obstruction: any building the camera→helicopter view line passes through
+    // raises the camera above its top (+6 clearance) so skyscrapers between the
+    // camera and the player never swallow the action. Uses the stable base
+    // position so gun shake never bounces the camera over rooftops.
+    const heli = this.helicopter.body.position;
+    const blockedTop = this.city.getCameraBlockedHeight(
+      this.baseCamPos.x,
+      this.baseCamPos.y,
+      this.baseCamPos.z,
+      heli.x,
+      heli.y,
+      heli.z,
+    );
+    const baseCamY = 62 + Math.min(speed * 0.1, 9) + this.combatIntensity * 5;
+    const camTargetY = blockedTop > 0 ? Math.max(baseCamY, blockedTop + 6) : baseCamY;
+    const camYLerp = 1 - Math.exp(-(blockedTop > 0 ? 7.5 : 5.0) * delta);
+    this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camYLerp;
 
     const targetFov = 52 + Math.min(speed * 0.08, 7) + this.combatIntensity * 5;
-    this.camera.fov += (targetFov - this.camera.fov) * 0.045;
+    this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4.0 * delta));
     this.camera.updateProjectionMatrix();
 
     if (this.cameraShake > 0) {
-      const shake = this.cameraShake;
-      this.camera.position.x += (Math.random() - 0.5) * shake;
-      this.camera.position.y += (Math.random() - 0.5) * shake;
-      this.camera.position.z += (Math.random() - 0.5) * shake;
-      this.cameraShake *= 0.9;
+      // Restrained positional impulse (X/Y only) inside the decaying envelope;
+      // Z never moves (it would shift the camera-to-player distance and feed
+      // the occlusion ray start). No camera roll, ever.
+      const shake = this.cameraShake * GameEngine.CAMERA_IMPULSE_SCALE;
+      this.shakeOffset.set(
+        (Math.random() - 0.5) * shake,
+        (Math.random() - 0.5) * shake,
+        0,
+      );
+      this.camera.position.copy(this.baseCamPos).add(this.shakeOffset);
+    } else {
+      this.camera.position.copy(this.baseCamPos);
+    }
+    // Decay always runs so cameraShake never lingers (no accumulation).
+    if (this.cameraShake > 0) {
+      this.cameraShake *= Math.exp(-GameEngine.SHAKE_DECAY_RATE * delta);
       if (this.cameraShake < 0.01) this.cameraShake = 0;
     }
 
+    // Pass 3 — camera occlusion: ghost buildings between the camera and the
+    // player so the helicopter never gets swallowed by the skyline. Detection
+    // is throttled; render-state only, so collisions/height queries/destruction
+    // are untouched. When not playing, targets drop to 0 and ghosts restore.
+    const heliPos = this.helicopter.body.position;
+    this.city.updateOcclusion(
+      this.baseCamPos.x,
+      this.baseCamPos.y,
+      this.baseCamPos.z,
+      heliPos.x,
+      heliPos.y,
+      heliPos.z,
+      delta,
+      this.isPlaying,
+    );
+
+    // Phase 2: subtle velocity look-ahead — the view drifts a few units along
+    // the travel direction so speed reads dynamically (no shake). Clamped and
+    // driven by the (already smoothed) body velocity, so it's deterministic.
+    const lookSpeed = Math.sqrt(
+      this.helicopter.body.velocity.x ** 2 + this.helicopter.body.velocity.z ** 2,
+    );
+    const lookAhead = Math.min(9, lookSpeed * 0.12);
+    const lookNx = lookSpeed > 0.001 ? this.helicopter.body.velocity.x / lookSpeed : 0;
+    const lookNz = lookSpeed > 0.001 ? this.helicopter.body.velocity.z / lookSpeed : 0;
+
+    // Look-at tracks the player's altitude so the subject stays centered
+    // whether it's skimming the streets or flying over the towers.
     this.camera.lookAt(
-      this.helicopter.body.position.x,
-      17,
-      this.helicopter.body.position.z - 9,
+      this.helicopter.body.position.x + lookNx * lookAhead,
+      Math.max(16, Math.min(70, this.helicopter.body.position.y + 2)),
+      this.helicopter.body.position.z - 9 + lookNz * lookAhead,
     );
   }
 }

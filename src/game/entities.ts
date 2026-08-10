@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
-import { createBox, createGlowBox, createGlowMaterial, createLowPolyMaterial } from "./materials";
+import { createBox, createGlowBox, createGlowMaterial, createLowPolyMaterial, disposeObject3D } from "./materials";
 import {
   AttackPattern,
   EnemyLock,
@@ -36,7 +36,12 @@ export class Entity {
 
   destroy() {
     this.active = false;
-    if (this.mesh && this.mesh.parent) this.mesh.parent.remove(this.mesh);
+    if (this.mesh && this.mesh.parent) {
+      this.mesh.parent.remove(this.mesh);
+      // Phase 1: release this entity's unique GPU buffers (rotor blur discs,
+      // shield bubbles, hull materials). Shared cached resources are skipped.
+      disposeObject3D(this.mesh);
+    }
     if (this.body && this.world) this.world.removeBody(this.body);
   }
 }
@@ -44,6 +49,61 @@ export class Entity {
 const tempColor = new THREE.Color();
 const tempVec3_1 = new CANNON.Vec3();
 const tempVec3_2 = new CANNON.Vec3();
+
+/**
+ * Phase 2 — named, tunable arcade movement values. The helicopter is
+ * velocity-controlled (not a position-target chase), so these are the single
+ * source of truth for every movement constant. Units: units/second and
+ * units/second². Braking is deliberately stronger than acceleration so the
+ * ship settles into a hover instead of gliding across the city.
+ */
+export const MOVEMENT_CONFIG = {
+  /** Normal cruise speed cap (u/s). */
+  maxSpeed: 68,
+  /**
+   * Horizontal move response (/s) — exponential approach toward the desired
+   * velocity: 1 - exp(-response·dt). ~11/s reaches 90% of cruise in ~0.21s:
+   * immediate first response (the velocity jumps a large fraction per frame)
+   * with a short physical ramp so the ship reads as weighted, not rail-guided.
+   */
+  moveResponse: 11,
+  /** Horizontal braking response (/s) — stronger than accel: a brief moment
+   *  of momentum on release, then a decisive settle (no long glide). */
+  brakeResponse: 13,
+  /** Vertical climb/descend speed cap (u/s). */
+  maxVerticalSpeed: 36,
+  /** Vertical move response (/s) — heavier than horizontal (90% in ~0.27s). */
+  verticalResponse: 8.5,
+  /** Vertical settle response (/s) — faster when easing into auto-hover. */
+  verticalSettleResponse: 11,
+  /** Double-tap dash speed (u/s). */
+  dashSpeed: 150,
+  /** Afterburner max-speed multiplier (never multiplies velocity per frame). */
+  afterburnerMultiplier: 1.55,
+  /** Speed-boost power-up multiplier. */
+  speedBoostMultiplier: 1.24,
+  /** Minimum altitude above terrain/buildings (u). */
+  hoverClearance: 7.5,
+  /** Soft max altitude (u) — control eases out near the cap. */
+  maxAltitude: 58,
+  /** World half-width the player can fly across (x clamp). */
+  worldBoundX: 210,
+  /** Abnormal-speed safety clamp (u/s) — see Step 19. */
+  safetyMaxSpeed: 260,
+} as const;
+
+/**
+ * Phase 2 — per-frame movement command from the engine. Inputs are
+ * world-space and already normalized: x = strafe (A/D), z = forward (W/S,
+ * -z is forward), y = vertical -1..1 (Space/Alt), afterburner = speed
+ * multiplier (1 when inactive).
+ */
+export interface MovementCommand {
+  x: number;
+  z: number;
+  y: number;
+  afterburner: number;
+}
 
 export class Helicopter extends Entity {
   model: HelicopterModel = HelicopterModel.APACHE;
@@ -53,9 +113,34 @@ export class Helicopter extends Entity {
   tailRotor: THREE.Object3D;
   shieldMesh: THREE.Mesh | null = null;
   /** Rotating chin gun turret — tracks auto-aim targets while the body flies on. */
-  gunMount: THREE.Group = new THREE.Group();
+  /** Yaw pivot (horizontal) — child of the helicopter mesh, parent to pitch pivot. */
+  gunYawPivot: THREE.Group = new THREE.Group();
+  /** Pitch pivot (vertical) — child of yaw pivot, holds the gun mesh. */
+  gunPitchPivot: THREE.Group = new THREE.Group();
   gunAimMode: boolean = false;
-  gunAimPoint: THREE.Vector3 = new THREE.Vector3();
+  /** World-space target the gun should track (set externally). */
+  gunAimTarget: THREE.Vector3 = new THREE.Vector3();
+
+  // Phase 3 game-feel: MG recoil kicks the barrel/muzzle back along its axis
+  // and springs back — visual only, pivots (and therefore auto-aim math) are
+  // untouched. firePitchImpulse adds a tiny clamped nose kick for heavy
+  // weapons, applied to the visual mesh only and absorbed by the bank
+  // controller (spring return).
+  private gunRecoil = 0;
+  private firePitchImpulse = 0;
+  private gunBarrelMesh: THREE.Mesh | null = null;
+  private gunMuzzleMesh: THREE.Mesh | null = null;
+  private static readonly GUN_RECOIL_MAX = 0.28;
+  private static readonly GUN_RECOIL_RESPONSE = 22; // /s — fast spring back
+  private static readonly FIRE_PITCH_MAX = 0.09;
+  private static readonly FIRE_PITCH_RESPONSE = 10; // /s
+
+  // Gun turret config
+  static readonly GUN_YAW_MIN: number = -2.09; // -120°
+  static readonly GUN_YAW_MAX: number = 2.09;  // +120°
+  static readonly GUN_PITCH_MIN: number = -0.79; // -45°
+  static readonly GUN_PITCH_MAX: number = 0.44;  // +25°
+  static readonly GUN_TRACKING_SPEED: number = 14; // rad/s
 
   // Subsystems
   rotorHealth: number = 100;
@@ -116,7 +201,14 @@ export class Helicopter extends Entity {
       this.buildApache(baseGroup, bodyMat, darkBodyMat, glassMat, metalMat, bladeMat, ordnanceMat, accentMat);
     }
 
-    // Shared rotating chin gun turret (all models) — replaces the static Apache chin gun
+    // Shared rotating chin gun turret (all models): yaw pivot → pitch pivot → gun mesh
+    // This ensures auto-aim rotates ONLY the gun, never the helicopter body.
+    this.gunYawPivot.position.set(0, -0.95, 3.0);
+    baseGroup.add(this.gunYawPivot);
+
+    this.gunPitchPivot.position.set(0, 0, 0);
+    this.gunYawPivot.add(this.gunPitchPivot);
+
     const gunMountBase = createBox(0.6, 0.4, 0.6, 0x161a18);
     gunMountBase.material = bladeMat;
     const gunBarrel = createBox(0.14, 0.14, 2.0, 0x22262a);
@@ -124,9 +216,9 @@ export class Helicopter extends Entity {
     gunBarrel.position.set(0, 0, 1.0);
     const gunMuzzle = createGlowBox(0.3, 0.3, 0.26, 0xff4444, 0.85);
     gunMuzzle.position.set(0, 0, 2.05);
-    this.gunMount.add(gunMountBase, gunBarrel, gunMuzzle);
-    this.gunMount.position.set(0, -0.95, 3.0);
-    baseGroup.add(this.gunMount);
+    this.gunPitchPivot.add(gunMountBase, gunBarrel, gunMuzzle);
+    this.gunBarrelMesh = gunBarrel;
+    this.gunMuzzleMesh = gunMuzzle;
 
     // Mast & Rotor (shared)
     const mast = createBox(0.6, 1.5, 0.6, 0x5a6360);
@@ -349,6 +441,18 @@ export class Helicopter extends Entity {
     const wheelRear = wheelL.clone();
     wheelRear.position.set(0, -1.3, -4.5);
     baseGroup.add(wheelL, wheelR, wheelRear);
+
+    // Signature details: wingtip nav lights + tail beacon (Apache)
+    const navRed = createGlowBox(0.22, 0.22, 0.22, 0xff2244, 0.9);
+    navRed.position.set(-3.9, -0.1, 0.2);
+    const navGreen = createGlowBox(0.22, 0.22, 0.22, 0x22ff66, 0.9);
+    navGreen.position.set(3.9, -0.1, 0.2);
+    const tailBeacon = createGlowBox(0.18, 0.18, 0.18, 0xff3344, 0.9);
+    tailBeacon.position.set(0, 0.6, -8.4);
+    const antenna = createBox(0.06, 0.7, 0.06, 0x5a6360);
+    antenna.material = metalMat;
+    antenna.position.set(0.7, 1.1, 0.6);
+    baseGroup.add(navRed, navGreen, tailBeacon, antenna);
   }
 
   /** NIGHTHAWK — angular stealth gunship with twin tails and a dark fuselage. */
@@ -423,6 +527,20 @@ export class Helicopter extends Entity {
     chinFin.material = darkBodyMat;
     chinFin.position.set(0, -0.95, 2.4);
     baseGroup.add(chinFin);
+
+    // Signature details: wingtip nav lights + twin tail beacons (Nighthawk)
+    const navRed = createGlowBox(0.2, 0.2, 0.2, 0xff2244, 0.9);
+    navRed.position.set(-3.9, -0.15, 0.1);
+    const navGreen = createGlowBox(0.2, 0.2, 0.2, 0x22ff66, 0.9);
+    navGreen.position.set(3.9, -0.15, 0.1);
+    const beaconL = createGlowBox(0.16, 0.16, 0.16, 0xff3344, 0.9);
+    beaconL.position.set(-1.1, 1.2, -6.2);
+    const beaconR = beaconL.clone();
+    beaconR.position.x = 1.1;
+    const antenna = createBox(0.06, 0.6, 0.06, 0x5a6360);
+    antenna.material = metalMat;
+    antenna.position.set(0, 1.0, 0.8);
+    baseGroup.add(navRed, navGreen, beaconL, beaconR, antenna);
   }
 
   /** WARLOCK — heavy gunship: bulky hull, wide wings, dual rotor mast, heavy ordnance. */
@@ -510,6 +628,22 @@ export class Helicopter extends Entity {
     skidRear.material = metalMat;
     skidRear.position.set(0, -1.0, -4.6);
     baseGroup.add(skidL, skidR, skidRear);
+
+    // Signature details: intake glows + wingtip nav lights + roof beacon (Warlock)
+    const intakeL = createGlowBox(0.5, 0.4, 0.2, 0xff8833, 0.8);
+    intakeL.position.set(-1.7, 0.9, -2.2);
+    const intakeR = intakeL.clone();
+    intakeR.position.x = 1.7;
+    const navRed = createGlowBox(0.24, 0.24, 0.24, 0xff2244, 0.9);
+    navRed.position.set(-4.9, -0.2, 0.3);
+    const navGreen = createGlowBox(0.24, 0.24, 0.24, 0x22ff66, 0.9);
+    navGreen.position.set(4.9, -0.2, 0.3);
+    const roofBeacon = createGlowBox(0.2, 0.2, 0.2, 0xffaa33, 0.9);
+    roofBeacon.position.set(0, 1.6, 0.6);
+    const antenna = createBox(0.07, 0.8, 0.07, 0x5a6360);
+    antenna.material = metalMat;
+    antenna.position.set(-0.8, 1.3, 0.7);
+    baseGroup.add(intakeL, intakeR, navRed, navGreen, roofBeacon, antenna);
   }
 
   setTarget(x: number, y: number, z: number) {
@@ -522,6 +656,54 @@ export class Helicopter extends Entity {
 
   setHoverFloor(height: number) {
     this.hoverFloor = height;
+  }
+
+  /**
+   * Phase 2 — vertical control, fully separate from horizontal movement.
+   * Manual climb/descend input is velocity-based (own accel/brake/cap), then
+   * two guards layer on top:
+   *   • terrain safety floor — never descend below hoverFloor + clearance;
+   *   • soft altitude cap near maxAltitude (control eases out, no hard snap).
+   */
+  private applyVerticalControl(
+    time: number,
+    delta: number,
+    inputY: number,
+    engineEff: number,
+    rotorEff: number,
+  ) {
+    const cfg = MOVEMENT_CONFIG;
+    this.smoothedHoverFloor +=
+      (this.hoverFloor - this.smoothedHoverFloor) *
+      Math.min(1, delta * (this.hoverFloor > this.smoothedHoverFloor ? 6.0 : 3.5));
+    const floorY = this.smoothedHoverFloor + cfg.hoverClearance;
+
+    // Manual climb/descend (Space/Alt)
+    let desiredVy = inputY * cfg.maxVerticalSpeed * engineEff;
+
+    // Safety floor: never descend below terrain/buildings + clearance.
+    if (this.body.position.y < floorY && desiredVy < 0) desiredVy = 0;
+    if (this.body.position.y < floorY - 0.5) {
+      desiredVy = Math.max(desiredVy, (floorY - this.body.position.y) * 2.5);
+    }
+    // Soft altitude cap near maxAltitude (ease out, never hard-snap).
+    if (this.body.position.y > cfg.maxAltitude - 4 && desiredVy > 0) {
+      desiredVy *= Math.max(0, (cfg.maxAltitude - this.body.position.y) / 4);
+    }
+
+    // Step toward desired vertical velocity (faster response when settling or
+    // reversing climb/descend — weighted but responsive altitude control).
+    const vResp =
+      (desiredVy * this.body.velocity.y < 0 ||
+        Math.abs(desiredVy) < Math.abs(this.body.velocity.y)
+        ? cfg.verticalSettleResponse
+        : cfg.verticalResponse) * rotorEff;
+    this.body.velocity.y +=
+      (desiredVy - this.body.velocity.y) * (1 - Math.exp(-vResp * delta));
+    // Snap tiny residual vertical velocity to zero so the ship never creeps.
+    if (desiredVy === 0 && Math.abs(this.body.velocity.y) < 0.05) {
+      this.body.velocity.y = 0;
+    }
   }
 
   takeDamage(amount: number) {
@@ -545,7 +727,60 @@ export class Helicopter extends Entity {
   /** Point the chin gun turret at a world position (auto-aim). Pass active=false to return to neutral. */
   setGunAim(x: number, y: number, z: number, active: boolean) {
     this.gunAimMode = active;
-    if (active) this.gunAimPoint.set(x, y, z);
+    if (active) this.gunAimTarget.set(x, y, z);
+  }
+
+  /** Phase 3: MG recoil — kick the barrel/muzzle back, spring returns fast.
+   *  Visual only; pivots (auto-aim yaw/pitch math) are never touched. */
+  triggerRecoil(amount: number) {
+    this.gunRecoil = Math.min(Helicopter.GUN_RECOIL_MAX, Math.max(this.gunRecoil, amount));
+  }
+
+  /** Phase 3: tiny clamped nose kick for heavy weapons (missiles/rockets). */
+  triggerFirePitch(amount: number) {
+    this.firePitchImpulse = Math.min(Helicopter.FIRE_PITCH_MAX, Math.max(this.firePitchImpulse, amount));
+  }
+
+  /** Advance the visual recoil/fire-pitch spring back to rest. */
+  private updateFireFeedback(delta: number) {
+    if (this.gunRecoil > 0.0005) {
+      this.gunRecoil *= Math.exp(-Helicopter.GUN_RECOIL_RESPONSE * delta);
+      if (this.gunRecoil < 0.0005) this.gunRecoil = 0;
+    }
+    if (this.gunBarrelMesh && this.gunMuzzleMesh) {
+      this.gunBarrelMesh.position.z = 1.0 - this.gunRecoil * 0.55;
+      this.gunMuzzleMesh.position.z = 2.05 - this.gunRecoil;
+    }
+    if (this.firePitchImpulse > 0.0005) {
+      this.firePitchImpulse *= Math.exp(-Helicopter.FIRE_PITCH_RESPONSE * delta);
+      if (this.firePitchImpulse < 0.0005) this.firePitchImpulse = 0;
+    }
+  }
+
+  /** Get the current muzzle world position (fire origin for gun projectiles).
+   *  Walks the pivot hierarchy: mesh → gunYawPivot → gunPitchPivot → muzzle. */
+  getMuzzlePosition(target: THREE.Vector3): THREE.Vector3 {
+    // Reads the muzzle mesh's live local z so recoil offsets the fire origin
+    // correctly. +Z is the barrel axis in gunPitchPivot local space.
+    const muzzleZ = this.gunMuzzleMesh ? this.gunMuzzleMesh.position.z : 2.05;
+    target.set(0, 0, muzzleZ);
+    target.applyQuaternion(this.gunPitchPivot.quaternion);
+    target.add(this.gunPitchPivot.position);
+    target.applyQuaternion(this.gunYawPivot.quaternion);
+    target.add(this.gunYawPivot.position);
+    this.mesh.localToWorld(target);
+    return target;
+  }
+
+  /** Get the muzzle world forward direction (fire direction for gun projectiles).
+   *  Composes the full world rotation: mesh (body heading/bank) → yaw → pitch. */
+  getMuzzleDirection(target: THREE.Vector3): THREE.Vector3 {
+    target.set(0, 0, 1);
+    const q = this.mesh.quaternion.clone();
+    q.multiply(this.gunYawPivot.quaternion);
+    q.multiply(this.gunPitchPivot.quaternion);
+    target.applyQuaternion(q);
+    return target;
   }
 
   repair(percent: number) {
@@ -562,6 +797,8 @@ export class Helicopter extends Entity {
     this.crashTiltTimer = 0;
     this.crashTiltStrength = 1;
     this.gunAimMode = false;
+    this.gunYawPivot.rotation.y = 0;
+    this.gunPitchPivot.rotation.x = 0;
     this.targetPosition.set(0, 26, 0);
     this.lastTargetPosition.set(0, 26, 0);
     this.aimPosition.set(0, 26, -30);
@@ -582,7 +819,7 @@ export class Helicopter extends Entity {
     shieldActive: boolean = false,
     speedBoostActive: boolean = false,
     hasInput: boolean = false,
-    autoScrollSpeed: number = 28,
+    move?: MovementCommand,
   ) {
     if (!this.active) return;
 
@@ -614,9 +851,14 @@ export class Helicopter extends Entity {
 
       // Visual rotation during dash
       const progress = 1.0 - (this.dashTimer / this.dashDuration);
-      if (this.dashRollDirection !== 0) {
-        // Sideways barrel roll!
-        const rollAngle = progress * Math.PI * 2 * -this.dashRollDirection;
+      if (this.dashTimer <= 0) {
+        // Dash finished: snap the pose back to identity (2π ≡ 0) so the tilt
+        // controller resumes from a clean baseline instead of unwinding a full turn.
+        this.mesh.rotation.x = 0;
+        this.mesh.rotation.z = 0;
+      } else if (this.dashRollDirection !== 0) {
+        // Sideways dodge: a sharp bank out and back (no disorienting full spin)
+        const rollAngle = Math.sin(progress * Math.PI) * 0.95 * -this.dashRollDirection;
         this.mesh.rotation.z = rollAngle;
         this.mesh.rotation.x = Math.sin(progress * Math.PI) * -0.22; // slight dip forward
       } else if (this.dashPitchDirection !== 0) {
@@ -640,18 +882,8 @@ export class Helicopter extends Entity {
         }
       }
 
-      // Still apply gravity compensation and vertical target tracking so we don't fall/rise wildly
-      this.smoothedHoverFloor +=
-        (this.hoverFloor - this.smoothedHoverFloor) *
-        Math.min(1, delta * (this.hoverFloor > this.smoothedHoverFloor ? 6.5 : 2.5));
-      const hoverBob = Math.sin(time * 1.7) * 0.14;
-      const targetY = Math.max(this.targetPosition.y, this.smoothedHoverFloor + 7.5) + hoverBob;
-      const ey = targetY - this.body.position.y;
-      const gravityComp = 9.82 * this.body.mass;
-      const fy = ey * 112 - this.body.velocity.y * 38 + gravityComp;
-
-      tempVec3_2.set(0, fy, 0);
-      this.body.applyForce(tempVec3_2, this.body.position);
+      // Dash keeps altitude control active (climb/descend still works mid-dash)
+      this.applyVerticalControl(time, delta, move?.y ?? 0, 1, 1);
 
       this.animateRotors(80, 60, delta);
       return;
@@ -701,88 +933,90 @@ export class Helicopter extends Entity {
       }
     }
 
-    // Calculate player input agility (reticle speed) - exclude auto scroll
-    const dxInput = this.targetPosition.x - this.lastTargetPosition.x;
-    const dzInput = (this.targetPosition.z - this.lastTargetPosition.z) + (autoScrollSpeed * delta);
-    const inputSpeed =
-      Math.sqrt(dxInput * dxInput + dzInput * dzInput) / Math.max(delta, 0.001);
-    this.lastTargetPosition.copy(this.targetPosition);
+    // ---- Phase 2: velocity-based arcade movement -------------------------
+    // Input (world-space, normalized 0..1) → desired velocity → accelerate the
+    // actual body velocity toward it. No position-target chasing: the body's
+    // velocity IS the gameplay transform, so movement is predictable, capped,
+    // and easy to correct. Diagonal input is normalized upstream, so W+D moves
+    // at the same max speed as W alone.
+    const cfg = MOVEMENT_CONFIG;
+    const moveX = move?.x ?? 0;
+    const moveZ = move?.z ?? 0;
+    const moveY = move?.y ?? 0;
+    const speedMult =
+      (move?.afterburner ?? 1) *
+      (speedBoostActive ? cfg.speedBoostMultiplier : 1) *
+      engineEff;
+    const maxSpeed = cfg.maxSpeed * speedMult;
 
-    // Responsiveness Scale (0.0 to 1.0)
-    const inputAgility = Math.min(inputSpeed / 80.0, 1.0);
+    const desiredVx = moveX * maxSpeed;
+    const desiredVz = moveZ * maxSpeed;
 
-    const ex = this.targetPosition.x - this.body.position.x;
-    const ez = this.targetPosition.z - this.body.position.z;
-    const distToTarget = Math.sqrt(ex * ex + ez * ez);
+    const vx = this.body.velocity.x;
+    const vz = this.body.velocity.z;
 
-    const maxCruiseSpeed = (55 + inputAgility * 20) * engineEff;
-    // Tighter target tracking: higher position gain so the chase feels connected
-    let desiredVx = THREE.MathUtils.clamp(ex * 7.5, -maxCruiseSpeed, maxCruiseSpeed);
-    let desiredVz = THREE.MathUtils.clamp(ez * 7.5, -maxCruiseSpeed, maxCruiseSpeed);
-    const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
-    if (desiredSpeed > maxCruiseSpeed) {
-      desiredVx = (desiredVx / desiredSpeed) * maxCruiseSpeed;
-      desiredVz = (desiredVz / desiredSpeed) * maxCruiseSpeed;
-    }
+    // Step 6: braking response is stronger than acceleration (no gliding across
+    // the city). Per-axis: slowing toward the desired velocity — OR reversing
+    // direction (opposite signs = strong counter-acceleration, Step 6) — uses
+    // the braking response. Exponential approach gives immediate first response
+    // with a short physical ramp to cruise (~0.21s), so the ship has weight.
+    const respX =
+      desiredVx * vx < 0 || Math.abs(desiredVx) < Math.abs(vx)
+        ? cfg.brakeResponse
+        : cfg.moveResponse;
+    const respZ =
+      desiredVz * vz < 0 || Math.abs(desiredVz) < Math.abs(vz)
+        ? cfg.brakeResponse
+        : cfg.moveResponse;
+    this.body.velocity.x += (desiredVx - vx) * (1 - Math.exp(-respX * rotorEff * delta));
+    this.body.velocity.z += (desiredVz - vz) * (1 - Math.exp(-respZ * rotorEff * delta));
+    // Snap tiny residual velocities to zero so the ship settles into a hover
+    // instead of creeping on floating-point leftovers.
+    if (desiredVx === 0 && Math.abs(this.body.velocity.x) < 0.05) this.body.velocity.x = 0;
+    if (desiredVz === 0 && Math.abs(this.body.velocity.z) < 0.05) this.body.velocity.z = 0;
 
-    // Smoother flight: moderate accelResponsiveness (10 to 15) — crisp but not twitchy
-    const accelResponsiveness = (10 + inputAgility * 5) * rotorEff * engineEff;
-    let fx = (desiredVx - this.body.velocity.x) * this.body.mass * accelResponsiveness;
-    let fz = (desiredVz - this.body.velocity.z) * this.body.mass * accelResponsiveness;
-
-    // Apply Environmental Wind
+    // Ambient wind nudge (cosmetic — never overrides player control)
     if (windForce) {
-      fx += windForce.x * 0.35;
-      fz += windForce.z * 0.35;
+      this.body.velocity.x += windForce.x * 0.004 * delta;
+      this.body.velocity.z += windForce.z * 0.004 * delta;
     }
 
-    // Organic hover drifting (relative speed excludes autoScrollSpeed)
-    const relativeSpeed = Math.sqrt(
-      this.body.velocity.x ** 2 + (this.body.velocity.z + autoScrollSpeed) ** 2,
-    );
-    const isIdle = !hasInput && distToTarget < 5.0; // Is the player resting?
+    // Step 8/9: vertical is separate from horizontal — climb/descend with its
+    // own accel/brake/cap, plus a terrain-safety floor and altitude cap.
+    this.applyVerticalControl(time, delta, moveY, engineEff, rotorEff);
 
-    // Idle breath: a slow, gentle hover sway (single soft frequencies) instead of
-    // the old jittery Lissajous drift that read as constant shaking.
-    const idleFactor = Math.max(0, 1.0 - relativeSpeed / 8.0);
-    fx += Math.sin(time * 0.7 + 1.3) * idleFactor * 3.2;
-    fz += Math.cos(time * 0.65) * idleFactor * 3.2;
+    const newVx = this.body.velocity.x;
+    const newVz = this.body.velocity.z;
+    const newVy = this.body.velocity.y;
+    const speed = Math.sqrt(newVx * newVx + newVz * newVz);
 
-    // Allow force to be applied without clipping
-    const maxForce = (2500 + inputAgility * 500) * engineEff;
-    const forceMag = Math.sqrt(fx * fx + fz * fz);
-    if (forceMag > maxForce) {
-      fx = (fx / forceMag) * maxForce;
-      fz = (fz / forceMag) * maxForce;
+    // Step 19 movement safety: abnormal speed ⇒ corrupted body — clamp and log
+    // instead of letting it fly off the map and corrupt the whole sim.
+    const totalSpeed = Math.sqrt(speed * speed + newVy * newVy);
+    if (totalSpeed > cfg.safetyMaxSpeed) {
+      if (import.meta.env.DEV) {
+        console.warn(
+          "[Heli-Strike] abnormal player speed — clamping",
+          totalSpeed.toFixed(1),
+        );
+      }
+      const s = cfg.safetyMaxSpeed / Math.max(totalSpeed, 0.001);
+      this.body.velocity.x *= s;
+      this.body.velocity.y *= s;
+      this.body.velocity.z *= s;
     }
 
-    tempVec3_1.set(fx, 0, fz);
-    this.body.applyForce(tempVec3_1, this.body.position);
+    const isIdle = !hasInput && speed < 3.0; // Player resting?
+    const inputAgility = Math.min(speed / 80.0, 1.0);
 
-    this.smoothedHoverFloor +=
-      (this.hoverFloor - this.smoothedHoverFloor) *
-      Math.min(1, delta * (this.hoverFloor > this.smoothedHoverFloor ? 6.5 : 2.5));
-
-    const hoverBob = Math.sin(time * 1.35) * 0.08; // gentle breathing altitude
-    const targetY = Math.max(this.targetPosition.y, this.smoothedHoverFloor + 7.5) + hoverBob;
-    const ey = targetY - this.body.position.y;
-
-    const gravityComp = 9.82 * this.body.mass;
-    const fy = ey * 112 - this.body.velocity.y * 38 + gravityComp;
-
-    tempVec3_2.set(0, fy, 0);
-    this.body.applyForce(tempVec3_2, this.body.position);
-
-    // Heading targeting — when the gun turret tracks a target (auto-aim), the
-    // body flies on course and the chin gun does the aiming; otherwise the nose
-    // swings toward the aim point like a classic twin-stick shooter.
+    // Body heading is movement-only. The nose NEVER turns toward the aim
+    // point, the mouse, or enemies — the chin gun turret does all aiming
+    // (see the gun update below), so the aircraft flies on course while the
+    // weapon tracks independently. When hovering (speed <= 4) the body holds
+    // its last heading instead of drifting toward anything.
     let targetAngle = this.mesh.rotation.y;
-    const aimDx = this.aimPosition.x - this.body.position.x;
-    const aimDz = this.aimPosition.z - this.body.position.z;
-    if (!this.gunAimMode && Math.sqrt(aimDx * aimDx + aimDz * aimDz) > 2) {
-      targetAngle = Math.atan2(aimDx, aimDz);
-    } else if (!isIdle) {
-      targetAngle = Math.atan2(ex, ez);
+    if (speed > 4) {
+      targetAngle = Math.atan2(newVx, newVz);
     }
 
     let currentAngle = this.mesh.rotation.y;
@@ -790,61 +1024,111 @@ export class Helicopter extends Entity {
     while (diff < -Math.PI) diff += Math.PI * 2;
     while (diff > Math.PI) diff -= Math.PI * 2;
 
-    // Turn faster when input is aggressive
-    const turnTurnSpeed = (0.22 + inputAgility * 0.15) * rotorEff;
-    this.mesh.rotation.y += diff * turnTurnSpeed;
+    // Turn the nose toward travel at a deliberately slower rate so the ship
+    // shows cross-controlled banking: strafing left drifts the hull sideways
+    // with a visible bank while the nose swings in behind the motion (Phase 2
+    // physics — helicopter-like weight instead of an instantly-aligned nose).
+    const turnTurnSpeed = (0.07 + inputAgility * 0.06) * rotorEff;
+    this.mesh.rotation.y += diff * Math.min(1, turnTurnSpeed * delta * 60);
 
-    // Rotating chin gun turret — tracks the auto-aim target, or eases to neutral
-    const gunYawTarget = this.gunAimMode
-      ? Math.atan2(
-          this.gunAimPoint.x - this.body.position.x,
-          this.gunAimPoint.z - this.body.position.z,
-        ) - this.mesh.rotation.y
-      : 0;
-    let gunDiff = gunYawTarget - this.gunMount.rotation.y;
-    while (gunDiff < -Math.PI) gunDiff += Math.PI * 2;
-    while (gunDiff > Math.PI) gunDiff -= Math.PI * 2;
-    this.gunMount.rotation.y += gunDiff * Math.min(1, delta * 12);
+    // Rotating chin gun turret (separate yaw/pitch pivots) — tracks the auto-aim
+    // target, or eases to neutral. ONLY the gun moves; the helicopter body stays
+    // on its flight course. Yaw rotates gunYawPivot (horizontal), pitch rotates
+    // gunPitchPivot (vertical, child of yaw). Limits prevent the gun from
+    // pointing through the cockpit.
+    const H = Helicopter;
+    const trackingSpeed = H.GUN_TRACKING_SPEED * delta;
 
-    const gDx = this.gunAimPoint.x - this.body.position.x;
-    const gDz = this.gunAimPoint.z - this.body.position.z;
-    const gDy = this.gunAimPoint.y - this.body.position.y;
-    const gHoriz = Math.max(0.001, Math.sqrt(gDx * gDx + gDz * gDz));
-    const gunPitchTarget = this.gunAimMode
-      ? THREE.MathUtils.clamp(-Math.atan2(gDy, gHoriz), -0.7, 0.7)
-      : 0;
-    this.gunMount.rotation.x += (gunPitchTarget - this.gunMount.rotation.x) * Math.min(1, delta * 10);
+    if (this.gunAimMode) {
+      // Yaw: world-space target direction converted to mesh-local yaw
+      const gDx = this.gunAimTarget.x - this.body.position.x;
+      const gDz = this.gunAimTarget.z - this.body.position.z;
+      let yawTarget = Math.atan2(gDx, gDz) - this.mesh.rotation.y;
+      // Clamp to yaw limits
+      yawTarget = Math.max(H.GUN_YAW_MIN, Math.min(H.GUN_YAW_MAX, yawTarget));
+      // Shortest-path angle wrapping
+      let yawDiff = yawTarget - this.gunYawPivot.rotation.y;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      this.gunYawPivot.rotation.y += Math.min(Math.abs(yawDiff), trackingSpeed) * Math.sign(yawDiff);
+
+      // Pitch: vertical angle to target, calculated in world space (yaw pivot
+      // has already rotated to face the target direction).
+      const gDy = this.gunAimTarget.y - this.body.position.y;
+      const gHoriz = Math.max(0.001, Math.sqrt(gDx * gDx + gDz * gDz));
+      let pitchTarget = THREE.MathUtils.clamp(-Math.atan2(gDy, gHoriz), H.GUN_PITCH_MIN, H.GUN_PITCH_MAX);
+      let pitchDiff = pitchTarget - this.gunPitchPivot.rotation.x;
+      this.gunPitchPivot.rotation.x += Math.min(Math.abs(pitchDiff), trackingSpeed * 0.8) * Math.sign(pitchDiff);
+    } else {
+      // No target — ease back to neutral forward position
+      const yawReturnSpeed = trackingSpeed * 0.6;
+      this.gunYawPivot.rotation.y += Math.min(Math.abs(this.gunYawPivot.rotation.y), yawReturnSpeed) * -Math.sign(this.gunYawPivot.rotation.y);
+      this.gunPitchPivot.rotation.x += Math.min(Math.abs(this.gunPitchPivot.rotation.x), yawReturnSpeed * 0.8) * -Math.sign(this.gunPitchPivot.rotation.x);
+    }
+
+    // Phase 3: visual recoil + heavy-weapon nose kick — barrel/muzzle only and
+    // a tiny clamped mesh pitch, both springing back to rest.
+    this.updateFireFeedback(delta);
 
     this.mesh.position.copy(this.body.position as any);
 
     const cy = Math.cos(this.mesh.rotation.y);
     const sy = Math.sin(this.mesh.rotation.y);
     // Transform velocity to local space (Z forward, X right)
-    const localVx = this.body.velocity.x * cy - this.body.velocity.z * sy;
-    const localVz = this.body.velocity.x * sy + this.body.velocity.z * cy;
+    const localVx = newVx * cy - newVz * sy;
+    const localVz = newVx * sy + newVz * cy;
 
     // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
     const tiltMultiplier = isIdle ? 0.22 : 1.25;
 
-    // Transform applied forces to local space to tilt/roll based on thrust/acceleration
-    const localFx = fx * cy - fz * sy;
-    const localFz = fx * sy + fz * cy;
+    // Phase 2: lean-in from acceleration (difference between desired and actual velocity)
+    // — replaces the old force-based term (fx/fz no longer exist).
+    const accelX = desiredVx - newVx;
+    const accelZ = desiredVz - newVz;
+    const localAx = accelX * cy - accelZ * sy;
+    const localAz = accelX * sy + accelZ * cy;
 
-    // Visual Tilting: Pitch DOWN when accelerating forward (positive localVz/negative localFz)
-    // and pitch UP (flare) when braking. Roll INTO turns based on lateral forces.
-    const tiltCap = 0.52;
-    // Increased force coefficients to match the smoothed, smaller force values
+    // Phase 2 physics banking: velocity-driven bank + acceleration lean-in,
+    // with explicit arcade limits — roll ±17°, pitch ±9° (never 45°+ rails).
+    // The acceleration term (localAx/localAz = desired−actual) makes the ship
+    // visibly lean INTO a direction change, then settle as velocity catches up.
+    // One authoritative calculation; critically-damped exp smoothing: quick
+    // lean-in, slightly slower return to neutral (no oscillation, no jitter).
+    const ROLL_LIMIT = 0.30; // ~17°
+    const PITCH_LIMIT = 0.16; // ~9°
+    const BANK_IN_RESPONSE = 7.5;
+    const BANK_OUT_RESPONSE = 4.5;
     const targetTiltX =
-      THREE.MathUtils.clamp(localFz * 0.0025 + localVz * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
+      THREE.MathUtils.clamp(
+        (localVz * 0.0028 +
+          THREE.MathUtils.clamp(localAz * 0.0022, -0.14, 0.14)) *
+          tiltMultiplier,
+        -PITCH_LIMIT,
+        PITCH_LIMIT,
+      );
     const targetTiltZ =
-      -THREE.MathUtils.clamp(localFx * 0.0025 + localVx * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
-
-    const tiltSmoothing =
-      (isIdle ? 0.055 : 0.16 + inputAgility * 0.08) * rotorEff;
+      -THREE.MathUtils.clamp(
+        (localVx * 0.0055 +
+          THREE.MathUtils.clamp(localAx * 0.0022, -0.16, 0.16)) *
+          tiltMultiplier,
+        -ROLL_LIMIT,
+        ROLL_LIMIT,
+      );
+    const bankRespX =
+      Math.abs(targetTiltX) >= Math.abs(this.mesh.rotation.x)
+        ? BANK_IN_RESPONSE
+        : BANK_OUT_RESPONSE;
+    const bankRespZ =
+      Math.abs(targetTiltZ) >= Math.abs(this.mesh.rotation.z)
+        ? BANK_IN_RESPONSE
+        : BANK_OUT_RESPONSE;
     this.mesh.rotation.x +=
-      (targetTiltX - this.mesh.rotation.x) * tiltSmoothing;
+      (targetTiltX - this.mesh.rotation.x) * (1 - Math.exp(-bankRespX * delta));
     this.mesh.rotation.z +=
-      (targetTiltZ - this.mesh.rotation.z) * tiltSmoothing;
+      (targetTiltZ - this.mesh.rotation.z) * (1 - Math.exp(-bankRespZ * delta));
+    // Phase 3: heavy-weapon nose kick — the bank controller absorbs this tiny
+    // clamped pitch next frame, giving a clean spring return.
+    this.mesh.rotation.x += this.firePitchImpulse;
 
     // Crash wobble — the ship rocks out of control after slamming into a building
     if (this.crashTiltTimer > 0) {
@@ -866,7 +1150,7 @@ export class Helicopter extends Entity {
     const rotorJitter = this.rotorHealth < 30 ? Math.sin(time * 60) * 0.05 : 0;
     this.mainRotor.position.y = 2.1 + rotorJitter; // Adjusted for Apache mast height
 
-    this.animateRotors(inputSpeed, 60, delta);
+    this.animateRotors(speed, 80, delta);
   }
   rotorSpeed: number = 0;
   crashTiltTimer: number = 0;
@@ -947,6 +1231,10 @@ export class Enemy extends Entity {
   evadeTimer: number = 0;
   lastDecisionTime: number = 0;
   flankDir: number = 1;
+  /** Smoothed movement velocity — eases toward the desired vector each frame so
+   *  enemies don't snap direction (same polish as the player's PD controller). */
+  smoothVelX: number = 0;
+  smoothVelZ: number = 0;
   enemyRotor: THREE.Group | null = null;
   enemyTailRotor: THREE.Group | null = null;
 
@@ -1031,32 +1319,86 @@ export class Enemy extends Entity {
     }
 
     if (type === EnemyType.BOSS) {
-      // Big Boss Helicopter
+      // "Archon" heavy gunship — layered hull, twin nacelles, broad wings, glow core
       this.ring = new THREE.Group();
       this.ring.position.y = 0.2;
+      const r = radius;
 
-      const hull = createBox(radius * 1.1, radius * 0.75, radius * 1.9, coreHex);
+      // Layered main hull (chunky silhouette)
+      const hull = createBox(r * 1.25, r * 0.55, r * 1.9, coreHex);
       this.ring.add(hull);
+      const hullTop = createBox(r * 0.9, r * 0.35, r * 1.5, coreHex);
+      hullTop.position.set(0, r * 0.42, -r * 0.1);
+      this.ring.add(hullTop);
+      const belly = createBox(r * 1.05, r * 0.3, r * 1.5, 0x1a1020);
+      belly.position.set(0, -r * 0.45, r * 0.1);
+      this.ring.add(belly);
 
-      const tailBoom = createBox(radius * 0.3, radius * 0.3, radius * 1.8, coreHex);
-      tailBoom.position.set(0, 0, -radius * 1.4);
-      this.ring.add(tailBoom);
-
-      const tailFin = createBox(radius * 0.12, radius * 0.75, radius * 0.35, accentHex);
-      tailFin.position.set(0, radius * 0.35, -radius * 2.1);
-      this.ring.add(tailFin);
-
-      const glass = createBox(radius * 0.6, radius * 0.4, radius * 0.7, 0x172f3d);
-      glass.position.set(0, radius * 0.2, radius * 0.95);
+      // Cockpit + nose sensor + glowing core
+      const glass = createBox(r * 0.55, r * 0.38, r * 0.65, 0x172f3d);
+      glass.position.set(0, r * 0.25, r * 1.1);
       this.ring.add(glass);
+      const noseSensor = createGlowBox(r * 0.3, r * 0.18, r * 0.3, 0xff3366, 0.9);
+      noseSensor.position.set(0, r * 0.05, r * 1.45);
+      this.ring.add(noseSensor);
+      const core = createGlowBox(r * 0.5, r * 0.5, r * 0.24, 0xff2266, 0.95);
+      core.position.set(0, 0, r * 0.85);
+      this.ring.add(core);
 
-      // Main rotor
+      // Twin engine nacelles with glowing intakes
+      [-1, 1].forEach((s) => {
+        const nacelle = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
+        nacelle.position.set(s * r * 1.0, r * 0.15, r * 0.35);
+        this.ring.add(nacelle);
+        const intake = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
+        intake.position.set(s * r * 1.0, r * 0.15, r * 0.92);
+        this.ring.add(intake);
+      });
+
+      // Broad wing + missile pylons + wingtip lights
+      const wing = createBox(r * 3.0, r * 0.18, r * 0.8, coreHex);
+      wing.position.set(0, 0, r * 0.2);
+      this.ring.add(wing);
+      [-1, 1].forEach((s) => {
+        const pylon = createBox(r * 0.14, r * 0.3, r * 0.5, 0x222222);
+        pylon.position.set(s * r * 1.35, -r * 0.25, r * 0.2);
+        this.ring.add(pylon);
+        const missile = createBox(r * 0.12, r * 0.12, r * 0.7, 0x444444);
+        missile.position.set(s * r * 1.35, -r * 0.42, r * 0.2);
+        this.ring.add(missile);
+        const tipLight = createGlowBox(r * 0.16, r * 0.16, r * 0.16, s < 0 ? 0x33ff66 : 0xff4433, 0.9);
+        tipLight.position.set(s * r * 1.55, 0, r * 0.2);
+        this.ring.add(tipLight);
+      });
+
+      // Twin tail booms + fins + stabilizer
+      [-1, 1].forEach((s) => {
+        const boom = createBox(r * 0.22, r * 0.28, r * 1.9, coreHex);
+        boom.position.set(s * r * 0.55, r * 0.1, -r * 1.55);
+        this.ring.add(boom);
+        const fin = createBox(r * 0.12, r * 0.85, r * 0.4, accentHex);
+        fin.position.set(s * r * 0.55, r * 0.5, -r * 2.3);
+        this.ring.add(fin);
+      });
+      const stab = createBox(r * 1.4, r * 0.1, r * 0.7, coreHex);
+      stab.position.set(0, r * 0.15, -r * 2.2);
+      this.ring.add(stab);
+
+      // Dorsal spine
+      const spine = createBox(r * 0.12, r * 0.5, r * 0.9, accentHex);
+      spine.position.set(0, r * 0.75, -r * 0.3);
+      this.ring.add(spine);
+
+      // Main rotor on a raised mast
+      const mast = createBox(r * 0.14, r * 0.5, r * 0.14, 0x333333);
+      mast.position.set(0, r * 0.6, -r * 0.2);
+      this.ring.add(mast);
       const rotorGroup = new THREE.Group();
-      rotorGroup.position.set(0, radius * 0.65, 0);
+      rotorGroup.position.set(0, r * 0.9, -r * 0.2);
       for (let i = 0; i < 4; i++) {
-        const blade = createBox(radius * 0.12, radius * 0.03, radius * 1.5, 0x111111);
+        const blade = createBox(r * 0.12, r * 0.03, r * 1.6, 0x111111);
         blade.rotation.y = (i * Math.PI) / 2;
-        blade.position.z = radius * 0.7;
+        blade.position.z = r * 0.75;
         rotorGroup.add(blade);
       }
       this.ring.add(rotorGroup);
@@ -1064,9 +1406,9 @@ export class Enemy extends Entity {
 
       // Tail rotor
       const tailRotorGroup = new THREE.Group();
-      tailRotorGroup.position.set(radius * 0.2, radius * 0.35, -radius * 2.1);
+      tailRotorGroup.position.set(0, r * 0.45, -r * 2.35);
       for (let i = 0; i < 2; i++) {
-        const blade = createBox(radius * 0.03, radius * 0.08, radius * 0.45, 0x111111);
+        const blade = createBox(r * 0.03, r * 0.08, r * 0.5, 0x111111);
         blade.rotation.x = (i * Math.PI) / 2;
         tailRotorGroup.add(blade);
       }
@@ -1076,56 +1418,119 @@ export class Enemy extends Entity {
       baseGroup.add(this.ring);
 
     } else if (type === EnemyType.TANK) {
-      // Flakpanzer (Anti-Air Tank)
+      // "Flakpanzer" — sloped hull, tracked chassis, quad AA turret + radar
       this.ring = new THREE.Group();
-      
-      const tracksL = createBox(1.2, 0.6, 3.8, 0x111111);
-      tracksL.position.set(-1.4, -0.2, 0);
-      const tracksR = createBox(1.2, 0.6, 3.8, 0x111111);
-      tracksR.position.set(1.4, -0.2, 0);
-      
-      const hull = createBox(2.2, 0.9, 3.4, coreHex);
-      hull.position.set(0, 0.3, 0);
-      
-      const turret = createBox(1.8, 0.8, 2.0, accentHex);
-      turret.position.set(0, 1.1, -0.2);
-      
-      const barrelL = createBox(0.2, 0.2, 2.2, 0x333333);
-      barrelL.position.set(-0.5, 1.2, 1.6);
-      const barrelR = barrelL.clone();
-      barrelR.position.x = 0.5;
-      
-      this.ring.add(tracksL, tracksR, hull, turret, barrelL, barrelR);
+
+      // Tracked chassis with road wheels
+      [-1.5, 1.5].forEach((tx) => {
+        const track = createBox(1.1, 0.8, 3.9, 0x111111);
+        track.position.set(tx, -0.25, 0);
+        this.ring.add(track);
+        for (let i = 0; i < 5; i++) {
+          const wheel = createBox(0.5, 0.5, 0.22, 0x2a2a2a);
+          wheel.position.set(tx, -0.25, -1.5 + i * 0.75);
+          this.ring.add(wheel);
+        }
+      });
+      const belly = createBox(2.1, 0.25, 3.2, 0x111111);
+      belly.position.set(0, -0.1, 0);
+      this.ring.add(belly);
+
+      // Sloped hull + glacis plate + side skirts
+      const hull = createBox(2.3, 0.9, 3.4, coreHex);
+      hull.position.set(0, 0.35, 0);
+      this.ring.add(hull);
+      const glacis = createBox(2.1, 0.7, 0.9, coreHex);
+      glacis.position.set(0, 0.75, 1.5);
+      glacis.rotation.x = -0.5;
+      this.ring.add(glacis);
+      [-1.35, 1.35].forEach((sx) => {
+        const skirt = createBox(0.12, 0.6, 3.6, 0x1a1a1a);
+        skirt.position.set(sx, 0.1, 0);
+        this.ring.add(skirt);
+      });
+
+      // Turret with quad AA barrels + glowing muzzle
+      const turret = createBox(1.9, 0.7, 2.1, accentHex);
+      turret.position.set(0, 1.15, -0.3);
+      this.ring.add(turret);
+      const turretTop = createBox(1.3, 0.3, 1.5, accentHex);
+      turretTop.position.set(0, 1.55, -0.3);
+      this.ring.add(turretTop);
+      for (let i = 0; i < 4; i++) {
+        const barrel = createBox(0.12, 0.12, 2.4, 0x333333);
+        barrel.position.set(-0.45 + i * 0.3, 1.2, 1.6);
+        this.ring.add(barrel);
+      }
+      const muzzle = createGlowBox(0.6, 0.24, 0.2, 0xffaa33, 0.85);
+      muzzle.position.set(-0.15, 1.2, 2.95);
+      this.ring.add(muzzle);
+
+      // Radar dish + blinking beacon behind the turret
+      const radarPole = createBox(0.12, 0.7, 0.12, 0x333333);
+      radarPole.position.set(0.7, 1.6, -0.9);
+      this.ring.add(radarPole);
+      const radarDish = createBox(0.5, 0.08, 0.7, 0x99ccdd);
+      radarDish.position.set(0.7, 1.9, -0.9);
+      radarDish.rotation.x = 0.5;
+      this.ring.add(radarDish);
+      const radarBlink = createGlowBox(0.16, 0.16, 0.16, 0x44ddff, 0.9);
+      radarBlink.position.set(0.7, 2.05, -1.0);
+      this.ring.add(radarBlink);
+
+      // Antenna with warning light
+      const antenna = createBox(0.06, 0.9, 0.06, 0x333333);
+      antenna.position.set(-0.6, 1.9, -0.2);
+      this.ring.add(antenna);
+      const antennaTip = createGlowBox(0.14, 0.14, 0.14, 0xff3344, 0.9);
+      antennaTip.position.set(-0.6, 2.35, -0.2);
+      this.ring.add(antennaTip);
+
       baseGroup.add(this.ring);
 
     } else if (type === EnemyType.DRONE) {
-      // Quadcopter
+      // Recon quadcopter — camera dome, sensor pod, rotor arms, nav light
       this.ring = new THREE.Group();
-      
-      const core = createBox(1.2, 0.5, 1.2, coreHex);
+
+      const core = createBox(1.3, 0.55, 1.3, coreHex);
       this.ring.add(core);
-      
-      const sensor = createBox(0.6, 0.4, 0.6, accentHex);
-      sensor.position.set(0, -0.3, 0.4);
+      const coreTop = createBox(0.9, 0.3, 0.9, coreHex);
+      coreTop.position.set(0, 0.4, 0);
+      this.ring.add(coreTop);
+      const cameraDome = createGlowBox(0.4, 0.22, 0.4, 0x44ddff, 0.7);
+      cameraDome.position.set(0, 0.62, 0.1);
+      this.ring.add(cameraDome);
+      const sensor = createBox(0.55, 0.35, 0.7, accentHex);
+      sensor.position.set(0, -0.4, 0.45);
       this.ring.add(sensor);
-      
+      const sensorEye = createGlowBox(0.2, 0.12, 0.16, 0xff3344, 0.9);
+      sensorEye.position.set(0, -0.4, 0.82);
+      this.ring.add(sensorEye);
+      // Landing struts
+      [-0.5, 0.5].forEach((s) => {
+        const strut = createBox(0.08, 0.35, 0.08, 0x222222);
+        strut.position.set(s * 0.6, -0.6, -0.2);
+        this.ring.add(strut);
+      });
+      // Blinking nav light
+      const navLight = createGlowBox(0.2, 0.2, 0.2, 0xffaa33, 0.9);
+      navLight.position.set(0, -0.3, -0.7);
+      this.ring.add(navLight);
+
       this.enemyRotor = new THREE.Group();
       const armOffsets = [
         [-1.3, -1.3], [1.3, -1.3], [-1.3, 1.3], [1.3, 1.3]
       ];
-      
       armOffsets.forEach(([px, pz]) => {
-        const arm = createBox(1.6, 0.15, 0.15, 0x333333);
-        arm.position.set(px/2, 0, pz/2);
+        const arm = createBox(1.6, 0.14, 0.14, 0x333333);
+        arm.position.set(px / 2, 0.05, pz / 2);
         arm.rotation.y = Math.atan2(pz, px);
         this.ring.add(arm);
-        
-        const motor = createBox(0.4, 0.6, 0.4, accentHex);
-        motor.position.set(px, 0.1, pz);
+        const motor = createBox(0.42, 0.6, 0.42, accentHex);
+        motor.position.set(px, 0.12, pz);
         this.ring.add(motor);
-        
         const bladeGroup = new THREE.Group();
-        bladeGroup.position.set(px, 0.45, pz);
+        bladeGroup.position.set(px, 0.5, pz);
         const blade = createBox(1.5, 0.05, 0.2, 0x111111);
         bladeGroup.add(blade);
         this.enemyRotor!.add(bladeGroup);
@@ -1134,26 +1539,72 @@ export class Enemy extends Entity {
       baseGroup.add(this.ring);
 
     } else {
-      // Heavy Gunship (SHOOTER & BASIC)
+      // BASIC interceptor (sleek) vs SHOOTER gunship (heavy) — distinct silhouettes
+      const isShooter = type === EnemyType.SHOOTER;
       this.ring = new THREE.Group();
-      
-      const fuselage = createBox(radius * 0.9, radius * 0.7, radius * 2.2, coreHex);
+      const r = radius;
+
+      // Shared fuselage + nose
+      const fuselage = createBox(r * 0.75, r * 0.6, r * 2.4, coreHex);
       this.ring.add(fuselage);
-      
-      const wing = createBox(radius * 2.8, radius * 0.15, radius * 0.6, coreHex);
-      wing.position.set(0, 0, -radius * 0.2);
-      this.ring.add(wing);
-      
-      const engineL = createBox(radius * 0.4, radius * 0.4, radius * 0.8, accentHex);
-      engineL.position.set(-radius * 0.9, 0, -radius * 0.2);
-      const engineR = engineL.clone();
-      engineR.position.x = radius * 0.9;
-      this.ring.add(engineL, engineR);
-      
-      const cockpit = createBox(radius * 0.5, radius * 0.4, radius * 0.8, 0x172f3d);
-      cockpit.position.set(0, radius * 0.4, radius * 0.6);
+      const nose = createBox(r * 0.45, r * 0.45, r * 0.9, coreHex);
+      nose.position.set(0, -r * 0.05, r * 1.5);
+      this.ring.add(nose);
+      const noseCone = createBox(r * 0.22, r * 0.22, r * 0.5, accentHex);
+      noseCone.position.set(0, -r * 0.05, r * 2.1);
+      this.ring.add(noseCone);
+      const cockpit = createBox(r * 0.5, r * 0.4, r * 0.7, 0x172f3d);
+      cockpit.position.set(0, r * 0.35, r * 0.5);
       this.ring.add(cockpit);
-      
+
+      if (isShooter) {
+        // Gunship: twin engine pods, chin cannon, wing hardpoints
+        [-1, 1].forEach((s) => {
+          const enginePod = createBox(r * 0.4, r * 0.45, r * 1.0, accentHex);
+          enginePod.position.set(s * r * 0.85, 0, -r * 0.4);
+          this.ring.add(enginePod);
+          const intake = createGlowBox(r * 0.3, r * 0.3, r * 0.16, 0xff8833, 0.85);
+          intake.position.set(s * r * 0.85, 0, -r * 0.95);
+          this.ring.add(intake);
+        });
+        const wing = createBox(r * 2.6, r * 0.14, r * 0.7, coreHex);
+        wing.position.set(0, 0, -r * 0.3);
+        this.ring.add(wing);
+        [-1, 1].forEach((s) => {
+          const missile = createBox(r * 0.14, r * 0.14, r * 0.7, 0x444444);
+          missile.position.set(s * r * 1.15, -r * 0.2, -r * 0.3);
+          this.ring.add(missile);
+        });
+        const cannon = createBox(r * 0.14, r * 0.14, r * 1.2, 0x333333);
+        cannon.position.set(0, -r * 0.35, r * 1.4);
+        this.ring.add(cannon);
+        const cannonMuzzle = createGlowBox(r * 0.22, r * 0.22, r * 0.2, 0xff3344, 0.9);
+        cannonMuzzle.position.set(0, -r * 0.35, r * 2.05);
+        this.ring.add(cannonMuzzle);
+        [-1, 1].forEach((s) => {
+          const fin = createBox(r * 0.08, r * 0.6, r * 0.4, accentHex);
+          fin.position.set(s * r * 0.45, r * 0.4, -r * 1.2);
+          this.ring.add(fin);
+        });
+      } else {
+        // Interceptor: swept delta wing, twin fins, wingtip lights
+        const wing = createBox(r * 2.9, r * 0.12, r * 0.9, coreHex);
+        wing.position.set(0, -r * 0.05, -r * 0.2);
+        wing.rotation.z = 0.05;
+        this.ring.add(wing);
+        [-1, 1].forEach((s) => {
+          const tip = createGlowBox(r * 0.16, r * 0.16, r * 0.16, s < 0 ? 0x33ff66 : 0xff4433, 0.9);
+          tip.position.set(s * r * 1.55, -r * 0.05, -r * 0.2);
+          this.ring.add(tip);
+        });
+        const tailFin = createBox(r * 0.1, r * 0.55, r * 0.35, accentHex);
+        tailFin.position.set(0, r * 0.35, -r * 1.25);
+        this.ring.add(tailFin);
+        const stab = createBox(r * 0.9, r * 0.08, r * 0.5, coreHex);
+        stab.position.set(0, -r * 0.1, -r * 1.15);
+        this.ring.add(stab);
+      }
+
       baseGroup.add(this.ring);
     }
 
@@ -1236,6 +1687,21 @@ export class Enemy extends Entity {
     return "hit";
   }
 
+  /** First-order smoothing toward a desired velocity, then write it to the body. */
+  private applySmoothMovement(desiredX: number, desiredZ: number, delta: number, rate: number) {
+    const k = Math.min(1, delta * rate);
+    this.smoothVelX += (desiredX - this.smoothVelX) * k;
+    this.smoothVelZ += (desiredZ - this.smoothVelZ) * k;
+    this.body.velocity.set(this.smoothVelX, 0, this.smoothVelZ);
+  }
+
+  /** How responsively this enemy type tracks its desired velocity. */
+  private smoothRate(): number {
+    if (this.type === EnemyType.TANK) return 5;
+    if (this.type === EnemyType.BOSS) return 6;
+    return 8;
+  }
+
   updateDirection(
     targetPos: CANNON.Vec3,
     time: number,
@@ -1244,6 +1710,7 @@ export class Enemy extends Entity {
     allEnemies: Enemy[],
     city: CityEnvironment,
     fireRateMult: number = 1.0,
+    delta: number = 0.016,
   ) {
     if (!this.active) return false;
 
@@ -1260,6 +1727,35 @@ export class Enemy extends Entity {
         const force = (1.0 - distOther / minDist) * 16.0;
         repelForceX += (dxOther / distOther) * force;
         repelForceZ += (dzOther / distOther) * force;
+      }
+    }
+
+    // Steering-based building avoidance: curve around block faces BEFORE touching
+    // them (the overlap push below stays as a safety net).
+    let avoidForceX = 0;
+    let avoidForceZ = 0;
+    const avoidRange = this.radius * 2 + 3;
+    for (const block of city.blocks) {
+      if (block.destroyed) continue;
+      // Flying above the roof? No need to steer around it (mirrors the 3D overlap check).
+      if (this.body.position.y - this.radius * 0.75 > block.height) continue;
+      const bx = this.body.position.x;
+      const bz = this.body.position.z;
+      if (
+        Math.abs(bx - block.x) > block.width / 2 + avoidRange ||
+        Math.abs(bz - block.z) > block.depth / 2 + avoidRange
+      ) {
+        continue;
+      }
+      const closestX = THREE.MathUtils.clamp(bx, block.x - block.width / 2, block.x + block.width / 2);
+      const closestZ = THREE.MathUtils.clamp(bz, block.z - block.depth / 2, block.z + block.depth / 2);
+      const dxA = bx - closestX;
+      const dzA = bz - closestZ;
+      const dA = Math.sqrt(dxA * dxA + dzA * dzA);
+      if (dA < avoidRange && dA > 0.001) {
+        const strength = (1 - dA / avoidRange) * (this.radius * 6);
+        avoidForceX += (dxA / dA) * strength;
+        avoidForceZ += (dzA / dA) * strength;
       }
     }
 
@@ -1301,21 +1797,18 @@ export class Enemy extends Entity {
           this.body.position.y += overlapY;
           this.body.velocity.y = Math.max(0, this.body.velocity.y);
         } else if (overlapX < overlapZ) {
-          // Push along X axis
-          if (this.body.position.x < block.x) {
-            this.body.position.x -= overlapX;
-          } else {
-            this.body.position.x += overlapX;
-          }
-          this.body.velocity.x = 0;
+          // Push along X axis and bias the smoothed velocity away so the enemy
+          // doesn't instantly re-stick against the wall.
+          const pushDir = this.body.position.x < block.x ? -1 : 1;
+          this.body.position.x += pushDir * overlapX;
+          this.smoothVelX = pushDir * Math.min(Math.max(Math.abs(this.smoothVelX), 6), 36);
+          this.body.velocity.x = this.smoothVelX;
         } else {
-          // Push along Z axis
-          if (this.body.position.z < block.z) {
-            this.body.position.z -= overlapZ;
-          } else {
-            this.body.position.z += overlapZ;
-          }
-          this.body.velocity.z = 0;
+          // Push along Z axis and bias the smoothed velocity away
+          const pushDir = this.body.position.z < block.z ? -1 : 1;
+          this.body.position.z += pushDir * overlapZ;
+          this.smoothVelZ = pushDir * Math.min(Math.max(Math.abs(this.smoothVelZ), 6), 36);
+          this.body.velocity.z = this.smoothVelZ;
         }
       }
     }
@@ -1338,7 +1831,7 @@ export class Enemy extends Entity {
     // BOSS — phased behavior with telegraphed attacks
     // =====================================================================
     if (this.type === EnemyType.BOSS) {
-      fired = this.updateBoss(targetPos, time, dist, dirX, dirZ, enemyProjectilePool, repelForceX, repelForceZ, fireRateMult);
+      fired = this.updateBoss(targetPos, time, dist, dirX, dirZ, enemyProjectilePool, repelForceX, repelForceZ, fireRateMult, delta, avoidForceX, avoidForceZ);
       this.mesh.position.copy(this.body.position as any);
       if (this.telegraphMesh) {
         this.telegraphMesh.visible = this.telegraphTimer > 0;
@@ -1359,7 +1852,13 @@ export class Enemy extends Entity {
     if (this.pattern === AttackPattern.KAMIKAZE) {
       const kamikazeSpeed =
         this.type === EnemyType.TANK ? 42 : this.type === EnemyType.DRONE ? 68 : 55;
-      this.body.velocity.set(dirX * kamikazeSpeed + repelForceX, 0, dirZ * kamikazeSpeed + repelForceZ);
+      // Urgent dive, but still eased so the dive arcs instead of teleporting direction
+      this.applySmoothMovement(
+        dirX * kamikazeSpeed + repelForceX + avoidForceX,
+        dirZ * kamikazeSpeed + repelForceZ + avoidForceZ,
+        delta,
+        14,
+      );
       // No ranged fire — dies by ramming
       this.mesh.position.copy(this.body.position as any);
       this.mesh.rotation.y = Math.atan2(dirX, dirZ);
@@ -1373,9 +1872,15 @@ export class Enemy extends Entity {
     // =====================================================================
     if (this.type === EnemyType.DRONE) {
       const speed = 35;
-      const swoopX = Math.cos(time * 2 + this.personalityOffset) * 15;
-      const swoopZ = Math.sin(time * 2 + this.personalityOffset) * 15;
-      this.body.velocity.set(dirX * speed + swoopX + repelForceX, 0, dirZ * speed + swoopZ + repelForceZ);
+      // Gentler weave, routed through the smoother so it reads as an organic bob
+      const swoopX = Math.cos(time * 2 + this.personalityOffset) * 12;
+      const swoopZ = Math.sin(time * 2 + this.personalityOffset) * 12;
+      this.applySmoothMovement(
+        dirX * speed + swoopX + repelForceX + avoidForceX,
+        dirZ * speed + swoopZ + repelForceZ + avoidForceZ,
+        delta,
+        8,
+      );
 
       // Drones fire rapidly at close range
       if (dist < 60 && time - this.lastShotTime > 0.8 * fireRateMult) {
@@ -1430,26 +1935,35 @@ export class Enemy extends Entity {
     const tangentX = -dirZ * this.flankDir;
     const tangentZ = dirX * this.flankDir;
 
+    let desiredX: number;
+    let desiredZ: number;
     if (this.pattern === AttackPattern.CIRCLE) {
       // Circle-strafing runs: orbit the player, always strafing
-      this.body.velocity.set(tangentX * speed * 1.25 + dirX * 0.12 * speed + repelForceX, 0, tangentZ * speed * 1.25 + dirZ * 0.12 * speed + repelForceZ);
+      desiredX = tangentX * speed * 1.25 + dirX * 0.12 * speed + repelForceX + avoidForceX;
+      desiredZ = tangentZ * speed * 1.25 + dirZ * 0.12 * speed + repelForceZ + avoidForceZ;
     } else if (this.pattern === AttackPattern.ARTILLERY) {
       // Artillery: hold range, only fire lobbed shells
       if (dist < 95) {
-        this.body.velocity.set((-dirX + tangentX * 0.6) * speed * 0.8 + repelForceX, 0, (-dirZ + tangentZ * 0.6) * speed * 0.8 + repelForceZ);
+        desiredX = (-dirX + tangentX * 0.6) * speed * 0.8 + repelForceX + avoidForceX;
+        desiredZ = (-dirZ + tangentZ * 0.6) * speed * 0.8 + repelForceZ + avoidForceZ;
       } else {
-        this.body.velocity.set((tangentX + dirX * 0.15) * speed * 0.5 + repelForceX, 0, (tangentZ + dirZ * 0.15) * speed * 0.5 + repelForceZ);
+        desiredX = (tangentX + dirX * 0.15) * speed * 0.5 + repelForceX + avoidForceX;
+        desiredZ = (tangentZ + dirZ * 0.15) * speed * 0.5 + repelForceZ + avoidForceZ;
       }
     } else if (dist > 45) {
       // Approach directly
-      this.body.velocity.set(dirX * speed + repelForceX, 0, dirZ * speed + repelForceZ);
+      desiredX = dirX * speed + repelForceX + avoidForceX;
+      desiredZ = dirZ * speed + repelForceZ + avoidForceZ;
     } else if (dist < 20 || isEvading) {
       // Evade / back away and strafe
-      this.body.velocity.set((-dirX + tangentX * 1.5) * speed * 0.7 + repelForceX, 0, (-dirZ + tangentZ * 1.5) * speed * 0.7 + repelForceZ);
+      desiredX = (-dirX + tangentX * 1.5) * speed * 0.7 + repelForceX + avoidForceX;
+      desiredZ = (-dirZ + tangentZ * 1.5) * speed * 0.7 + repelForceZ + avoidForceZ;
     } else {
       // Orbit (strafe)
-      this.body.velocity.set((tangentX + dirX * 0.2) * speed * 0.6 + repelForceX, 0, (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ);
+      desiredX = (tangentX + dirX * 0.2) * speed * 0.6 + repelForceX + avoidForceX;
+      desiredZ = (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ + avoidForceZ;
     }
+    this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
 
     // Firing Logic
     const fireRange =
@@ -1536,6 +2050,9 @@ export class Enemy extends Entity {
     repelForceX: number,
     repelForceZ: number,
     fireRateMult: number = 1.0,
+    delta: number = 0.016,
+    avoidForceX: number = 0,
+    avoidForceZ: number = 0,
   ): boolean {
     const ratio = this.hp / this.maxHp;
     const newPhase = bossPhaseForRatio(ratio);
@@ -1547,16 +2064,23 @@ export class Enemy extends Entity {
     const speed = 10;
     const tangentX = -dirZ * this.flankDir;
     const tangentZ = dirX * this.flankDir;
+    let desiredX: number;
+    let desiredZ: number;
     if (dist > 40) {
-      this.body.velocity.set(dirX * speed * 0.9 + repelForceX, 0, dirZ * speed * 0.9 + repelForceZ);
+      desiredX = dirX * speed * 0.9 + repelForceX + avoidForceX;
+      desiredZ = dirZ * speed * 0.9 + repelForceZ + avoidForceZ;
     } else {
-      this.body.velocity.set((tangentX + dirX * 0.15) * speed + repelForceX, 0, (tangentZ + dirZ * 0.15) * speed + repelForceZ);
+      desiredX = (tangentX + dirX * 0.15) * speed + repelForceX + avoidForceX;
+      desiredZ = (tangentZ + dirZ * 0.15) * speed + repelForceZ + avoidForceZ;
     }
+    this.applySmoothMovement(desiredX, desiredZ, delta, 6);
 
     let fired = false;
 
     // Telegraph attack (phase 1/2): beam warns the player, then fires
     if (this.phase <= 2 && this.telegraphActive) {
+      this.smoothVelX = 0;
+      this.smoothVelZ = 0;
       this.body.velocity.set(0, 0, 0);
       if (time - this.telegraphStartTime >= BOSS_TELEGRAPH_DURATION) {
         this.telegraphActive = false;
@@ -1862,6 +2386,9 @@ export class PowerUp {
   position: THREE.Vector3;
   spawnTime: number = 0;
   lifetime: number = 22; // 22 seconds lifetime
+  value: number = 1; // XP amount for XP_GEM pickups
+  /** Spinning ground ring so the pickup reads clearly from the air. */
+  groundRing: THREE.Mesh | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -1883,9 +2410,82 @@ export class PowerUp {
       [PowerUpType.SPEED_BOOST]: 0xff88ff,
       [PowerUpType.BOMB]: 0xff6600,
       [PowerUpType.FUEL]: 0x37ffb8,
+      [PowerUpType.XP_GEM]: 0x56e6ff,
     };
 
     const color = colors[type];
+
+    // Classic arcade pickup indicator: a flat ring on the ground that spins
+    // around the pickup so it's visible from the air.
+    const isBomb = type === PowerUpType.BOMB;
+    const groundRingGeo = new THREE.RingGeometry(isBomb ? 2.9 : 2.0, isBomb ? 3.7 : 2.5, 28);
+    groundRingGeo.rotateX(-Math.PI / 2);
+    const groundRingMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: isBomb ? 0.9 : 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.groundRing = new THREE.Mesh(groundRingGeo, groundRingMat);
+    // Ring hovers just below the pickup so it stays visible on rooftops and in the air
+    this.groundRing.position.set(x, Math.max(0.12, y - 1.2), z);
+    scene.add(this.groundRing);
+
+    // Bombs also get a tall light pillar so the payoff pickup is unmissable
+    if (isBomb) {
+      const beamGeo = new THREE.CylinderGeometry(0.9, 2.4, 46, 10, 1, true);
+      beamGeo.translate(0, 23, 0);
+      const beamMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.35,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const beam = new THREE.Mesh(beamGeo, beamMat);
+      beam.position.set(x, Math.max(1, y - 1), z);
+      scene.add(beam);
+      this.groundRing.userData.beam = beam;
+    }
+
+    if (type === PowerUpType.XP_GEM) {
+      // VS-style XP gem: small spinning cyan crystal with a bright core
+      const gemGeom = new THREE.OctahedronGeometry(0.7, 0);
+      const gemMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+      });
+      const gem = new THREE.Mesh(gemGeom, gemMat);
+      gem.scale.set(1, 1.5, 1);
+      this.mesh.add(gem);
+
+      const inner = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.3, 0),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.9,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      inner.scale.set(1, 1.5, 1);
+      this.mesh.add(inner);
+
+      const halo = new THREE.Mesh(
+        new THREE.SphereGeometry(1.1, 10, 8),
+        createGlowMaterial(color, 0.3),
+      );
+      this.mesh.add(halo);
+
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      return;
+    }
 
     // Floating diamond shape
     const geom = new THREE.OctahedronGeometry(1.5, 0);
@@ -1932,9 +2532,26 @@ export class PowerUp {
     this.mesh.rotation.y += delta * 2;
     this.mesh.rotation.x += delta * 0.5;
     this.mesh.rotation.z += delta * 0.35;
+    this.mesh.position.x = this.position.x;
+    this.mesh.position.z = this.position.z;
     this.mesh.position.y = this.position.y + Math.sin(time * 3) * 0.5;
     const pulse = 1 + Math.sin(time * 6) * 0.08;
     this.mesh.scale.setScalar(pulse);
+
+    // Spin + pulse the ground indicator ring, keeping it under the pickup
+    if (this.groundRing) {
+      this.groundRing.rotation.y += delta * 3.2;
+      this.groundRing.position.x = this.position.x;
+      this.groundRing.position.z = this.position.z;
+      this.groundRing.position.y = Math.max(0.12, this.position.y - 1.2);
+      const pulse = 1 + Math.sin(time * 5) * 0.12;
+      this.groundRing.scale.set(pulse, pulse, 1);
+      const beam = this.groundRing.userData.beam as THREE.Mesh | undefined;
+      if (beam) {
+        beam.position.x = this.position.x;
+        beam.position.z = this.position.z;
+      }
+    }
 
     // Check lifetime
     if (time - this.spawnTime > this.lifetime) {
@@ -1945,6 +2562,21 @@ export class PowerUp {
   destroy(scene: THREE.Scene) {
     this.active = false;
     scene.remove(this.mesh);
+    // Phase 1: release the pickup's unique buffers (core/halo/rings). Shared
+    // cached geometries/materials are skipped by disposeObject3D.
+    disposeObject3D(this.mesh);
+    if (this.groundRing) {
+      const beam = this.groundRing.userData.beam as THREE.Mesh | undefined;
+      if (beam) {
+        scene.remove(beam);
+        beam.geometry.dispose();
+        (beam.material as THREE.Material).dispose();
+      }
+      scene.remove(this.groundRing);
+      this.groundRing.geometry.dispose();
+      (this.groundRing.material as THREE.Material).dispose();
+      this.groundRing = null;
+    }
   }
 
   checkCollection(playerPos: THREE.Vector3): boolean {
@@ -2020,7 +2652,7 @@ export class ProjectilePool {
           p.prevPos,
           p.pos,
         );
-        const hitRadius = o.radius + 2.2;
+        const hitRadius = o.radius + 4.5;
         if (distSq < hitRadius * hitRadius) {
           onHit(p, o);
           p.deactivate();
@@ -2112,6 +2744,10 @@ export class Objective {
   bobSeed: number;
   beacon: THREE.Mesh | null = null;
   labelSprite: THREE.Sprite | null = null;
+  /** Countdown for the collapse-out animation after destruction. */
+  deathTimer: number = 0;
+  /** Light military prop ring around ground objectives (city group child). */
+  propGroup: THREE.Object3D | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -2207,7 +2843,7 @@ export class Objective {
       }),
     );
     this.beacon.position.y = 28;
-    this.beacon.visible = false; // shown via setMarkerVisible
+    this.beacon.visible = true; // tall light pillar so objectives read from the air
     this.mesh.add(this.beacon);
 
     // Canvas label sprite (billboarded, always faces camera)
@@ -2239,7 +2875,7 @@ export class Objective {
     this.labelSprite = new THREE.Sprite(labelMat);
     this.labelSprite.position.y = 34;
     this.labelSprite.scale.set(22, 11, 1);
-    this.labelSprite.visible = false;
+    this.labelSprite.visible = true;
     this.mesh.add(this.labelSprite);
 
     this.mesh.position.set(x, y, z);
@@ -2255,8 +2891,25 @@ export class Objective {
     world.addBody(this.body);
   }
 
-  update(time: number) {
-    if (!this.active) return;
+  update(time: number, delta: number = 1 / 60) {
+    if (!this.active) {
+      // Collapse-out: shrink + fade over ~0.35s, THEN the depot is gone
+      if (this.deathTimer > 0) {
+        this.deathTimer -= delta;
+        const k = Math.max(0, this.deathTimer / 0.35);
+        this.mesh.scale.setScalar(Math.max(0.01, k));
+        this.mesh.traverse((child) => {
+          if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
+            child.material.opacity = Math.max(0, k * 0.7);
+          }
+        });
+        if (this.deathTimer <= 0) {
+          this.deathTimer = 0;
+          this.destroy();
+        }
+      }
+      return;
+    }
     this.mesh.position.y = this.position.y + Math.sin(time * 1.8 + this.bobSeed) * 0.35;
     this.mesh.rotation.y += 0.004;
     // Damage flash
@@ -2285,15 +2938,25 @@ export class Objective {
     if (!this.active) return false;
     this.hp -= amt;
     if (this.hp <= 0) {
-      this.destroy();
+      // Defer removal: play the collapse-out animation in update() before the
+      // depot truly disappears.
+      this.active = false;
+      this.deathTimer = 0.35;
       return true;
     }
     return false;
   }
 
   destroy() {
+    if (!this.mesh.parent) return; // idempotent: already destroyed (cull/reset can double-call)
     this.active = false;
-    if (this.mesh.parent) this.mesh.parent.remove(this.mesh);
+    this.mesh.parent.remove(this.mesh);
+    // Phase 1: release the objective's unique buffers (marker ring, beacon
+    // beam, label sprite). Shared cached resources are skipped.
+    disposeObject3D(this.mesh);
+    // Detach the objective's prop ring (Pass 5) — shared materials/geometries
+    // stay cached, so removal is just a scene-graph detach.
+    if (this.propGroup?.parent) this.propGroup.parent.remove(this.propGroup);
     this.world.removeBody(this.body);
     if (this.labelSprite?.material instanceof THREE.SpriteMaterial) {
       this.labelSprite.material.map?.dispose();

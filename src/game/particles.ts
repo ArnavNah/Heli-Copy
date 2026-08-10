@@ -164,20 +164,35 @@ export class WeatherSystem {
   private clearFog = new THREE.Color(FOG_CLEAR_COLOR);
   private stormFog = new THREE.Color(FOG_STORM_COLOR);
   private tempColor = new THREE.Color();
+  // Pass 8: the sky dome's warm haze horizon cools with the storm so distant
+  // buildings fade into a matching haze instead of warm-on-cool at the horizon.
+  private domeClear = new THREE.Color(0xc6b398);
+  private domeStorm = new THREE.Color(0x3a4252);
+  private tempDome = new THREE.Color();
 
   update(time: number, delta: number, scene: THREE.Scene) {
     // Transition intensity
     this.stormIntensity +=
       (this.targetIntensity - this.stormIntensity) * delta * 0.1;
 
-    // Fog management
-    // Cap maximum fog density at 0.011 so skyscraper silhouettes stay visible during heavy storms
-    const fogDensity = 0.0058 + this.stormIntensity * 0.0052;
+    // Fog management (Pass 8): base density dropped so near-field combat stays
+    // sharp; storms still thicken it, capped low enough that skyscraper
+    // silhouettes and enemy glows keep their separation.
+    const fogDensity = 0.004 + this.stormIntensity * 0.0046;
     const fog = scene.fog as THREE.FogExp2;
     fog.density = fogDensity;
     fog.color.copy(this.tempColor.copy(this.clearFog).lerp(this.stormFog, this.stormIntensity));
     if (scene.background instanceof THREE.Color) {
       scene.background.copy(this.tempColor.copy(this.clearColor).lerp(this.stormColor, this.stormIntensity * 0.82));
+    }
+
+    // Pass 8: cool the sky dome horizon with the storm (see fields above).
+    const dome = scene.getObjectByName('ArcadeSkyDome');
+    const domeMat = dome ? ((dome as THREE.Mesh).material as THREE.ShaderMaterial) : null;
+    if (domeMat && domeMat.uniforms?.horizonColor) {
+      domeMat.uniforms.horizonColor.value.copy(
+        this.tempDome.copy(this.domeClear).lerp(this.domeStorm, this.stormIntensity),
+      );
     }
 
     // Wind Turbulance

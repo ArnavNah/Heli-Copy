@@ -1,10 +1,17 @@
 import type * as THREE from "three";
 import type * as CANNON from "cannon-es";
 
-export const SKY_CLEAR_COLOR = 0x78cfe0;
+// Pass 8 art direction: the scene used to stack cyan sky + cyan fog + icy
+// lighting into one blue wash that drowned gameplay. Fog is now a warm neutral
+// haze (distant buildings fade into the horizon instead of turning cyan) and
+// the clear sky is a muted steel blue. Storm colors stay dark/moody so
+// silhouettes remain readable.
+export const SKY_CLEAR_COLOR = 0x8fb0c9;
 export const SKY_STORM_COLOR = 0x51647f;
-export const FOG_CLEAR_COLOR = 0x86d4df;
+export const FOG_CLEAR_COLOR = 0xb5b2a4;
 export const FOG_STORM_COLOR = 0x29364f;
+/** Exponential fog density — tuned so mid-distance reads as depth, not haze. */
+export const FOG_DENSITY = 0.004;
 export const TARGET_RENDER_FPS = 60;
 export const MAX_RENDER_PIXEL_RATIO = 1.0;
 
@@ -28,6 +35,12 @@ export type CityBlock = {
   destroyed: boolean;
   collapseProgress?: number;
   initialHeights?: number[];
+  /** True once the collapse-out sequence has finished (fires onBuildingDestroyed once). */
+  collapseFinished?: boolean;
+  /** Camera-occlusion ghost factor 0..1 (0 = fully visible, 1 = fully ghosted). */
+  occlusionFactor?: number;
+  /** Target occlusion factor the per-frame interpolation eases toward. */
+  occlusionTarget?: number;
 };
 
 export type EnemyLock = {
@@ -186,6 +199,7 @@ export enum PowerUpType {
   SPEED_BOOST,
   BOMB,
   FUEL,
+  XP_GEM,
 }
 
 export enum PowerUpState {

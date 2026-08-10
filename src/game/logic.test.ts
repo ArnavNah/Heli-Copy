@@ -1,19 +1,31 @@
 import { describe, expect, it } from "vitest";
+import { EnemyType } from "./types";
 import {
   accuracyFor,
   bossPhaseForRatio,
   bossVolleyConfig,
+  buildingArchetype,
   clamp,
   coinsForScore,
   comboMultiplier,
   DIFFICULTIES,
+  DISTRICT_CONFIGS,
+  DISTRICT_SCHEDULE,
+  districtForChunk,
+  footprintTier,
   formatDuration,
   MAX_WEAPON_LEVEL,
   multikillTier,
   objectiveConfig,
+  occlusionStrength,
   pickUpgrades,
   readMastery,
   riskMultiplier,
+  runLevelForXp,
+  runXpForLevel,
+  rhythmDensity,
+  sceneRhythmForChunk,
+  xpForEnemyType,
   waveEnemyCount,
   waveEnemyDamage,
   waveEnemyFireRate,
@@ -24,6 +36,24 @@ import {
   weaponXpForLevel,
   writeMastery,
 } from "./logic";
+
+describe("occlusionStrength", () => {
+  it("fully ghosts a building right in front of the camera", () => {
+    expect(occlusionStrength(0.1)).toBe(1);
+    expect(occlusionStrength(0.2)).toBe(1);
+  });
+  it("tapers as the blocker sits closer to the player end of the view line", () => {
+    expect(occlusionStrength(0.5)).toBeCloseTo(0.625);
+    expect(occlusionStrength(0.8)).toBeCloseTo(0.25);
+    expect(occlusionStrength(0.9)).toBeCloseTo(0.125);
+  });
+  it("returns 0 for misses / degenerate entry points", () => {
+    expect(occlusionStrength(0)).toBe(0);
+    expect(occlusionStrength(1)).toBe(0);
+    expect(occlusionStrength(-0.5)).toBe(0);
+    expect(occlusionStrength(1.4)).toBe(0);
+  });
+});
 
 describe("waveEnemyCount", () => {
   it("scales with wave", () => {
@@ -103,6 +133,32 @@ describe("coinsForScore / accuracyFor / clamp / formatDuration", () => {
     expect(formatDuration(0)).toBe("0:00");
     expect(formatDuration(65)).toBe("1:05");
     expect(formatDuration(3600)).toBe("60:00");
+  });
+});
+
+describe("run-level XP (Vampire-Survivors style)", () => {
+  it("runXpForLevel thresholds are cumulative and escalating", () => {
+    expect(runXpForLevel(1)).toBe(0);
+    expect(runXpForLevel(2)).toBe(10); // +10
+    expect(runXpForLevel(3)).toBe(25); // +15
+    expect(runXpForLevel(4)).toBe(45); // +20
+    expect(runXpForLevel(5)).toBe(70); // +25
+  });
+  it("runLevelForXp respects thresholds and caps", () => {
+    expect(runLevelForXp(0)).toBe(1);
+    expect(runLevelForXp(9)).toBe(1);
+    expect(runLevelForXp(10)).toBe(2);
+    expect(runLevelForXp(24)).toBe(2);
+    expect(runLevelForXp(25)).toBe(3);
+    expect(runLevelForXp(1e9, 15)).toBe(15);
+  });
+  it("xpForEnemyType values scale by threat", () => {
+    expect(xpForEnemyType(EnemyType.BASIC, false)).toBe(1);
+    expect(xpForEnemyType(EnemyType.SHOOTER, false)).toBe(2);
+    expect(xpForEnemyType(EnemyType.DRONE, false)).toBe(3);
+    expect(xpForEnemyType(EnemyType.TANK, false)).toBe(5);
+    expect(xpForEnemyType(EnemyType.BASIC, true)).toBe(15); // ELITE
+    expect(xpForEnemyType(EnemyType.BOSS, false)).toBe(50);
   });
 });
 
@@ -220,6 +276,130 @@ describe("difficulty", () => {
   });
 });
 
+describe("city districts", () => {
+  it("defines every district with complete, valid configs", () => {
+    for (const name of Object.keys(DISTRICT_CONFIGS) as (keyof typeof DISTRICT_CONFIGS)[]) {
+      const c = DISTRICT_CONFIGS[name];
+      expect(c.name).toBe(name);
+      expect(c.palette.length).toBeGreaterThan(0);
+      expect(c.detailPalette.length).toBeGreaterThan(0);
+      expect(c.heightBand[0]).toBeGreaterThan(0);
+      expect(c.heightBand[0]).toBeLessThanOrEqual(c.heightBand[1]);
+      expect(c.skyscraperHeight[0]).toBeGreaterThanOrEqual(c.heightBand[1]);
+      expect(c.density).toBeGreaterThan(0);
+      expect(c.density).toBeLessThanOrEqual(1);
+      expect(c.skyscraperChance).toBeGreaterThanOrEqual(0);
+      expect(c.skyscraperChance).toBeLessThanOrEqual(1);
+      // Footprint weights must be a valid distribution (sum to 1)
+      expect(c.footprintWeights.reduce((a, b) => a + b, 0)).toBeCloseTo(1);
+      expect(c.footprintWeights.every((w) => w >= 0)).toBe(true);
+    }
+  });
+
+  it("covers every district in the schedule at least once", () => {
+    const scheduled = new Set(DISTRICT_SCHEDULE);
+    expect(scheduled.size).toBe(Object.keys(DISTRICT_CONFIGS).length);
+  });
+
+  it("returns a valid district for any chunk id (stable per id)", () => {
+    for (const id of [-40, -1, 0, 1, 7, 13, 14, 27, 99]) {
+      expect(DISTRICT_CONFIGS[districtForChunk(id)]).toBeDefined();
+      expect(districtForChunk(id)).toBe(districtForChunk(id));
+    }
+  });
+
+  it("schedule alternates so the same district never repeats back-to-back", () => {
+    for (let i = 0; i < DISTRICT_SCHEDULE.length - 1; i++) {
+      expect(DISTRICT_SCHEDULE[i]).not.toBe(DISTRICT_SCHEDULE[i + 1]);
+    }
+  });
+
+  it("keeps LARGE footprints uncommon in every district", () => {
+    for (const name of Object.keys(DISTRICT_CONFIGS) as (keyof typeof DISTRICT_CONFIGS)[]) {
+      const [, m, l] = DISTRICT_CONFIGS[name].footprintWeights;
+      expect(l).toBeLessThanOrEqual(m); // LARGE never outnumbers MEDIUM
+      expect(l).toBeLessThan(0.2); // and stays a clear minority
+    }
+  });
+});
+
+describe("district identity (Pass 4)", () => {
+  it("every district defines readable identity knobs within sane ranges", () => {
+    for (const name of Object.keys(DISTRICT_CONFIGS) as (keyof typeof DISTRICT_CONFIGS)[]) {
+      const c = DISTRICT_CONFIGS[name];
+      expect(c.rooftopClutter).toBeGreaterThanOrEqual(0);
+      expect(c.rooftopClutter).toBeLessThanOrEqual(1);
+      expect(c.openSpaceChance).toBeGreaterThanOrEqual(0);
+      expect(c.openSpaceChance).toBeLessThanOrEqual(1);
+      expect(c.landmarkChance).toBeGreaterThan(0);
+      expect(c.landmarkChance).toBeLessThanOrEqual(1);
+      expect(c.billboardCount).toBeGreaterThanOrEqual(1);
+      expect(c.crossStreetHalf).toBeGreaterThanOrEqual(6);
+      expect(c.crossStreetHalf).toBeLessThanOrEqual(20);
+      expect(c.signColors.length).toBeGreaterThanOrEqual(1);
+      expect(c.propDensity).toBeGreaterThanOrEqual(0);
+      expect(c.propDensity).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("rooftop prop weights are non-negative with at least one pickable type", () => {
+    for (const name of Object.keys(DISTRICT_CONFIGS) as (keyof typeof DISTRICT_CONFIGS)[]) {
+      const props = DISTRICT_CONFIGS[name].rooftopProps;
+      const weights = Object.values(props);
+      expect(weights.every((w) => w >= 0)).toBe(true);
+      expect(weights.some((w) => w > 0)).toBe(true);
+    }
+  });
+
+  it("district personalities differ on the identity axes", () => {
+    const downtown = DISTRICT_CONFIGS.downtown;
+    const industrial = DISTRICT_CONFIGS.industrial;
+    const residential = DISTRICT_CONFIGS.residential;
+    const waterfront = DISTRICT_CONFIGS.waterfront;
+    // Downtown: densest signage + antennas; industrial: chimneys, wide roads
+    expect(downtown.billboardCount).toBeGreaterThan(residential.billboardCount);
+    expect(downtown.rooftopProps.antenna).toBeGreaterThan(residential.rooftopProps.antenna);
+    expect(industrial.rooftopProps.smokeStack).toBeGreaterThan(downtown.rooftopProps.smokeStack);
+    expect(industrial.crossStreetHalf).toBeGreaterThan(residential.crossStreetHalf);
+    // Waterfront + residential read more open than downtown
+    expect(waterfront.openSpaceChance).toBeGreaterThan(downtown.openSpaceChance);
+    expect(residential.openSpaceChance).toBeGreaterThan(downtown.openSpaceChance);
+    // Pass 5: developed districts are prop-dense, wilderness is sparse
+    expect(downtown.propDensity).toBeGreaterThan(DISTRICT_CONFIGS.forest.propDensity);
+    expect(industrial.propDensity).toBeGreaterThan(DISTRICT_CONFIGS.desert.propDensity);
+  });
+
+  it("every district has at least one rooftop prop kind available (Pass 5)", () => {
+    for (const name of Object.keys(DISTRICT_CONFIGS) as (keyof typeof DISTRICT_CONFIGS)[]) {
+      const props = DISTRICT_CONFIGS[name].rooftopProps;
+      expect(Object.values(props).some((w) => w > 0)).toBe(true);
+    }
+    // New Pass 5 kinds are actually used somewhere
+    const used = Object.keys(DISTRICT_CONFIGS).filter((name) => {
+      const p = DISTRICT_CONFIGS[name as keyof typeof DISTRICT_CONFIGS].rooftopProps;
+      return p.vent > 0 || p.maintenanceHut > 0;
+    });
+    expect(used.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("footprintTier", () => {
+  const weights: [number, number, number] = [0.5, 0.35, 0.15];
+  it("maps roll ranges to tiers", () => {
+    expect(footprintTier(0.0, weights)).toBe(0);
+    expect(footprintTier(0.49, weights)).toBe(0);
+    expect(footprintTier(0.5, weights)).toBe(1);
+    expect(footprintTier(0.84, weights)).toBe(1);
+    expect(footprintTier(0.85, weights)).toBe(2);
+    expect(footprintTier(0.99, weights)).toBe(2);
+  });
+  it("handles extreme weight distributions", () => {
+    expect(footprintTier(0.0, [1, 0, 0])).toBe(0);
+    expect(footprintTier(0.999, [0, 0, 1])).toBe(2);
+    expect(footprintTier(0.5, [0.5, 0.5, 0])).toBe(1);
+  });
+});
+
 describe("weapon mastery persistence", () => {
   const storage = () => {
     const data = new Map<string, string>();
@@ -246,5 +426,82 @@ describe("weapon mastery persistence", () => {
     const s = storage();
     writeMastery(1, 99, s);
     expect(readMastery(s)[1]).toBe(MAX_WEAPON_LEVEL);
+  });
+});
+
+describe("buildingArchetype (Pass 6)", () => {
+  it("routes skyscrapers to the stepped tower", () => {
+    expect(
+      buildingArchetype({ district: "downtown", tier: 1, skyscraper: true, height: 40, roll: 0.1 }),
+    ).toBe("steppedTower");
+  });
+
+  it("keeps industrial LARGE footprints to warehouse/factory", () => {
+    for (let r = 0; r < 1; r += 0.1) {
+      const a = buildingArchetype({ district: "industrial", tier: 2, skyscraper: false, height: 12, roll: r });
+      expect(["warehouse", "factory"]).toContain(a);
+    }
+  });
+
+  it("residential MEDIUM footprints are resBlocks", () => {
+    expect(
+      buildingArchetype({ district: "residential", tier: 1, skyscraper: false, height: 8, roll: 0.3 }),
+    ).toBe("resBlock");
+  });
+
+  it("downtown MEDIUM buildings pick from the office family", () => {
+    for (let r = 0; r < 1; r += 0.1) {
+      const a = buildingArchetype({ district: "downtown", tier: 1, skyscraper: false, height: 10, roll: r });
+      expect(["office", "comm", "slab", "parking"]).toContain(a);
+    }
+  });
+
+  it("small footprints default to plain boxes", () => {
+    expect(
+      buildingArchetype({ district: "midtown", tier: 0, skyscraper: false, height: 6, roll: 0.5 }),
+    ).toBe("plain");
+  });
+
+  it("district beats tier: industrial SMALL can still be a shed", () => {
+    expect(
+      buildingArchetype({ district: "industrial", tier: 0, skyscraper: false, height: 5, roll: 0.1 }),
+    ).toBe("warehouse");
+  });
+});
+
+describe("scene rhythm (Pass 9)", () => {
+  it("is deterministic per chunk id", () => {
+    for (let id = -60; id < 60; id++) {
+      expect(sceneRhythmForChunk(id)).toBe(sceneRhythmForChunk(id));
+    }
+  });
+
+  it("never places landmark chunks back to back", () => {
+    for (let id = -60; id <= 60; id++) {
+      if (sceneRhythmForChunk(id) === "landmark") {
+        expect(sceneRhythmForChunk(id - 1)).not.toBe("landmark");
+      }
+    }
+  });
+
+  it("keeps landmarks rare enough for navigation memory", () => {
+    const ids = Array.from({ length: 70 }, (_, i) => i);
+    const landmarks = ids.filter((id) => sceneRhythmForChunk(id) === "landmark").length;
+    expect(landmarks).toBeGreaterThanOrEqual(3);
+    expect(landmarks).toBeLessThanOrEqual(18);
+  });
+
+  it("offers all five rhythms across a window", () => {
+    const seen = new Set(Array.from({ length: 70 }, (_, i) => sceneRhythmForChunk(i)));
+    for (const r of ["dense", "medium", "open", "objective", "landmark"] as const) {
+      expect(seen.has(r)).toBe(true);
+    }
+  });
+
+  it("rhythmDensity orders intensity dense > medium > landmark > open", () => {
+    expect(rhythmDensity("dense")).toBeGreaterThan(rhythmDensity("medium"));
+    expect(rhythmDensity("medium")).toBeGreaterThan(rhythmDensity("landmark"));
+    expect(rhythmDensity("landmark")).toBeGreaterThan(rhythmDensity("objective"));
+    expect(rhythmDensity("objective")).toBeGreaterThan(rhythmDensity("open"));
   });
 });

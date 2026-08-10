@@ -15,6 +15,19 @@ type RunStats = {
   wave: number;
 };
 
+type PerfStats = {
+  fps: number;
+  drawCalls: number;
+  triangles: number;
+  geometries: number;
+  textures: number;
+  programs: number;
+  quality: string;
+  enemies: number;
+  powerups: number;
+  objectives: number;
+};
+
 type StickPayload = { x: number; y: number; active: boolean };
 
 const DEFAULT_SETTINGS: GameSettings = {
@@ -689,6 +702,8 @@ export default function App() {
   const [health, setHealth] = useState(100);
   const [fuel, setFuel] = useState(100);
   const [wave, setWave] = useState(0);
+  const [runLevel, setRunLevel] = useState(1);
+  const [runXpProgress, setRunXpProgress] = useState(0);
   const [waveMessage, setWaveMessage] = useState<string | null>(null);
   const [highScore, setHighScore] = useState(0);
   const [isNewBest, setIsNewBest] = useState(false);
@@ -735,6 +750,8 @@ export default function App() {
     depot: boolean;
     count: number;
   } | null>(null);
+  const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
+  const [showPerf, setShowPerf] = useState(true);
 
   const applySettings = (patch: Partial<GameSettings>) => {
     const next = { ...settings, ...patch };
@@ -781,6 +798,8 @@ export default function App() {
       const nextScore = e.detail.score;
       setScore(nextScore);
       setWave(e.detail.wave);
+      setRunLevel(e.detail.runLevel ?? 1);
+      setRunXpProgress(e.detail.runXpProgress ?? 0);
       setWaveMessage(e.detail.playing ? e.detail.message : null);
       setWeaponInfo(e.detail.weapon || null);
       setComboInfo(e.detail.combo || null);
@@ -858,6 +877,30 @@ export default function App() {
       window.removeEventListener('helistrike:announce', handleAnnounce as EventListener);
       engine.dispose();
       engineRef.current = null;
+    };
+  }, []);
+
+  // On-screen perf overlay (Pass 10 cleanup): poll the engine's renderer stats
+  // a few times per second — cheap, zero GL cost. F2 toggles it.
+  const showPerfRef = useRef(showPerf);
+  showPerfRef.current = showPerf;
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!showPerfRef.current) return;
+      const engine = engineRef.current;
+      if (!engine) return;
+      setPerfStats(engine.getPerfStats());
+    }, 500);
+    const onPerfKey = (e: KeyboardEvent) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        setShowPerf((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onPerfKey);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('keydown', onPerfKey);
     };
   }, []);
 
@@ -1061,6 +1104,23 @@ export default function App() {
           </div>
         )}
 
+        {/* Run level + XP bar (Vampire-Survivors style) */}
+        {mode === 'playing' && (
+          <div className="pointer-events-none absolute left-4 top-[11.5rem] flex flex-col gap-1 sm:left-6 sm:top-[13.5rem]">
+            <div className="flex items-center gap-2">
+              <span className="rounded-[4px] border border-[#56e6ff]/80 bg-[#0a2a3a]/80 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#bfeeff]" style={textShadow}>
+                LV.{runLevel}
+              </span>
+              <div className="h-2 w-32 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+                <div
+                  className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
+                  style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Salvo HUD */}
         {salvoInfo && mode === 'playing' && (
           <div className="pointer-events-none absolute left-4 top-34 flex flex-col gap-1 sm:left-6 sm:top-38">
@@ -1228,7 +1288,7 @@ export default function App() {
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/45">
           <div className="w-[min(640px,92vw)] rounded-2xl border-2 border-[#7ee0ff]/60 bg-[#0b1c33]/95 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)] sm:p-7">
             <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7ee0ff]">
-              Weapon Rank Up
+              Level Up
             </div>
             <h2 className="mb-5 text-center text-2xl font-black uppercase tracking-widest text-white" style={textShadow}>
               Choose an Upgrade
@@ -1277,6 +1337,19 @@ export default function App() {
           onSettings={() => setShowSettings(true)}
           onHangar={() => setShowHangar(true)}
         />
+      )}
+
+      {/* On-screen perf overlay (dev aid) — F2 toggles, hidden on touch devices */}
+      {showPerf && !touchDevice && perfStats && (
+        <div className="pointer-events-none absolute bottom-2 left-2 z-30 select-none rounded-[5px] border border-white/20 bg-black/55 px-2 py-1 font-mono text-[10px] font-bold leading-tight text-[#7ee0ff] shadow-[0_2px_8px_rgba(0,0,0,0.35)]" style={textShadow}>
+          <div>{perfStats.fps} FPS · {perfStats.drawCalls} DC · {(perfStats.triangles / 1000).toFixed(1)}k TRI</div>
+          <div className="text-white/75">
+            {perfStats.geometries} GEO · {perfStats.textures} TEX · {perfStats.programs} PROG
+          </div>
+          <div className="text-[#ffe66d]">
+            {perfStats.enemies} EN · {perfStats.powerups} PU · {perfStats.objectives} OBJ · {perfStats.quality.toUpperCase()}
+          </div>
+        </div>
       )}
     </div>
   );
