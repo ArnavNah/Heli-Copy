@@ -1,5 +1,6 @@
 import type * as THREE from "three";
 import type * as CANNON from "cannon-es";
+import type { SamState } from "./sam";
 
 // Pass 8 art direction: the scene used to stack cyan sky + cyan fog + icy
 // lighting into one blue wash that drowned gameplay. Fog is now a warm neutral
@@ -19,6 +20,8 @@ export type RooftopSpot = {
   x: number;
   y: number;
   z: number;
+  /** True when this spot is a rooftop helipad pad (extraction LZ candidate). */
+  helipad?: boolean;
 };
 
 export type CityBlock = {
@@ -41,12 +44,68 @@ export type CityBlock = {
   occlusionFactor?: number;
   /** Target occlusion factor the per-frame interpolation eases toward. */
   occlusionTarget?: number;
+  /** District landmark kind (e.g. "HELIPAD_TOWER") — used to place extraction pads on real LZs. */
+  landmarkKind?: string;
 };
 
 export type EnemyLock = {
   body: CANNON.Body;
   active: boolean;
 };
+
+// --- Tactical minimap snapshot (engine → HUD, ~12 Hz) ---
+// Positions only — full entity objects never cross into React. The player is
+// always centered; world markers are drawn relative to the player position.
+export type MinimapEnemy = {
+  x: number;
+  z: number;
+  type: EnemyType;
+  variant?: EnemyVariant;
+  elite: boolean;
+  boss: boolean;
+};
+
+export type MinimapDelivery = {
+  origin: { x: number; z: number };
+  destination: { x: number; z: number };
+  carrying: boolean;
+  state: string;
+};
+
+export type MinimapObjective = {
+  type: ObjectiveType;
+  x: number;
+  z: number;
+  samState?: SamState;
+  detectionRange?: number;
+};
+
+export type MinimapThreat = {
+  x: number;
+  z: number;
+  kind: "HOMING_MISSILE";
+  target: "PLAYER" | "DECOY" | "NONE";
+};
+
+export type MinimapExtraction = {
+  x: number;
+  z: number;
+  active: boolean;
+  /** World-space radius of the extraction zone (units). */
+  radius: number;
+  /** Pad surface elevation (world Y) — tells the player if the LZ is a rooftop. */
+  elevation: number;
+};
+
+export interface MinimapSnapshot {
+  player: { x: number; y: number; z: number; heading: number };
+  enemies: MinimapEnemy[];
+  delivery: MinimapDelivery | null;
+  objectives: MinimapObjective[];
+  threats: MinimapThreat[];
+  extraction: MinimapExtraction | null;
+  range: number;
+}
 
 export type WorldChunk = {
   id: number;
@@ -62,7 +121,7 @@ export type StickInput = {
   active: boolean;
 };
 
-export type QualityPreset = 'low' | 'high';
+export type QualityPreset = 'low' | 'medium' | 'high';
 export type Difficulty = 'casual' | 'normal' | 'hard';
 
 export interface GameSettings {
@@ -82,6 +141,25 @@ export enum EnemyType {
   TANK,
   DRONE,
   BOSS,
+}
+
+/**
+ * Combat variants built on top of the five base EnemyTypes. Each variant
+ * reuses the base movement/hull/avoidance machinery and adds a distinct role,
+ * visual accent and attack telegraph. STANDARD keeps the classic behavior.
+ */
+export enum EnemyVariant {
+  STANDARD = "STANDARD",
+  SCOUT_DRONE = "SCOUT_DRONE",
+  KAMIKAZE_DRONE = "KAMIKAZE_DRONE",
+  ATTACK_GUNSHIP = "ATTACK_GUNSHIP",
+  ROCKET_GUNSHIP = "ROCKET_GUNSHIP",
+  FLAK_TANK = "FLAK_TANK",
+  MISSILE_CARRIER = "MISSILE_CARRIER",
+  SHIELD_DRONE = "SHIELD_DRONE",
+  REPAIR_DRONE = "REPAIR_DRONE",
+  HEAVY_GUNSHIP = "HEAVY_GUNSHIP",
+  SIEGE_TANK = "SIEGE_TANK",
 }
 
 export enum EnemyModifier {

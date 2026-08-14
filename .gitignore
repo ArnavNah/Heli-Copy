@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 .freebuff/
+
+# Headless smoke-test runtime data
+.phase1-*

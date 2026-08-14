@@ -7,6 +7,7 @@ export {
   AttackPattern,
   EnemyModifier,
   EnemyType,
+  EnemyVariant,
   HelicopterModel,
   FOG_CLEAR_COLOR,
   FOG_STORM_COLOR,
@@ -24,6 +25,11 @@ export type {
   CityBlock,
   EnemyLock,
   GameSettings,
+  MinimapDelivery,
+  MinimapEnemy,
+  MinimapObjective,
+  MinimapSnapshot,
+  MinimapThreat,
   QualityPreset,
   RooftopSpot,
   StickInput,
@@ -32,3 +38,39 @@ export type {
 } from "./game/types";
 export { pickUpgrades, riskMultiplier, multikillTier, weaponLevelForXp, weaponLevelBonus, weaponXpForLevel } from "./game/logic";
 export type { MultikillInfo, UpgradeId, UpgradeOption, WeaponLevelBonus } from "./game/logic";
+export {
+  CargoState,
+  CargoType,
+  DeliveryState,
+  HANGAR_UPGRADE_INFO,
+  buyHangarUpgrade,
+  readDeliveryCredits,
+  readHangarUpgrades,
+} from "./game/delivery";
+export {
+  CountermeasureState,
+  countermeasureConfig,
+  settleExtraction,
+  THREAT_NAMES,
+  THREAT_REWARD_MULTIPLIERS,
+  THREAT_THRESHOLDS,
+  threatBonusFor,
+  threatLevelForPoints,
+  threatRewardMultiplier,
+} from "./game/mechanics";
+export type { CountermeasureConfig, ThreatLevel } from "./game/mechanics";
+export {
+  SamState,
+  SamStateMachine,
+  SAM_DETECTION_RANGE,
+  SAM_FIRE_RANGE,
+  SAM_MIN_FIRE_RANGE,
+} from "./game/sam";
+export type {
+  ContractDifficulty,
+  DeliveryContract,
+  DeliveryHudSnapshot,
+  DepotHub,
+  HangarUpgradeId,
+  HangarUpgrades,
+} from "./game/delivery";

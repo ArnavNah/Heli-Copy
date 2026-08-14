@@ -462,6 +462,39 @@ export class AudioManager {
     osc.stop(now + 0.08);
   }
 
+  public playSamLockBeep(progress: number) {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 720 + Math.max(0, Math.min(1, progress)) * 520;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.055, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.075);
+  }
+
+  public playSamMissileLaunch() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(95, now);
+    osc.frequency.exponentialRampToValueAtTime(310, now + 0.22);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.36);
+  }
+
   public playKillCombo(tier: number) {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
@@ -571,6 +604,26 @@ export class AudioManager {
     
     this.musicStep++;
   };
+
+  private tacticalTone(startHz: number, endHz: number, duration: number, volume = 0.12) {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(startHz, now);
+    osc.frequency.exponentialRampToValueAtTime(endHz, now + duration);
+    gain.gain.setValueAtTime(volume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + duration);
+  }
+
+  public playCountermeasure() { this.tacticalTone(760, 180, 0.16, 0.16); }
+  public playLockBreak() { this.tacticalTone(420, 980, 0.18, 0.1); }
+  public playThreatLevel() { this.tacticalTone(240, 520, 0.24, 0.11); }
 
   public dispose() {
     this.stopMusic();

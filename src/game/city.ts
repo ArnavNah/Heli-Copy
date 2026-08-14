@@ -40,6 +40,8 @@ import type { BuildingArchetype, DistrictConfig, RooftopPropType } from "./logic
 let tempDamageTint: THREE.Color | null = null;
 import { ObjectiveType } from "./types";
 import type { CityBlock, RooftopSpot, WorldChunk } from "./types";
+import { depotHubForChunk } from "./delivery";
+import type { DepotHub } from "./delivery";
 
 /** An animated car driving along a road lane (moves inside its chunk band). */
 interface TrafficCar {
@@ -79,10 +81,18 @@ export class CityEnvironment {
   rooftopSpots: RooftopSpot[] = [];
   blocks: CityBlock[] = [];
   chunks: Map<number, WorldChunk> = new Map();
+  /** Logical depot registry survives chunk unloads; positions are also reproducible from the chunk seed. */
+  depotHubs: Map<string, DepotHub> = new Map();
   particles: any = null;
   cellSize = 22;
   chunkDepth = 132;
-  halfWidthCells = 9;
+  /** The city is wider than the original build: 1024 units of ground per
+   * chunk (was 640) with two extra building rows on each flank. The map is
+   * fully procedural — every chunk derives deterministically from its id via
+   * hash() — and endless along the flight path (chunks stream in ahead,
+   * unload behind). */
+  worldHalfWidth = 512;
+  halfWidthCells = 12;
 
   // Road hierarchy (Pass 2): a grand central avenue under the flight corridor,
   // two fixed flanking avenues, a cross street every chunk, and a service road.
@@ -213,7 +223,26 @@ export class CityEnvironment {
     this.chunkTraffic.clear();
     this.chunkBeacons.clear();
     this.disposeBillboardTextures(this.chunkBillboards);
+    this.depotHubs.clear();
     this.update({ x: 0, y: 20, z: 0 }, world);
+  }
+
+  /** Return and register the deterministic depot for a chunk, loaded or not. */
+  getDepotHub(chunkId: number): DepotHub | null {
+    const id = `depot-${chunkId}`;
+    const registered = this.depotHubs.get(id);
+    if (registered) return registered;
+    const depot = depotHubForChunk(chunkId, this.chunkDepth);
+    if (depot) {
+      this.depotHubs.set(depot.id, depot);
+      // Long endless runs scan new route candidates forever; deterministic
+      // regeneration lets this logical cache remain bounded without losing a destination.
+      if (this.depotHubs.size > 256) {
+        const oldest = this.depotHubs.keys().next().value as string | undefined;
+        if (oldest) this.depotHubs.delete(oldest);
+      }
+    }
+    return depot;
   }
 
   getSpawnSpot(playerPos: CANNON.Vec3): RooftopSpot {
@@ -324,7 +353,7 @@ export class CityEnvironment {
     for (const chunk of this.chunks.values()) {
       const cz = chunk.id * this.chunkDepth;
       // Chunk boundary (white)
-      rect(0, cz, 640, this.chunkDepth - 0.4, 0xffffff, 0.25);
+      rect(0, cz, this.worldHalfWidth * 2, this.chunkDepth - 0.4, 0xffffff, 0.25);
       // Open combat corridor — flight lane (green)
       rect(0, cz, 58, this.chunkDepth, 0x35e66d, 0.18);
       // Road cells — grand avenue, flanking avenues, cross street (yellow)
@@ -332,7 +361,7 @@ export class CityEnvironment {
       rect(0, cz, this.grandAvenueHalf * 2, this.chunkDepth, 0xffd23b, 0.15);
       rect(-this.sideAvenueX, cz, this.sideAvenueHalf * 2, this.chunkDepth, 0xffd23b, 0.15);
       rect(this.sideAvenueX, cz, this.sideAvenueHalf * 2, this.chunkDepth, 0xffd23b, 0.15);
-      rect(0, cz, 640, dbgCfg.crossStreetHalf * 2, 0xffd23b, 0.15);
+      rect(0, cz, this.worldHalfWidth * 2, dbgCfg.crossStreetHalf * 2, 0xffd23b, 0.15);
       // Service road (orange)
       if (
         dbgCfg.name === 'industrial' ||
@@ -576,6 +605,82 @@ export class CityEnvironment {
     return height;
   }
 
+  /**
+   * Best extraction pad ahead of the player. Priority: an intact helipad-tower
+   * deck (the military LZ landmark), then a flat reachable rooftop (existing
+   * H-marked helipad props win ties; otherwise the pad is painted there), then
+   * the lowest open surface on the usual lanes (waterfront / parks / loading
+   * yards read as near-zero ground). All honor the existing distance band
+   * (140–330 ahead, same spirit as the old fixed z-220) and never land inside
+   * a building or on a hostile turret roof — decks/pads sit on real rooftops,
+   * the fallback is the lowest surface on a lane.
+   */
+  findExtractionSpot(playerZ: number): { x: number; z: number; height: number; kind: "tower" | "rooftop" | "ground" } {
+    const minDist = 140;
+    const maxDist = 330;
+    // 1) Helipad-tower decks ahead of the player — the ideal LZ.
+    let bestTower: { x: number; z: number; height: number; dist: number } | null = null;
+    for (const chunk of this.chunks.values()) {
+      for (const block of chunk.blocks) {
+        if (block.destroyed || block.landmarkKind !== "HELIPAD_TOWER") continue;
+        const dz = block.z - playerZ;
+        if (dz < minDist || dz > maxDist) continue;
+        const dist = Math.abs(dz);
+        if (!bestTower || dist < bestTower.dist) {
+          // Deck surface sits 4.6 below the block's top (mast + edge lights).
+          bestTower = { x: block.x, z: block.z, height: block.height - 4.6, dist };
+        }
+      }
+    }
+    if (bestTower) {
+      return { x: bestTower.x, z: bestTower.z, height: bestTower.height, kind: "tower" };
+    }
+    // 2) A flat, reachable rooftop ahead — real helipad props win ties.
+    let bestRoof: { x: number; z: number; height: number; dist: number; pad: boolean } | null = null;
+    for (const spot of this.rooftopSpots) {
+      const dz = spot.z - playerZ;
+      if (dz < minDist || dz > maxDist) continue;
+      if (Math.abs(spot.x) > 105) continue; // keep it near the flight corridor
+      const roof = this.getHeightAt(spot.x, spot.z);
+      if (roof < 6 || roof > 48) continue; // shacks too low, spires not a pad
+      // Wide flat roof: nothing taller within ~5 units of the spot center.
+      if (this.getHeightAt(spot.x, spot.z, 5) > roof + 0.01) continue;
+      // Hostile turret roofs are not LZs.
+      let nearTurret = false;
+      for (const turret of this.turrets) {
+        if (
+          Math.abs(turret.position.x - spot.x) < 9 &&
+          Math.abs(turret.position.z - spot.z) < 9
+        ) {
+          nearTurret = true;
+          break;
+        }
+      }
+      if (nearTurret) continue;
+      const dist = Math.abs(dz);
+      const pad = Boolean(spot.helipad);
+      if (!bestRoof || dist < bestRoof.dist || (pad && !bestRoof.pad)) {
+        bestRoof = { x: spot.x, z: spot.z, height: roof, dist, pad };
+      }
+    }
+    if (bestRoof) {
+      return { x: bestRoof.x, z: bestRoof.z, height: bestRoof.height, kind: "rooftop" };
+    }
+    // 3) Open ground: the lowest surface on the fixed lanes wins (open yards,
+    //    waterfront and parks are the shortest). Same lanes/distance as before.
+    const lanes = [0, -72, 72, -36, 36];
+    let bestGround: { x: number; z: number; height: number } | null = null;
+    const z = playerZ - 220;
+    for (const x of lanes) {
+      const height = this.getHeightAt(x, z, 0.5);
+      if (!bestGround || height < bestGround.height) {
+        bestGround = { x, z, height };
+      }
+    }
+    const fallback = bestGround ?? { x: 0, z, height: 0 };
+    return { x: fallback.x, z: fallback.z, height: fallback.height, kind: "ground" };
+  }
+
   private generateChunk(id: number, world: CANNON.World) {
     const chunk: WorldChunk = {
       id,
@@ -594,8 +699,9 @@ export class CityEnvironment {
     const prevConfig = DISTRICT_CONFIGS[districtForChunk(id - 1)];
     const nextConfig = DISTRICT_CONFIGS[districtForChunk(id + 1)];
     const chunkCenterZ = id * this.chunkDepth;
+    const depot = this.getDepotHub(id);
 
-    const ground = createBox(640, 0.8, this.chunkDepth - 0.4, config.ground);
+    const ground = createBox(this.worldHalfWidth * 2, 0.8, this.chunkDepth - 0.4, config.ground);
     ground.position.set(0, -0.62, chunkCenterZ);
     chunk.group.add(ground);
 
@@ -604,7 +710,7 @@ export class CityEnvironment {
     // The strip top (y≈-0.13) clears below the road surfaces (asphalt top ≈-0.10)
     // so roads win the depth test and no band is stamped across the avenues.
     const stripAt = (groundColor: number, z: number) => {
-      const strip = createBox(640, 0.34, 6, groundColor);
+      const strip = createBox(this.worldHalfWidth * 2, 0.34, 6, groundColor);
       strip.position.set(0, -0.3, z);
       chunk.group.add(strip);
     };
@@ -633,6 +739,12 @@ export class CityEnvironment {
         if (local === 0) continue;
         const x = gx * this.cellSize + (this.hash(id, gx + local) - 0.5) * 4;
         const z = chunkCenterZ + local * this.cellSize + (this.hash(id, gx - local) - 0.5) * 5;
+        // Reserve a broad, obstacle-free cargo apron around the deterministic depot.
+        if (
+          depot &&
+          Math.abs(x - depot.position.x) < 30 &&
+          Math.abs(z - depot.position.z) < 23
+        ) continue;
         const roll = this.hash(id, gx * 13 + local * 37);
         // Skyline density tapers toward the field edges.
         const edgeFactor = 1 - Math.min(1, (Math.abs(gx) - 3) / 6) * 0.35;
@@ -652,6 +764,7 @@ export class CityEnvironment {
     this.addGroundDressing(chunk, config, chunkCenterZ, id);
     this.addBillboards(chunk, id, chunkCenterZ, config);
     this.addStreetProps(chunk, id, config, chunkCenterZ);
+    if (depot) this.addDepotFacility(chunk, depot, config);
     if (config.name === 'base' || config.name === 'ruins') {
       this.addMilitaryProps(chunk, id, config, chunkCenterZ);
     }
@@ -661,6 +774,89 @@ export class CityEnvironment {
     if (Math.abs(id) % 7 === 4) this.addSmokeColumn(chunk, chunkCenterZ);
 
     this.chunks.set(id, chunk);
+  }
+
+  /**
+   * Compose a readable low-poly cargo facility around an open loading apron.
+   * The visual belongs to the chunk; the DepotHub data above does not.
+   */
+  private addDepotFacility(chunk: WorldChunk, depot: DepotHub, config: DistrictConfig) {
+    const g = new THREE.Group();
+    g.name = `DepotFacility_${depot.id}`;
+    g.position.set(depot.position.x, 0, depot.position.z);
+    const outward = depot.position.x < 0 ? -1 : 1;
+
+    const yard = createBox(34, 0.18, 28, PROP_COLORS.concreteDark);
+    yard.position.y = 0.02;
+    g.add(yard);
+
+    // Open helicopter loading area: amber corner lamps and inset ground bars.
+    const loadingPad = createBox(18, 0.12, 18, 0x303842);
+    loadingPad.position.set(-outward * 4, 0.14, 0);
+    g.add(loadingPad);
+    for (const side of [-1, 1]) {
+      const stripe = createBox(0.7, 0.08, 15, 0xe5a83c);
+      stripe.position.set(-outward * 4 + side * 7.5, 0.24, 0);
+      g.add(stripe);
+    }
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const lamp = createGlowBox(0.65, 0.35, 0.65, 0xffbd3f, 0.82);
+        lamp.position.set(-outward * 4 + sx * 7.3, 0.48, sz * 7.3);
+        lamp.userData.isBeacon = true;
+        g.add(lamp);
+      }
+    }
+
+    // Warehouse and covered loading bay frame the outside edge, leaving the approach open.
+    const warehouse = createBox(15, 6.5, 15, config.palette[0]);
+    warehouse.position.set(outward * 19, 3.35, 0);
+    g.add(warehouse);
+    const roof = createBox(16.5, 0.7, 16.5, PROP_COLORS.darkSteel);
+    roof.position.set(outward * 19, 6.75, 0);
+    g.add(roof);
+    const door = createBox(0.35, 3.5, 5.5, 0x2b313b);
+    door.position.set(outward * 11.35, 1.8, 0);
+    g.add(door);
+    const bay = buildLoadingBay();
+    bay.position.set(outward * 9.4, 0.22, -7.5);
+    bay.rotation.y = outward > 0 ? Math.PI / 2 : -Math.PI / 2;
+    g.add(bay);
+
+    const containerA = buildContainer(PROP_COLORS.blue);
+    containerA.position.set(outward * 8.5, 0.2, 10.6);
+    containerA.rotation.y = Math.PI / 2;
+    const containerB = buildContainer(PROP_COLORS.rust);
+    containerB.position.set(outward * 14, 0.2, 10.6);
+    containerB.rotation.y = Math.PI / 2;
+    g.add(containerA, containerB);
+
+    for (let i = 0; i < 3; i++) {
+      const crate = buildCrate(i, i === 1 ? PROP_COLORS.olive : PROP_COLORS.tan);
+      crate.position.set(outward * (9 + i * 2), 0.2, -11);
+      crate.rotation.y = i * 0.45;
+      g.add(crate);
+    }
+
+    const tank = buildStorageTank(Math.abs(depot.chunkId) % 3, config.accentColor);
+    tank.position.set(outward * 27, 0.2, 9.5);
+    g.add(tank);
+    for (const z of [-11, 11]) {
+      const light = buildFloodlight();
+      light.position.set(-outward * 13.5, 0.2, z);
+      light.rotation.y = outward > 0 ? -Math.PI / 2 : Math.PI / 2;
+      g.add(light);
+    }
+
+    // Chunky roadside signage is legible as a depot silhouette even before a contract is active.
+    const sign = buildRoadSign(config.name === "waterfront" || config.name === "industrial");
+    sign.position.set(-outward * 15, 0.2, -9);
+    sign.rotation.y = outward > 0 ? -Math.PI / 2 : Math.PI / 2;
+    const signGlow = createGlowBox(2.4, 0.35, 0.25, 0xffbd3f, 0.72);
+    signGlow.position.set(-outward * 15, 3.65, -9);
+    g.add(sign, signGlow);
+
+    chunk.group.add(g);
   }
 
   /**
@@ -754,14 +950,14 @@ export class CityEnvironment {
     // ---- Cross street (runs along X through every chunk center) — width is
     // the district's seam-safe road tendency: the street is interior to the
     // chunk, so industrial gets wider avenues without breaking chunk seams ----
-    const cross = createBox(640, 0.12, crossHalf * 2, ENV_PALETTE.asphaltDark);
+    const cross = createBox(this.worldHalfWidth * 2, 0.12, crossHalf * 2, ENV_PALETTE.asphaltDark);
     cross.position.set(0, asphaltY, cz);
     chunk.group.add(cross);
     for (const side of [-1, 1]) {
-      const walk = createBox(640, 0.06, 2.2, config.sidewalk);
+      const walk = createBox(this.worldHalfWidth * 2, 0.06, 2.2, config.sidewalk);
       walk.position.set(0, -0.05, cz + side * (crossHalf + 1.4));
       chunk.group.add(walk);
-      const curb = createBox(640, 0.2, 0.4, 0x39465c);
+      const curb = createBox(this.worldHalfWidth * 2, 0.2, 0.4, 0x39465c);
       curb.position.set(0, -0.02, cz + side * (crossHalf + 2.6));
       chunk.group.add(curb);
     }
@@ -1293,8 +1489,14 @@ export class CityEnvironment {
     // Modular prop library — shared geometry/materials, variant from the seed.
     const group = buildRooftopProp(kind, seed, width, depth, config.accentColor);
     // Turrets own the roof center — offset the prop group so they never clip.
-    group.position.set(x + (hasTurret ? width * 0.22 : 0), height + 0.55, z);
+    const propX = x + (hasTurret ? width * 0.22 : 0);
+    group.position.set(propX, height + 0.55, z);
     chunk.group.add(group);
+    // Real rooftop helipads double as extraction LZs — record the pad's world
+    // position (roof surface + pad height) so the spawner can land on it.
+    if (kind === "helipad") {
+      chunk.spots.push({ x: propX, y: height + 0.8, z: chunk.id * this.chunkDepth + z, helipad: true });
+    }
     group.traverse((child) => {
       if (!(child instanceof THREE.Mesh)) return;
       meshes.push(child);
@@ -1451,6 +1653,7 @@ export class CityEnvironment {
     hp: number,
     meshes: THREE.Mesh[],
     spotY?: number,
+    kind?: string,
   ) {
     const body = this.addStaticBox(world, width, height, depth, x, height / 2, z, true);
     chunk.bodies.push(body);
@@ -1466,6 +1669,7 @@ export class CityEnvironment {
       hp,
       maxHp: hp,
       destroyed: false,
+      landmarkKind: kind,
     };
     chunk.blocks.push(block);
     this.landmarkSet.add(block);
@@ -1589,7 +1793,7 @@ export class CityEnvironment {
     this.chunkBeacons.get(chunk.id)?.push(light);
     meshes.push(light);
     const topY = deckY + 4.6;
-    this.addLandmarkBlock(chunk, world, x, z, 13, 13, topY, 300, meshes, deckY + 0.6);
+    this.addLandmarkBlock(chunk, world, x, z, 13, 13, topY, 300, meshes, deckY + 0.6, "HELIPAD_TOWER");
   }
 
   private buildCoolingTowers(chunk: WorldChunk, world: CANNON.World, id: number, chunkCenterZ: number) {
@@ -2238,10 +2442,11 @@ export class CityEnvironment {
     // method only dresses the leftover ground (patches, rocks, craters, parks).
 
     const palette = config.detailPalette;
+    const spread = this.worldHalfWidth - 40;
 
     for (let i = 0; i < 18; i++) {
       const seed = this.hash(id, i * 41 + 7);
-      const x = -275 + this.hash(id, i * 59 + 11) * 550;
+      const x = -spread + this.hash(id, i * 59 + 11) * spread * 2;
       const z = chunkCenterZ - this.chunkDepth * 0.48 + this.hash(id, i * 67 + 17) * this.chunkDepth;
       if (Math.abs(x) < 58 || Math.abs(Math.abs(x) - this.serviceRoadX) < 16) continue;
       if (this.overlapsBuilding(chunk, x, z, 16, 14)) continue;
@@ -2259,7 +2464,7 @@ export class CityEnvironment {
 
     for (let i = 0; i < 10; i++) {
       const seed = this.hash(id, i * 83 + 31);
-      const x = -280 + this.hash(id, i * 89 + 37) * 560;
+      const x = -spread + this.hash(id, i * 89 + 37) * spread * 2;
       const z = chunkCenterZ - this.chunkDepth * 0.45 + this.hash(id, i * 97 + 43) * this.chunkDepth * 0.9;
       if (Math.abs(x) < 50 || Math.abs(Math.abs(x) - this.serviceRoadX) < 14) continue;
       if (this.overlapsBuilding(chunk, x, z, 5, 5)) continue;

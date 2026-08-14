@@ -310,7 +310,7 @@ export function buildGenerator(): THREE.Group {
 }
 
 /** Stacked crate with a lid frame. */
-export function buildCrate(variant: number, color = PROP_COLORS.tan): THREE.Group {
+export function buildCrate(variant: number, color: number = PROP_COLORS.tan): THREE.Group {
   const g = new THREE.Group();
   const s = 1.1 + (variant % 2) * 0.35;
   box(s, s, s, color, 0, s / 2, 0, g);

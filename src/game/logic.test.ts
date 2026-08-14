@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EnemyType } from "./types";
+import { EnemyType, EnemyVariant } from "./types";
 import {
   accuracyFor,
   bossPhaseForRatio,
@@ -12,12 +12,15 @@ import {
   DISTRICT_CONFIGS,
   DISTRICT_SCHEDULE,
   districtForChunk,
+  ENEMY_VARIANTS,
   footprintTier,
   formatDuration,
   MAX_WEAPON_LEVEL,
   multikillTier,
   objectiveConfig,
   occlusionStrength,
+  pickEnemyVariant,
+  pickSquadForWave,
   pickUpgrades,
   readMastery,
   riskMultiplier,
@@ -25,6 +28,8 @@ import {
   runXpForLevel,
   rhythmDensity,
   sceneRhythmForChunk,
+  SQUAD_TEMPLATES,
+  variantAtCap,
   xpForEnemyType,
   waveEnemyCount,
   waveEnemyDamage,
@@ -503,5 +508,96 @@ describe("scene rhythm (Pass 9)", () => {
     expect(rhythmDensity("medium")).toBeGreaterThan(rhythmDensity("landmark"));
     expect(rhythmDensity("landmark")).toBeGreaterThan(rhythmDensity("objective"));
     expect(rhythmDensity("objective")).toBeGreaterThan(rhythmDensity("open"));
+  });
+});
+
+describe("enemy variants", () => {
+  it("configures all eleven variants with sane stats", () => {
+    for (const variant of Object.keys(ENEMY_VARIANTS) as EnemyVariant[]) {
+      const cfg = ENEMY_VARIANTS[variant];
+      expect(cfg.threat).toBeGreaterThan(0);
+      expect(cfg.minWave).toBeGreaterThanOrEqual(1);
+      expect(cfg.hpMult).toBeGreaterThan(0);
+      expect(cfg.speedMult).toBeGreaterThan(0);
+      expect(cfg.damageMult).toBeGreaterThan(0);
+      expect(cfg.baseType).not.toBe(EnemyType.BOSS);
+    }
+  });
+
+  it("matches the spec threat-cost ladder", () => {
+    const threat = (v: EnemyVariant) => ENEMY_VARIANTS[v].threat;
+    expect(threat(EnemyVariant.STANDARD)).toBe(1.0);
+    expect(threat(EnemyVariant.SCOUT_DRONE)).toBe(1.0);
+    expect(threat(EnemyVariant.KAMIKAZE_DRONE)).toBe(1.25);
+    expect(threat(EnemyVariant.FLAK_TANK)).toBe(1.5);
+    expect(threat(EnemyVariant.ATTACK_GUNSHIP)).toBe(1.75);
+    expect(threat(EnemyVariant.ROCKET_GUNSHIP)).toBe(2.0);
+    expect(threat(EnemyVariant.MISSILE_CARRIER)).toBe(2.0);
+    expect(threat(EnemyVariant.SHIELD_DRONE)).toBe(2.0);
+    expect(threat(EnemyVariant.REPAIR_DRONE)).toBe(2.25);
+    expect(threat(EnemyVariant.SIEGE_TANK)).toBe(2.5);
+    expect(threat(EnemyVariant.HEAVY_GUNSHIP)).toBe(3.0);
+  });
+
+  it("gates variants by wave — nothing appears before its minWave", () => {
+    const rng = () => 0.999; // pick the last candidate every time
+    for (let wave = 1; wave <= 12; wave++) {
+      const picked = pickEnemyVariant(wave, rng);
+      expect(ENEMY_VARIANTS[picked].minWave).toBeLessThanOrEqual(wave);
+    }
+  });
+
+  it("never picks rare units (heavy gunship / siege tank) individually", () => {
+    const rng = () => 0.999;
+    for (let wave = 1; wave <= 20; wave++) {
+      const picked = pickEnemyVariant(wave, rng);
+      expect(picked).not.toBe(EnemyVariant.HEAVY_GUNSHIP);
+      expect(picked).not.toBe(EnemyVariant.SIEGE_TANK);
+    }
+  });
+
+  it("keeps early waves gentle — wave 1 only produces STANDARD", () => {
+    for (let i = 0; i < 200; i++) {
+      expect(pickEnemyVariant(1)).toBe(EnemyVariant.STANDARD);
+    }
+  });
+
+  it("enforces per-variant soft caps via variantAtCap", () => {
+    const carrier = ENEMY_VARIANTS[EnemyVariant.MISSILE_CARRIER];
+    expect(carrier.maxActive).toBe(2);
+    expect(variantAtCap(carrier, {})).toBe(false);
+    expect(variantAtCap(carrier, { [EnemyVariant.MISSILE_CARRIER]: 1 })).toBe(false);
+    expect(variantAtCap(carrier, { [EnemyVariant.MISSILE_CARRIER]: 2 })).toBe(true);
+    // Un-capped variants never trip the check
+    const standard = ENEMY_VARIANTS[EnemyVariant.STANDARD];
+    expect(variantAtCap(standard, { [EnemyVariant.STANDARD]: 999 })).toBe(false);
+  });
+
+  it("support units are hard-capped so the battlefield never stacks them", () => {
+    expect(ENEMY_VARIANTS[EnemyVariant.SHIELD_DRONE].maxActive).toBe(2);
+    expect(ENEMY_VARIANTS[EnemyVariant.REPAIR_DRONE].maxActive).toBe(1);
+    expect(ENEMY_VARIANTS[EnemyVariant.HEAVY_GUNSHIP].maxActive).toBe(1);
+    expect(ENEMY_VARIANTS[EnemyVariant.SIEGE_TANK].maxActive).toBe(1);
+    expect(ENEMY_VARIANTS[EnemyVariant.MISSILE_CARRIER].maxActive).toBe(2);
+  });
+
+  it("squads are wave-gated and bounded in size", () => {
+    for (let wave = 1; wave <= 14; wave++) {
+      const squad = pickSquadForWave(wave, () => 0); // force a squad roll
+      if (!squad) continue;
+      expect(squad.length).toBeGreaterThan(1);
+      expect(squad.length).toBeLessThanOrEqual(5);
+      for (const member of squad) {
+        expect(ENEMY_VARIANTS[member].minWave).toBeLessThanOrEqual(wave);
+      }
+    }
+  });
+
+  it("no squad template references a unit before its own minWave", () => {
+    for (const squad of SQUAD_TEMPLATES) {
+      for (const member of squad.members) {
+        expect(ENEMY_VARIANTS[member].minWave).toBeLessThanOrEqual(squad.minWave);
+      }
+    }
   });
 });

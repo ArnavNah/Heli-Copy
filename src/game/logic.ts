@@ -268,6 +268,227 @@ export function objectiveConfig(type: number): ObjectiveConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Enemy variants (combat roles on top of the five base EnemyTypes)
+// ---------------------------------------------------------------------------
+
+import { EnemyVariant } from "./types";
+
+export interface EnemyVariantConfig {
+  variant: EnemyVariant;
+  /** Base hull reused by this variant. */
+  baseType: EnemyType;
+  /** Threat budget cost — the director spends this instead of raw counts. */
+  threat: number;
+  /** Earliest wave this variant may appear. */
+  minWave: number;
+  hpMult: number;
+  speedMult: number;
+  /** Damage multiplier for its projectiles. */
+  damageMult: number;
+  pointsMult: number;
+  /** Signature accent color (telegraphs / lights / minimap). */
+  accent: number;
+  /** Rare variants are hard-capped per battlefield. */
+  rare?: boolean;
+  /** Soft cap on simultaneously-active count of this variant. */
+  maxActive?: number;
+}
+
+export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
+  [EnemyVariant.STANDARD]: {
+    variant: EnemyVariant.STANDARD,
+    baseType: EnemyType.BASIC,
+    threat: 1.0,
+    minWave: 1,
+    hpMult: 1,
+    speedMult: 1,
+    damageMult: 1,
+    pointsMult: 1,
+    accent: 0xff3b22,
+  },
+  [EnemyVariant.SCOUT_DRONE]: {
+    variant: EnemyVariant.SCOUT_DRONE,
+    baseType: EnemyType.DRONE,
+    threat: 1.0,
+    minWave: 2,
+    hpMult: 0.75,
+    speedMult: 1.5,
+    damageMult: 0.8,
+    pointsMult: 1.1,
+    accent: 0xff3344,
+    maxActive: 10,
+  },
+  [EnemyVariant.KAMIKAZE_DRONE]: {
+    variant: EnemyVariant.KAMIKAZE_DRONE,
+    baseType: EnemyType.DRONE,
+    threat: 1.25,
+    minWave: 3,
+    hpMult: 0.9,
+    speedMult: 1.9,
+    damageMult: 1.4,
+    pointsMult: 1.2,
+    accent: 0xff2244,
+    maxActive: 6,
+  },
+  [EnemyVariant.ATTACK_GUNSHIP]: {
+    variant: EnemyVariant.ATTACK_GUNSHIP,
+    baseType: EnemyType.SHOOTER,
+    threat: 1.75,
+    minWave: 3,
+    hpMult: 1.7,
+    speedMult: 1.1,
+    damageMult: 1.25,
+    pointsMult: 1.5,
+    accent: 0xff5533,
+    maxActive: 8,
+  },
+  [EnemyVariant.ROCKET_GUNSHIP]: {
+    variant: EnemyVariant.ROCKET_GUNSHIP,
+    baseType: EnemyType.SHOOTER,
+    threat: 2.0,
+    minWave: 5,
+    hpMult: 1.9,
+    speedMult: 0.9,
+    damageMult: 1.1,
+    pointsMult: 1.7,
+    accent: 0xffaa33,
+    maxActive: 5,
+  },
+  [EnemyVariant.FLAK_TANK]: {
+    variant: EnemyVariant.FLAK_TANK,
+    baseType: EnemyType.TANK,
+    threat: 1.5,
+    minWave: 4,
+    hpMult: 1.2,
+    speedMult: 1.2,
+    damageMult: 0.7,
+    pointsMult: 1.3,
+    accent: 0xff8833,
+    maxActive: 6,
+  },
+  [EnemyVariant.MISSILE_CARRIER]: {
+    variant: EnemyVariant.MISSILE_CARRIER,
+    baseType: EnemyType.TANK,
+    threat: 2.0,
+    minWave: 5,
+    hpMult: 1.5,
+    speedMult: 0.8,
+    damageMult: 1.3,
+    pointsMult: 1.8,
+    accent: 0xffc23f,
+    maxActive: 2,
+  },
+  [EnemyVariant.SHIELD_DRONE]: {
+    variant: EnemyVariant.SHIELD_DRONE,
+    baseType: EnemyType.DRONE,
+    threat: 2.0,
+    minWave: 6,
+    hpMult: 1.0,
+    speedMult: 0.9,
+    damageMult: 0.5,
+    pointsMult: 1.6,
+    accent: 0x55eeff,
+    maxActive: 2,
+  },
+  [EnemyVariant.REPAIR_DRONE]: {
+    variant: EnemyVariant.REPAIR_DRONE,
+    baseType: EnemyType.DRONE,
+    threat: 2.25,
+    minWave: 7,
+    hpMult: 1.0,
+    speedMult: 0.9,
+    damageMult: 0.5,
+    pointsMult: 1.7,
+    accent: 0x55ff99,
+    maxActive: 1,
+  },
+  [EnemyVariant.HEAVY_GUNSHIP]: {
+    variant: EnemyVariant.HEAVY_GUNSHIP,
+    baseType: EnemyType.SHOOTER,
+    threat: 3.0,
+    minWave: 7,
+    hpMult: 3.6,
+    speedMult: 0.7,
+    damageMult: 1.5,
+    pointsMult: 2.4,
+    accent: 0xd84cff,
+    rare: true,
+    maxActive: 1,
+  },
+  [EnemyVariant.SIEGE_TANK]: {
+    variant: EnemyVariant.SIEGE_TANK,
+    baseType: EnemyType.TANK,
+    threat: 2.5,
+    minWave: 8,
+    hpMult: 2.3,
+    speedMult: 0.7,
+    damageMult: 1.5,
+    pointsMult: 2.2,
+    accent: 0xff7744,
+    rare: true,
+    maxActive: 1,
+  },
+};
+
+/** Pick a random variant available at the given wave (weighted toward newer, spicier units). */
+export function pickEnemyVariant(wave: number, rng: () => number = Math.random): EnemyVariant {
+  const candidates = Object.values(ENEMY_VARIANTS).filter((c) => c.minWave <= wave && !c.rare);
+  const available = candidates.map((c) => c.variant);
+  if (available.length === 0) return EnemyVariant.STANDARD;
+  // Late-wave weight shift: newer variants get slightly heavier weights so the
+  // battlefield naturally diversifies without ever becoming all-elite.
+  const weights = available.map((v) => {
+    const cfg = ENEMY_VARIANTS[v];
+    const waveBonus = Math.min(1.6, 1 + (wave - cfg.minWave) * 0.06);
+    return cfg.threat * waveBonus;
+  });
+  const total = weights.reduce((a, b) => a + b, 0);
+  let roll = rng() * total;
+  for (let i = 0; i < available.length; i++) {
+    roll -= weights[i];
+    if (roll <= 0) return available[i];
+  }
+  return available[available.length - 1];
+}
+
+/** Soft-cap check: is this variant already at its battlefield limit? */
+export function variantAtCap(config: EnemyVariantConfig, activeCounts: Partial<Record<EnemyVariant, number>>): boolean {
+  const max = config.maxActive ?? Infinity;
+  return (activeCounts[config.variant] ?? 0) >= max;
+}
+
+/** Squad templates — small procedural encounter compositions, wave-gated. */
+export interface SquadTemplate {
+  members: EnemyVariant[];
+  minWave: number;
+  weight: number;
+}
+
+export const SQUAD_TEMPLATES: SquadTemplate[] = [
+  { members: [EnemyVariant.SCOUT_DRONE, EnemyVariant.SCOUT_DRONE, EnemyVariant.FLAK_TANK], minWave: 4, weight: 1 }, // Harassment
+  { members: [EnemyVariant.SHIELD_DRONE, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 6, weight: 1 }, // Protected shooters
+  { members: [EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 5, weight: 0.8 }, // Missile pressure
+  { members: [EnemyVariant.REPAIR_DRONE, EnemyVariant.FLAK_TANK, EnemyVariant.FLAK_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 7, weight: 0.8 }, // Repair group
+  { members: [EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 6, weight: 0.6 }, // High pressure
+  { members: [EnemyVariant.HEAVY_GUNSHIP, EnemyVariant.SHIELD_DRONE, EnemyVariant.SCOUT_DRONE, EnemyVariant.SCOUT_DRONE], minWave: 8, weight: 0.5 }, // Heavy assault
+  { members: [EnemyVariant.SIEGE_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.SCOUT_DRONE], minWave: 9, weight: 0.4 }, // Siege push
+];
+
+/** Pick a squad template for the wave, or null for an individual spawn. */
+export function pickSquadForWave(wave: number, rng: () => number = Math.random): EnemyVariant[] | null {
+  const eligible = SQUAD_TEMPLATES.filter((s) => s.minWave <= wave);
+  if (eligible.length === 0) return null;
+  const total = eligible.reduce((a, s) => a + s.weight, 0);
+  if (rng() > Math.min(0.3, 0.08 + wave * 0.02)) return null; // most spawns stay individual
+  let roll = rng() * total;
+  for (const squad of eligible) {
+    roll -= squad.weight;
+    if (roll <= 0) return squad.members.slice();
+  }
+  return eligible[eligible.length - 1].members.slice();
+}
+
+// ---------------------------------------------------------------------------
 // Weapon mastery (persistent meta-progression)
 // ---------------------------------------------------------------------------
 

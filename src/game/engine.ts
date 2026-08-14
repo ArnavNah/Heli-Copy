@@ -5,14 +5,28 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { AudioManager } from "../audio";
-import { createGlowMaterial, createSkyDome } from "./materials";
+import { createGlowMaterial, createSkyDome, disposeObject3D } from "./materials";
 import { Enemy, Helicopter, MOVEMENT_CONFIG, Objective, PowerUp, Projectile, ProjectilePool } from "./entities";
 import { CityEnvironment } from "./city";
+import {
+  DeliveryState,
+  DeliverySystem,
+  cargoMovementMultiplier,
+  readHangarUpgrades,
+} from "./delivery";
+import type { HangarUpgrades } from "./delivery";
+import {
+  SAM_DETECTION_RANGE,
+  SAM_MIN_SPACING,
+  SAM_MISSILE_TURN_RATE,
+  SamState,
+} from "./sam";
 import { GPUParticleSystem, RainSystem, VolumetricExplosions, WeatherSystem } from "./particles";
 import {
   AttackPattern,
   EnemyModifier,
   EnemyType,
+  EnemyVariant,
   FOG_CLEAR_COLOR,
   FOG_DENSITY,
   GameSettings,
@@ -21,11 +35,11 @@ import {
   ObjectiveType,
   SKY_CLEAR_COLOR,
   StickInput,
-  TARGET_RENDER_FPS,
   WEAPON_CONFIGS,
   WeaponConfig,
   WeaponType,
   PowerUpType,
+  type MinimapSnapshot,
 } from "./types";
 import {
   accuracyFor,
@@ -34,11 +48,15 @@ import {
   bossVolleyConfig,
   comboMultiplier,
   DIFFICULTIES,
+  ENEMY_VARIANTS,
   MAX_RUN_LEVEL,
   MAX_WEAPON_LEVEL,
   objectiveConfig,
+  pickEnemyVariant,
+  pickSquadForWave,
   pickUpgrades,
   riskMultiplier,
+  variantAtCap,
   waveEnemyCount,
   waveEnemyDamage,
   waveEnemyFireRate,
@@ -53,8 +71,22 @@ import {
   writeMastery,
 } from "./logic";
 import type { Difficulty as DifficultySetting, UpgradeId, UpgradeOption } from "./logic";
+import {
+  CountermeasureState,
+  countermeasureConfig,
+  settleExtraction,
+  THREAT_NAMES,
+  threatBonusFor,
+  threatLevelForPoints,
+  threatRewardMultiplier,
+  type ThreatLevel,
+} from "./mechanics";
+
+type DashState = "READY" | "DASHING" | "COOLDOWN";
 
 export class GameEngine {
+  private static readonly MAX_SIMULATION_DT = 0.05;
+
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   cameraLookAtTarget: THREE.Vector3 = new THREE.Vector3();
@@ -63,6 +95,8 @@ export class GameEngine {
   bloomPass: UnrealBloomPass;
   world: CANNON.World;
   city: CityEnvironment;
+  delivery: DeliverySystem;
+  hangarUpgrades: HangarUpgrades = readHangarUpgrades();
 
   helicopter: Helicopter;
   enemies: Enemy[] = [];
@@ -108,7 +142,7 @@ export class GameEngine {
   aimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -35);
   mouseAimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -55);
   mouseAimValid: boolean = false;
-  autoAimTarget: Enemy | null = null;
+  autoAimTarget: Enemy | Objective | null = null;
   lastCollisionDamageTime = 0;
   // Trailing smoke column after a hard building crash
   crashSmokeTimer: number = 0;
@@ -117,12 +151,18 @@ export class GameEngine {
   raycaster: THREE.Raycaster = new THREE.Raycaster();
   mousePlane: THREE.Plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -26);
   mouseNDC: THREE.Vector2 = new THREE.Vector2(0, 0);
+  private worldUp = new THREE.Vector3(0, 1, 0);
+  private mouseAimScratch = new THREE.Vector3();
+  private muzzlePositionScratch = new THREE.Vector3();
+  private muzzleDirectionScratch = new THREE.Vector3();
 
   targetGroup: THREE.Group;
   innerRing: THREE.Mesh;
   outerRing: THREE.Mesh;
 
-  animationFrame = 0;
+  private animationFrameId: number | null = null;
+  private frameCount = 0;
+  private running = false;
   lightningTimeout: number | null = null;
   disposed = false;
   isPlaying = false;
@@ -146,7 +186,6 @@ export class GameEngine {
   private memMonTimer = 0;
   isFiringMouse = false;
   isFiringGamepad = false;
-  cameraShake = 0;
   score = 0;
   totalKills = 0;
   shotsFired = 0;
@@ -157,22 +196,8 @@ export class GameEngine {
   maxFuel = 100;
   fuelDrainPerSecond = 0.85;
 
-  // Camera shake: the base camera position is kept separate from the shake
-  // offset so a decaying shake never corrupts the follow-lerp base or the
-  // occlusion ray origin (Pass 3 ghosting). Shake is composed per-frame as
-  // base + offset and decays frame-rate-independently.
+  // Stable camera state. No random or impulse offset is ever composed onto it.
   private baseCamPos = new THREE.Vector3(0, 62, 46);
-  private shakeOffset = new THREE.Vector3();
-  private static readonly SHAKE_DECAY_RATE = 12; // per second, exp decay
-
-  // Phase 3 — ONE controlled camera-impulse system. Only heavy one-shot
-  // events call addCameraImpulse (bomb, boss slam, major collapse, heavy hit,
-  // crash). Machine-gun shots, normal bullets, movement, rotors, pickups and
-  // small explosions never set it. The value is set once (strongest wins while
-  // decaying) and the camera applies a restrained, X/Y-only positional offset
-  // that decays smoothly to zero — the base follow is never modified.
-  private static readonly CAMERA_IMPULSE_SCALE = 0.4; // restrain amplitude
-  private static readonly CAMERA_IMPULSE_MAX = 3.2; // absolute cap
   lastStatsHealth = -1;
   lastStatsFuel = -1;
   lastUiUpdateTime = -Infinity;
@@ -198,6 +223,9 @@ export class GameEngine {
   // tick (frame budget = 1) so large groups stream in instead of constructing
   // several full procedural models in a single frame.
   private pendingSpawns = 0;
+  /** Variant requests queued for the current burst — squads push several,
+   *  drained one per cadence tick (bounded, cleared on restart). */
+  private pendingVariantQueue: EnemyVariant[] = [];
   /** Phase 3: lightweight event/escort spawn descriptors (no Enemy is
    *  constructed until drained) so convoy ambushes, air raids and boss escorts
    *  stagger across frames instead of spiking one frame. */
@@ -208,13 +236,13 @@ export class GameEngine {
     y: number;
     modifier?: EnemyModifier;
     pattern?: AttackPattern;
+    variant?: EnemyVariant;
   }> = [];
 
-  // Destroyable objectives (SAM sites, radar towers, ammo depots)
+  // Destroyable combat objectives. Cargo depots live in DeliverySystem instead.
   objectives: Objective[] = [];
   samSuppressionTimer: number = 0; // enemy fire-rate debuff while > 0
   samActive: boolean = false; // any SAM site alive boosts enemy fire rate
-  samFireTimer: number = 0;
 
   // Weapon XP & levels
   weaponXp: Map<WeaponType, number> = new Map();
@@ -246,6 +274,33 @@ export class GameEngine {
   // Afterburner (risk/reward)
   afterburnerActive: boolean = false;
   afterburnerDrainPerSecond: number = 3.2;
+  private afterburnerEffectTimer = 0;
+
+  // Run-scoped tactical systems. These never round-trip through React per frame.
+  countermeasures = new CountermeasureState(countermeasureConfig(0));
+  private decoyTarget: { body: CANNON.Body; active: boolean } | null = null;
+  private flareEffectTimer = 0;
+  private lastMissileWarningTime = -Infinity;
+  threatPoints = 0;
+  threatLevel: ThreatLevel = 1;
+  unsecuredCredits = 0;
+  deliveriesCompleted = 0;
+  samSitesDestroyed = 0;
+  private extractionMarker: THREE.Group | null = null;
+  private extractionPosition: THREE.Vector3 | null = null;
+  private extractionProgress = 0;
+  private extractionOfferLevel = 1;
+  private extractionOfferTime = 0;
+  private extractionPressure = false;
+  /** Brief green radar-sweep rings that ping outward when the LZ offer
+   *  appears, so the pad draws the eye from far away. Owned by the marker
+   *  group (disposed by clearExtraction); this array just drops the refs. */
+  private extractionPulseRings: THREE.Mesh[] = [];
+  private extractionPulseTimer = 0;
+  private static readonly EXTRACTION_PULSE_DURATION = 2.0;
+  private static readonly EXTRACTION_PULSE_RADIUS = 130;
+  /** Horizontal radius of the extraction zone (must match the inside check). */
+  private static readonly EXTRACTION_ZONE_RADIUS = 26;
 
   // Power-up System
   powerups: PowerUp[] = [];
@@ -315,6 +370,7 @@ export class GameEngine {
   }
 
   // Dash variables
+  dashState: DashState = "READY";
   dashCooldownTimer: number = 0;
   dashActiveTimer: number = 0;
   dashDirection: CANNON.Vec3 = new CANNON.Vec3();
@@ -391,8 +447,12 @@ export class GameEngine {
     this.composer.addPass(outputPass);
 
     this.world = new CANNON.World();
-    this.world.gravity.set(0, -9.82, 0);
+    // Player altitude is controlled explicitly; zero world gravity keeps hover
+    // deterministic across Cannon's variable number of fixed substeps.
+    this.world.gravity.set(0, 0, 0);
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
+    this.world.defaultContactMaterial.friction = 0;
+    this.world.defaultContactMaterial.restitution = 0;
 
     // Pass 8 lighting: warm key + neutral ambient + cool fill. Warm sunlit
     // faces against cool shadow faces gives every low-poly box a clear
@@ -464,6 +524,30 @@ export class GameEngine {
     this.audio = new AudioManager();
     this.applySettings();
 
+    this.delivery = new DeliverySystem(
+      this.scene,
+      this.city.chunkDepth,
+      (chunkId) => this.city.getDepotHub(chunkId),
+      {
+        announce: (text, sub, color) => this.announce(text, sub, color),
+        creditsChanged: () => this.updateUI(performance.now() / 1000),
+        settleRewards: (contract, earnedTimeBonus) => {
+          const extras = (earnedTimeBonus ? contract.bonusReward : 0) + contract.samRiskBonus;
+          return {
+            secured: contract.rewardCredits,
+            unsecured: extras + threatBonusFor(contract.rewardCredits, this.threatLevel),
+          };
+        },
+        completed: (contract, _secured, unsecured) => {
+          this.unsecuredCredits += unsecured;
+          this.deliveriesCompleted++;
+          this.addThreat(contract.difficulty === "HIGH_VALUE" ? 14 : contract.difficulty === "RISKY" ? 9 : 6);
+          if (contract.cargoType === "AMMUNITION") this.countermeasures.replenish(1);
+        },
+      },
+    );
+    this.delivery.setCarrierRoot(this.helicopter.mesh);
+
     // Dynamic Crosshair Reticle
     this.targetGroup = new THREE.Group();
     this.targetGroup.position.set(this.aimPoint.x, 26.2, this.aimPoint.z);
@@ -511,6 +595,7 @@ export class GameEngine {
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("wheel", this.onWheel, { passive: false });
     window.addEventListener("blur", this.onWindowBlur);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     window.addEventListener("helistrike:left-stick", this.onLeftStick);
     window.addEventListener("helistrike:right-stick", this.onRightStick);
     window.addEventListener("gamepadconnected", this.onGamepadConnected);
@@ -521,6 +606,7 @@ export class GameEngine {
     window.addEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.addEventListener("helistrike:player-model", this.onPlayerModelChanged);
     window.addEventListener("helistrike:env-debug", this.onEnvDebug);
+    window.addEventListener("helistrike:countermeasure", this.onCountermeasureEvent);
 
     this.lastTime = performance.now() / 1000;
 
@@ -530,8 +616,17 @@ export class GameEngine {
       this.weapons.set(wt as WeaponType, config);
     });
 
+    this.cameraLookAtTarget.set(0, 28, -9);
     this.updateUI(this.lastTime); // Init UI
-    this.tick();
+    this.start();
+  }
+
+  /** Start the one authoritative RAF loop. Safe under React StrictMode/remounts. */
+  start() {
+    if (this.disposed || this.running) return;
+    this.running = true;
+    this.lastTime = performance.now() / 1000;
+    this.animationFrameId = requestAnimationFrame(this.tick);
   }
 
   startGame() {
@@ -555,6 +650,9 @@ export class GameEngine {
     this.leftStick = { x: 0, y: 0, active: false };
     this.rightStick = { x: 0, y: 0, active: false };
     this.movementKeys.clear();
+    this.keyboardVelocity.set(0, 0);
+    this.verticalInput = 0;
+    this.afterburnerActive = false;
     this.lastTime = performance.now() / 1000;
     this.updateUI(this.lastTime);
     if (paused) {
@@ -565,6 +663,9 @@ export class GameEngine {
   }
 
   resetGame() {
+    this.clearExtraction();
+    if (this.decoyTarget) this.decoyTarget.active = false;
+    this.delivery.reset();
     this.city.reset(this.world);
     for (const enemy of this.enemies) {
       enemy.destroy();
@@ -596,8 +697,26 @@ export class GameEngine {
     this.rightStick = { x: 0, y: 0, active: false };
     this.isFiringMouse = false;
     this.isFiringGamepad = false;
-    this.cameraShake = 0;
-    this.baseCamPos.copy(this.camera.position);
+    this.baseCamPos.set(0, 62, 46);
+    this.camera.position.copy(this.baseCamPos);
+    this.cameraLookAtTarget.set(0, 28, -9);
+    this.hangarUpgrades = readHangarUpgrades();
+    this.countermeasures = new CountermeasureState(
+      countermeasureConfig(this.hangarUpgrades.countermeasures),
+    );
+    this.decoyTarget = null;
+    this.flareEffectTimer = 0;
+    this.lastMissileWarningTime = -Infinity;
+    this.threatPoints = 0;
+    this.threatLevel = 1;
+    this.unsecuredCredits = 0;
+    this.deliveriesCompleted = 0;
+    this.samSitesDestroyed = 0;
+    this.extractionProgress = 0;
+    this.extractionOfferLevel = 1;
+    this.extractionOfferTime = 0;
+    this.extractionPressure = false;
+    this.maxHealth = 100 + this.hangarUpgrades.armor * 10;
     this.score = 0;
     this.totalKills = 0;
     this.shotsFired = 0;
@@ -624,6 +743,7 @@ export class GameEngine {
     this.waveMessage = "GET READY";
     // Phase 3: pending spawns must not survive a restart.
     this.pendingSpawns = 0;
+    this.pendingVariantQueue.length = 0;
     this.pendingEventSpawns.length = 0;
     this.weather.stormIntensity = 0;
     this.weather.targetIntensity = 0;
@@ -643,6 +763,14 @@ export class GameEngine {
     this.speedBoostTimer = 0;
     this.hitMarkerTimer = 0;
     this.powerupSpawnTimer = 0;
+    this.verticalInput = 0;
+    this.gamepadMove.x = 0;
+    this.gamepadMove.z = 0;
+    this.dashState = "READY";
+    this.dashCooldownTimer = 0;
+    this.dashActiveTimer = 0;
+    this.dashDirection.set(0, 0, 0);
+    this.lastTapTime = {};
 
     this.isPaintingLocks = false;
     this.salvoLocks = [];
@@ -654,7 +782,6 @@ export class GameEngine {
     this.minibossSpawnedThisWave = false;
     this.samSuppressionTimer = 0;
     this.samActive = false;
-    this.samFireTimer = 0;
     this.weaponXp = new Map();
     this.weaponLevels = new Map();
     this.lastFiredWeapon = WeaponType.MACHINE_GUN;
@@ -676,14 +803,22 @@ export class GameEngine {
     this.lastKillTime = 0;
     this.announceQueue = [];
     this.afterburnerActive = false;
+    this.afterburnerEffectTimer = 0;
+    this.bossIntroActive = false;
+    this.bossIntroStage = 0;
 
     this.updateUI(performance.now() / 1000);
     this.emitStatsIfChanged(true);
   }
 
   dispose() {
-    if (this.disposed) return; // Phase 1: safe to call more than once
+    this.destroy();
+  }
+
+  destroy() {
+    if (this.disposed) return;
     this.disposed = true;
+    this.running = false;
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerdown", this.onPointerDown);
@@ -693,6 +828,7 @@ export class GameEngine {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("blur", this.onWindowBlur);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
     window.removeEventListener("helistrike:left-stick", this.onLeftStick);
     window.removeEventListener("helistrike:right-stick", this.onRightStick);
     window.removeEventListener("gamepadconnected", this.onGamepadConnected);
@@ -703,6 +839,8 @@ export class GameEngine {
     window.removeEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.removeEventListener("helistrike:player-model", this.onPlayerModelChanged);
     window.removeEventListener("helistrike:env-debug", this.onEnvDebug);
+    window.removeEventListener("helistrike:countermeasure", this.onCountermeasureEvent);
+    this.clearExtraction();
     this.clearSalvoIndicators();
     this.helicopter.body.removeEventListener(
       "collide",
@@ -712,8 +850,22 @@ export class GameEngine {
       window.clearTimeout(this.lightningTimeout);
       this.lightningTimeout = null;
     }
-    cancelAnimationFrame(this.animationFrame);
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    this.renderer.setAnimationLoop(null);
     this.audio.dispose();
+    this.city.onHonk = null;
+    this.city.onBuildingDestroyed = null;
+    for (const enemy of this.enemies) enemy.destroy();
+    for (const objective of this.objectives) objective.destroy();
+    for (const powerup of this.powerups) powerup.destroy(this.scene);
+    this.delivery.dispose();
+    this.helicopter.destroy();
+    disposeObject3D(this.scene);
+    this.scene.clear();
+    this.composer.dispose();
     this.renderer.dispose();
   }
 
@@ -726,9 +878,10 @@ export class GameEngine {
   };
 
   getMaxPixelRatio() {
-    return this.settings.quality === 'high'
-      ? Math.min(window.devicePixelRatio, 2)
-      : Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO);
+    const dpr = window.devicePixelRatio;
+    if (this.settings.quality === 'high') return Math.min(dpr, 2);
+    if (this.settings.quality === 'medium') return Math.min(dpr, 1.5);
+    return Math.min(dpr, MAX_RENDER_PIXEL_RATIO);
   }
 
   /** Live renderer stats for the on-screen perf overlay (zero GL cost — reads three's counters). */
@@ -809,14 +962,23 @@ export class GameEngine {
     return { x: 0, z: -1 };
   }
 
+  private autoAimPosition(target: Enemy | Objective) {
+    return target instanceof Objective ? target.targetPoint : target.body.position;
+  }
+
   private findAutoAimTarget(maxDistance = 245, useMouseCone = false) {
-    let bestEnemy: Enemy | null = null;
+    let bestTarget: Enemy | Objective | null = null;
     let bestScore = Infinity;
     const origin = this.helicopter.body.position;
     const forward = this.getFallbackFireDirection();
 
     for (const enemy of this.enemies) {
-      if (!enemy.active) continue;
+      if (
+        !enemy.active ||
+        !Number.isFinite(enemy.body.position.x) ||
+        !Number.isFinite(enemy.body.position.y) ||
+        !Number.isFinite(enemy.body.position.z)
+      ) continue;
       const dx = enemy.body.position.x - origin.x;
       const dz = enemy.body.position.z - origin.z;
       const dy = Math.abs(enemy.body.position.y - origin.y);
@@ -851,30 +1013,83 @@ export class GameEngine {
 
       if (score < bestScore) {
         bestScore = score;
-        bestEnemy = enemy;
+        bestTarget = enemy;
       }
     }
 
-    return bestEnemy;
+    // SAM sites are deliberate high-value targets, but normal enemies retain
+    // priority unless the launcher is actively tracking or locking the player.
+    for (const objective of this.objectives) {
+      if (!objective.active || objective.type !== ObjectiveType.SAM_SITE) continue;
+      const targetPos = objective.targetPoint;
+      const dx = targetPos.x - origin.x;
+      const dz = targetPos.z - origin.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq < 12 || distSq > maxDistance * maxDistance) continue;
+      const dist = Math.sqrt(distSq);
+      const aheadBias = (dx / dist) * forward.x + (dz / dist) * forward.z;
+      if (useMouseCone && aheadBias < 0.28) continue;
+      const lateralDistance = Math.abs(dx * forward.z - dz * forward.x);
+      if (useMouseCone && lateralDistance > 46 + dist * 0.12) continue;
+      const cursorDistance = this.mouseAimValid
+        ? Math.hypot(targetPos.x - this.mouseAimPoint.x, targetPos.z - this.mouseAimPoint.z)
+        : 0;
+      const threatening = objective.samState === SamState.LOCKING || objective.samState === SamState.TRACKING;
+      const score = distSq * (useMouseCone ? 0.3 : 1)
+        + lateralDistance * (useMouseCone ? 14 : 1.9)
+        + cursorDistance * (useMouseCone ? 4.5 : 0)
+        + (aheadBias < -0.25 ? 9000 : 0)
+        + (threatening ? -2600 : 1800);
+      if (score < bestScore) {
+        bestScore = score;
+        bestTarget = objective;
+      }
+    }
+
+    return bestTarget;
+  }
+
+  private isAutoAimTargetValid(enemy: Enemy | Objective | null, maxDistance: number, useMouseCone: boolean) {
+    const targetPos = enemy ? this.autoAimPosition(enemy) : null;
+    if (
+      !enemy?.active ||
+      !targetPos ||
+      !Number.isFinite(targetPos.x) ||
+      !Number.isFinite(targetPos.y) ||
+      !Number.isFinite(targetPos.z)
+    ) return false;
+    const dx = targetPos.x - this.helicopter.body.position.x;
+    const dz = targetPos.z - this.helicopter.body.position.z;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) return false;
+    const distSq = dx * dx + dz * dz;
+    const retainedRange = maxDistance * 1.08;
+    if (distSq < 12 || distSq > retainedRange * retainedRange) return false;
+    if (!useMouseCone) return true;
+    const distance = Math.sqrt(distSq);
+    const forward = this.getFallbackFireDirection();
+    const aheadBias = (dx / distance) * forward.x + (dz / distance) * forward.z;
+    const lateralDistance = Math.abs(dx * forward.z - dz * forward.x);
+    return aheadBias >= 0.12 && lateralDistance <= 60 + distance * 0.16;
   }
 
   private updateAutoAim() {
     const aimHeight = this.helicopter.body.position.y;
-    // Auto-Aim setting: lock the guns onto the best enemy at all times (wide search),
-    // so the chin turret tracks while the body flies on course.
-    this.autoAimTarget = this.settings.autoAim
-      ? this.findAutoAimTarget(255, false)
-      : this.mouseAimValid
-        ? this.findAutoAimTarget(225, true)
-        : this.findAutoAimTarget(235, false);
+    const maxDistance = this.settings.autoAim ? 255 : this.mouseAimValid ? 225 : 235;
+    const useMouseCone = !this.settings.autoAim && this.mouseAimValid;
+    if (!this.isAutoAimTargetValid(this.autoAimTarget, maxDistance, useMouseCone)) {
+      this.autoAimTarget = this.findAutoAimTarget(maxDistance, useMouseCone);
+    }
 
     if (this.autoAimTarget) {
-      const targetPos = this.autoAimTarget.body.position;
+      const targetPos = this.autoAimPosition(this.autoAimTarget);
+      if (this.autoAimTarget instanceof Objective) this.autoAimTarget.setTargeted(true);
       this.aimPoint.set(targetPos.x, aimHeight, targetPos.z);
       this.helicopter.setGunAim(targetPos.x, targetPos.y, targetPos.z, true);
       this.targetGroup.visible = true;
       this.targetGroup.position.set(targetPos.x, targetPos.y + 1.2, targetPos.z);
-      const scale = this.autoAimTarget.type === EnemyType.TANK || this.autoAimTarget.type === EnemyType.BOSS ? 1.5 : 1.0;
+      const scale = this.autoAimTarget instanceof Objective
+        ? 1.35
+        : this.autoAimTarget.type === EnemyType.TANK || this.autoAimTarget.type === EnemyType.BOSS ? 1.5 : 1.0;
       this.targetGroup.scale.setScalar(scale);
     } else if (this.mouseAimValid) {
       // No enemy in range — the chin gun physically tracks the mouse aim
@@ -911,10 +1126,10 @@ export class GameEngine {
     );
 
     const aimHeight = this.helicopter.body.position.y;
-    this.mousePlane.set(new THREE.Vector3(0, 1, 0), -aimHeight);
+    this.mousePlane.set(this.worldUp, -aimHeight);
     this.raycaster.setFromCamera(this.mouseNDC, this.camera);
 
-    const target = new THREE.Vector3();
+    const target = this.mouseAimScratch;
     if (!this.raycaster.ray.intersectPlane(this.mousePlane, target)) return;
 
     let dx = target.x - this.helicopter.body.position.x;
@@ -1014,16 +1229,235 @@ export class GameEngine {
     this.switchWeapon(weaponTypes[nextIdx]);
   };
 
-  onWindowBlur = () => {
+  private resetTransientInput() {
     this.isFiringMouse = false;
     this.isFiringGamepad = false;
+    this.isPaintingLocks = false;
     this.movementKeys.clear();
     this.leftStick = { x: 0, y: 0, active: false };
     this.rightStick = { x: 0, y: 0, active: false };
-    if (this.isPlaying) {
+    this.keyboardVelocity.set(0, 0);
+    this.verticalInput = 0;
+    this.gamepadMove.x = 0;
+    this.gamepadMove.z = 0;
+    this.afterburnerActive = false;
+  }
+
+  onWindowBlur = () => {
+    this.resetTransientInput();
+    this.lastTime = performance.now() / 1000;
+    if (this.isPlaying) window.dispatchEvent(new CustomEvent("helistrike:autopause"));
+  };
+
+  onVisibilityChange = () => {
+    this.resetTransientInput();
+    this.lastTime = performance.now() / 1000;
+    if (document.hidden && this.isPlaying) {
       window.dispatchEvent(new CustomEvent("helistrike:autopause"));
     }
   };
+
+  onCountermeasureEvent = () => {
+    if (this.isPlaying) this.deployCountermeasure(performance.now() / 1000);
+  };
+
+  private deployCountermeasure(time: number) {
+    if (!this.countermeasures.deploy(time)) {
+      this.announce(
+        this.countermeasures.charges <= 0 ? "FLARES EMPTY" : "FLARES RECHARGING",
+        this.countermeasures.charges <= 0 ? "Find ammunition supplies" : `${this.countermeasures.cooldownRemaining.toFixed(1)}s`,
+        "#ffbd3f",
+      );
+      return false;
+    }
+
+    const player = this.helicopter.body.position;
+    const velocity = this.helicopter.body.velocity;
+    const horizontalSpeed = Math.hypot(velocity.x, velocity.z);
+    const backX = horizontalSpeed > 2 ? -velocity.x / horizontalSpeed : Math.sin(this.helicopter.mesh.rotation.y);
+    const backZ = horizontalSpeed > 2 ? -velocity.z / horizontalSpeed : Math.cos(this.helicopter.mesh.rotation.y);
+    const body = new CANNON.Body({ mass: 0 });
+    body.position.set(player.x + backX * 9, player.y - 2.5, player.z + backZ * 9);
+    if (this.decoyTarget) this.decoyTarget.active = false;
+    this.decoyTarget = { body, active: true };
+    this.flareEffectTimer = this.countermeasures.config.activeWindow;
+
+    let decoyed = 0;
+    for (const missile of this.enemyProjectiles.pool) {
+      if (!missile.active || missile.homingStrength <= 0 || missile.target?.body !== this.helicopter.body) continue;
+      const distance = Math.hypot(missile.pos.x - player.x, missile.pos.y - player.y, missile.pos.z - player.z);
+      if (distance > 190) continue; // an early flare does not guarantee safety
+      const closeEnough = distance <= 135;
+      const outerChance = this.countermeasures.config.effectiveness * (1 - (distance - 135) / 55);
+      if (closeEnough || Math.random() < outerChance) {
+        if (missile.retargetToDecoy(this.decoyTarget)) decoyed++;
+      }
+    }
+    this.audio.playCountermeasure();
+    if (decoyed > 0) {
+      this.announce("MISSILE DECOYED", decoyed > 1 ? `${decoyed} threats diverted` : "Lock broken", "#55f2c2");
+      this.audio.playLockBreak();
+    }
+    return true;
+  }
+
+  private updateCountermeasures(delta: number, time: number) {
+    this.countermeasures.update(delta);
+    if (!this.decoyTarget) return;
+    if (this.countermeasures.activeTimer <= 0) this.decoyTarget.active = false;
+    if (!this.decoyTarget.active) return;
+    this.decoyTarget.body.position.y -= 4.5 * delta;
+    this.flareEffectTimer = Math.max(0, this.flareEffectTimer - delta);
+    if (this.frameCount % 2 === 0) {
+      const p = this.decoyTarget.body.position;
+      this.particles.spawnSparks(p.x + (Math.random() - 0.5) * 5, p.y, p.z + (Math.random() - 0.5) * 5, time);
+      if (this.frameCount % 6 === 0) this.particles.spawnSmoke(p.x, p.y, p.z, time);
+    }
+  }
+
+  private addThreat(points: number) {
+    const previous = this.threatLevel;
+    this.threatPoints = Math.max(0, this.threatPoints + Math.max(0, points));
+    this.threatLevel = threatLevelForPoints(this.threatPoints);
+    if (this.threatLevel > previous) {
+      this.announce("THREAT LEVEL INCREASED", THREAT_NAMES[this.threatLevel - 1], this.threatLevel >= 4 ? "#ff3344" : "#ff9f43");
+      this.audio.playThreatLevel();
+    }
+  }
+
+  /** Animate the extraction spawn ping: staggered rings expand outward and
+   *  fade. Purely visual — never touches the pad's collision/zone logic. */
+  private updateExtractionPulse(delta: number) {
+    if (this.extractionPulseRings.length === 0) return;
+    this.extractionPulseTimer += delta;
+    let allDone = true;
+    for (const ring of this.extractionPulseRings) {
+      const local = this.extractionPulseTimer - ((ring.userData.pulseDelay as number) ?? 0);
+      if (local < 0) continue;
+      const t = Math.min(1, local / GameEngine.EXTRACTION_PULSE_DURATION);
+      if (t >= 1) {
+        ring.visible = false;
+        continue;
+      }
+      allDone = false;
+      const ease = 1 - Math.pow(1 - t, 3); // fast start, slow settle
+      ring.scale.setScalar(1 + ease * (GameEngine.EXTRACTION_PULSE_RADIUS - 1));
+      (ring.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - t);
+    }
+    if (allDone) this.extractionPulseRings.length = 0;
+  }
+
+  private updateThreatAndExtraction(delta: number, time: number) {
+    this.updateExtractionPulse(delta);
+    this.addThreat(delta * 0.18);
+    if (!this.extractionPosition && this.survivalTime >= 180 && this.threatLevel > this.extractionOfferLevel) {
+      this.spawnExtraction();
+      this.extractionOfferLevel = this.threatLevel;
+    }
+    if (!this.extractionPosition) return;
+    const player = this.helicopter.body.position;
+    if (!this.extractionPressure && (time - this.extractionOfferTime > 90 || this.extractionPosition.z > player.z + 350)) {
+      this.clearExtraction();
+      return;
+    }
+    const dx = player.x - this.extractionPosition.x;
+    const dz = player.z - this.extractionPosition.z;
+    const inside =
+      dx * dx + dz * dz <= GameEngine.EXTRACTION_ZONE_RADIUS * GameEngine.EXTRACTION_ZONE_RADIUS &&
+      Math.abs(player.y - this.extractionPosition.y) < 48;
+    if (inside) {
+      if (!this.extractionPressure) {
+        this.extractionPressure = true;
+        this.announce("EXTRACTING", this.delivery.isCarrying() ? "ACTIVE DELIVERY WILL BE ABANDONED" : "Hold position", "#55f2c2");
+        this.pendingSpawns = Math.min(this.pendingSpawns + 2, 4);
+      }
+      this.extractionProgress = Math.min(1, this.extractionProgress + delta / 2.4);
+      if (this.extractionProgress >= 1) this.completeExtraction(time);
+    } else {
+      this.extractionPressure = false;
+      this.extractionProgress = Math.max(0, this.extractionProgress - delta * 0.18);
+    }
+  }
+
+  private spawnExtraction() {
+    this.clearExtraction();
+    const player = this.helicopter.body.position;
+    // Prefer a real rooftop LZ (helipad-tower deck, then a flat rooftop the
+    // pad is painted on); fall back to the lowest open surface on the usual
+    // lanes (waterfront / yards). Distance/safety rules are unchanged.
+    const spot = this.city.findExtractionSpot(player.z);
+    this.extractionPosition = new THREE.Vector3(spot.x, Math.max(1, spot.height + 1), spot.z);
+    this.extractionOfferTime = performance.now() / 1000;
+    const group = new THREE.Group();
+    group.position.copy(this.extractionPosition);
+    // Compact pad on rooftops, full-size pad on open ground.
+    const rooftop = spot.kind !== "ground";
+    const scale = rooftop ? 0.42 : 1;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(20 * scale, 23 * scale, 32), createGlowMaterial(0x55f2a2, 0.72));
+    ring.rotation.x = -Math.PI / 2;
+    const barA = new THREE.Mesh(new THREE.BoxGeometry(3 * scale, 0.25, 18 * scale), createGlowMaterial(0x55f2a2, 0.9));
+    const barB = barA.clone();
+    barA.position.x = -7 * scale;
+    barB.position.x = 7 * scale;
+    const cross = new THREE.Mesh(new THREE.BoxGeometry(14 * scale, 0.25, 3 * scale), createGlowMaterial(0x55f2a2, 0.9));
+    group.add(ring, barA, barB, cross);
+    if (rooftop) {
+      // Painted landing deck + H marking so the roof reads as a real helipad.
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(9, 0.22, 9), new THREE.MeshLambertMaterial({ color: 0x1b2740 }));
+      deck.position.y = -1.15;
+      group.add(deck);
+      // Vertical beacon so the rooftop LZ reads from street level.
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(1.6 * scale, 30, 1.6 * scale), createGlowMaterial(0x55f2a2, 0.16));
+      beam.position.y = -12;
+      group.add(beam);
+    }
+    // Brief green light-pulse sweep: two staggered rings ping outward from
+    // the pad and fade, telegraphing the offer from far away. Fresh materials
+    // (createGlowMaterial) so opacity animation never touches a shared cache.
+    this.extractionPulseRings.length = 0;
+    for (let i = 0; i < 2; i++) {
+      const pulseRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.72, 1.0, 48),
+        createGlowMaterial(0x55f2a2, 0.85),
+      );
+      pulseRing.rotation.x = -Math.PI / 2;
+      pulseRing.position.y = 1.6 + i * 0.06;
+      pulseRing.userData.pulseDelay = i * 0.35;
+      group.add(pulseRing);
+      this.extractionPulseRings.push(pulseRing);
+    }
+    this.extractionPulseTimer = 0;
+    this.scene.add(group);
+    this.extractionMarker = group;
+    this.announce(
+      "EXTRACTION AVAILABLE",
+      rooftop ? `Rooftop LZ · Secure +${this.unsecuredCredits} CR` : `Secure +${this.unsecuredCredits} CR`,
+      "#55f2c2",
+    );
+  }
+
+  private clearExtraction() {
+    if (this.extractionMarker) {
+      this.extractionMarker.parent?.remove(this.extractionMarker);
+      disposeObject3D(this.extractionMarker);
+    }
+    this.extractionMarker = null;
+    this.extractionPulseRings.length = 0;
+    this.extractionPosition = null;
+    this.extractionProgress = 0;
+    this.extractionPressure = false;
+  }
+
+  private completeExtraction(time: number) {
+    const before = this.unsecuredCredits;
+    const settlement = settleExtraction(this.delivery.credits, before);
+    this.delivery.awardCredits(settlement.securedBonus);
+    this.unsecuredCredits = settlement.unsecured;
+    this.delivery.fail("EXTRACTED");
+    this.clearExtraction();
+    this.announce("EXTRACTION SUCCESSFUL", `+${settlement.securedBonus} CR secured`, "#55f2c2");
+    this.dispatchGameOver(time, "EXTRACTED", before);
+  }
 
   onKeyDown = (e: KeyboardEvent) => {
     if (!this.isPlaying) return;
@@ -1085,6 +1519,8 @@ export class GameEngine {
     if (key === "4") this.switchWeapon(WeaponType.SHOTGUN);
     if (key === "r") this.startReload();
 
+    if (key === "c" && !e.repeat) this.deployCountermeasure(performance.now() / 1000);
+
     if (key === "q") {
       this.startPaintingLocks();
     }
@@ -1099,10 +1535,13 @@ export class GameEngine {
   };
 
   triggerDash(dx: number, dz: number) {
-    if (this.dashCooldownTimer > 0 || this.dashActiveTimer > 0) return;
-    this.dashCooldownTimer = 0.75;
-    this.dashActiveTimer = 0.28;
+    if (this.dashState !== "READY") return;
+    this.dashState = "DASHING";
+    this.dashCooldownTimer = 0;
+    this.dashActiveTimer = MOVEMENT_CONFIG.dashDuration;
     this.dashDirection.set(dx, 0, dz).normalize();
+    this.helicopter.body.velocity.x = this.dashDirection.x * MOVEMENT_CONFIG.dashSpeed;
+    this.helicopter.body.velocity.z = this.dashDirection.z * MOVEMENT_CONFIG.dashSpeed;
     this.helicopter.triggerDash(dx, dz);
   }
 
@@ -1129,126 +1568,115 @@ export class GameEngine {
   };
 
   onHelicopterCollide = (e: any) => {
-    // getImpactVelocityAlongNormal() reads 0 in this CANNON setup, so compute the
-    // closing speed ourselves: helicopter velocity dotted with the contact normal.
-    let impact = 0;
-    if (e.contact) {
-      const n = e.contact.ni;
-      const v = this.helicopter.body.velocity;
-      impact = Math.abs(v.x * n.x + v.y * n.y + v.z * n.z);
-    }
-    if (impact < 0.01) {
-      const v = this.helicopter.body.velocity;
-      impact = Math.sqrt(v.x * v.x + v.z * v.z);
-    }
-    const now = performance.now() / 1000;
-    // Objectives are destructible targets, not obstacles — never damage the player
+    // Objectives are destructible targets, not obstacles.
     const isObjective =
       e.body && this.objectives.some((o) => o.active && o.body === e.body);
     if (isObjective) return;
+
+    const body = this.helicopter.body;
+    const velocity = body.velocity;
     const isBuilding = e.body && e.body.type === CANNON.Body.STATIC;
+    let outwardX = 0;
+    let outwardY = 0;
+    let outwardZ = 0;
+    let hasContactNormal = false;
 
+    if (e.contact) {
+      const normal = e.contact.ni;
+      const direction = e.contact.bi === body ? -1 : 1;
+      outwardX = normal.x * direction;
+      outwardY = normal.y * direction;
+      outwardZ = normal.z * direction;
+      hasContactNormal =
+        Number.isFinite(outwardX) &&
+        Number.isFinite(outwardY) &&
+        Number.isFinite(outwardZ);
+    } else if (isBuilding && e.body) {
+      const dx = body.position.x - e.body.position.x;
+      const dz = body.position.z - e.body.position.z;
+      const length = Math.hypot(dx, dz);
+      if (length > 0.001) {
+        outwardX = dx / length;
+        outwardZ = dz / length;
+        hasContactNormal = true;
+      }
+    }
+
+    const outwardSpeed = hasContactNormal
+      ? velocity.x * outwardX + velocity.y * outwardY + velocity.z * outwardZ
+      : 0;
+    const impact = hasContactNormal
+      ? Math.max(0, -outwardSpeed)
+      : Math.hypot(velocity.x, velocity.z);
+
+    if (isBuilding) {
+      // Resolve every wall contact, not only damage ticks. Remove the inward
+      // normal component while preserving tangential speed for controlled slides.
+      const horizontalNormalLength = Math.hypot(outwardX, outwardZ);
+      if (horizontalNormalLength > 0.1 && outwardSpeed < 0) {
+        const nx = outwardX / horizontalNormalLength;
+        const nz = outwardZ / horizontalNormalLength;
+        const inwardHorizontalSpeed = velocity.x * nx + velocity.z * nz;
+        if (inwardHorizontalSpeed < 0) {
+          velocity.x -= nx * inwardHorizontalSpeed;
+          velocity.z -= nz * inwardHorizontalSpeed;
+        }
+        body.position.x += nx * 0.025;
+        body.position.z += nz * 0.025;
+      }
+
+      if (this.dashState === "DASHING") {
+        this.dashState = "COOLDOWN";
+        this.dashActiveTimer = 0;
+        this.dashCooldownTimer = MOVEMENT_CONFIG.dashCooldown;
+        this.helicopter.dashTimer = 0;
+      }
+    }
+
+    const now = performance.now() / 1000;
     if (
-      (impact > 3.5 || isBuilding) &&
-      now - this.lastCollisionDamageTime > 1.0 &&
-      this.health > 0
-    ) {
-      let dmg = Math.min(14, Math.max(3, impact * 1.1));
+      impact <= 3.5 ||
+      now - this.lastCollisionDamageTime <= 1.0 ||
+      this.health <= 0
+    ) return;
 
-      if (isBuilding) {
-        // Crash severity: a gentle scrape costs a little, a full-speed slam hurts
-        const isSlam = impact >= 12;
-        // A dash must never plow through buildings: cancel it on a hard slam so the
-        // rebound + PD controller take over cleanly (no repeated slams, no stuck wall).
-        if (isSlam && this.dashActiveTimer > 0) {
-          this.dashActiveTimer = 0;
-          this.dashCooldownTimer = 0.75;
-          this.helicopter.dashTimer = 0;
-        }
-        dmg = isSlam
-          ? Math.min(28, Math.round(10 + impact * 0.8))
-          : Math.min(12, Math.round(3 + impact * 0.7));
+    let dmg = Math.min(14, Math.max(3, impact * 1.1));
+    if (isBuilding) {
+      const isSlam = impact >= 12;
+      dmg = isSlam
+        ? Math.min(28, Math.round(10 + impact * 0.8))
+        : Math.min(12, Math.round(3 + impact * 0.7));
 
-        // Calculate rebound normal pointing AWAY from building
-        let nx = 0;
-        let nz = 0;
-        if (e.contact) {
-          const isBi = e.contact.bi === this.helicopter.body;
-          const normal = e.contact.ni;
-          nx = isBi ? -normal.x : normal.x;
-          nz = isBi ? -normal.z : normal.z;
-        }
+      const horizontalNormalLength = Math.hypot(outwardX, outwardZ);
+      const nx = horizontalNormalLength > 0.1 ? outwardX / horizontalNormalLength : 0;
+      const nz = horizontalNormalLength > 0.1 ? outwardZ / horizontalNormalLength : 0;
+      const spawnX = body.position.x + nx * 3.0;
+      const spawnY = body.position.y;
+      const spawnZ = body.position.z + nz * 3.0;
 
-        // Fallback if normal calculations yield zero or e.contact is missing
-        if (nx === 0 && nz === 0 && e.body) {
-          const dx = this.helicopter.body.position.x - e.body.position.x;
-          const dz = this.helicopter.body.position.z - e.body.position.z;
-          const len = Math.sqrt(dx * dx + dz * dz);
-          if (len > 0) {
-            nx = dx / len;
-            nz = dz / len;
-          } else {
-            nz = 1.0;
-          }
-        }
-
-        // Ensure normal is unit vector
-        const normalLen = Math.sqrt(nx * nx + nz * nz);
-        if (normalLen > 0) {
-          nx /= normalLen;
-          nz /= normalLen;
-        } else {
-          nz = 1.0;
-        }
-
-        // Offset explosion spawn slightly outside building bounding box
-        const spawnX = this.helicopter.body.position.x + nx * 3.0;
-        const spawnY = this.helicopter.body.position.y;
-        const spawnZ = this.helicopter.body.position.z + nz * 3.0;
-
-        if (isSlam) {
-          // Full crash: debris burst + hit-stop + heavy shake + trailing smoke
-          this.particles.spawnExplosion(spawnX, spawnY, spawnZ, 170, now, 48);
-          this.particles.spawnSparks(spawnX, spawnY, spawnZ, now);
-          this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
-          this.volumetricExplosions.spawn(spawnX, spawnY, spawnZ, 26, 8);
-          this.audio.playExplosion(1.3);
-          this.addCameraImpulse(8); // full crash — capped by CAMERA_IMPULSE_MAX
-          this.triggerHitStop(0.18, 0.06);
-          this.crashSmokeTimer = 1.1;
-          this.crashSmokePos = { x: spawnX, y: spawnY, z: spawnZ };
-          this.helicopter.triggerCrashTilt(Math.min(1, impact / 14));
-        } else {
-          // Scrape: sparks + smoke + light shake
-          this.particles.spawnSparks(spawnX, spawnY, spawnZ, now);
-          this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
-          this.audio.playHit();
-          // Scrape — no camera impulse (would re-arm while grinding a wall).
-          this.helicopter.triggerCrashTilt(0.35);
-        }
-
-        // Instantly shift position away from building to break contact and prevent stuck states
-        this.helicopter.body.position.x += nx * 2.5;
-        this.helicopter.body.position.z += nz * 2.5;
-
-        // Velocity rebound (harder the faster you hit)
-        const rebound = Math.min(58, 24 + impact * 1.4);
-        this.helicopter.body.velocity.x = nx * rebound;
-        this.helicopter.body.velocity.z = nz * rebound;
-
+      if (isSlam) {
+        this.particles.spawnExplosion(spawnX, spawnY, spawnZ, 170, now, 48);
+        this.particles.spawnSparks(spawnX, spawnY, spawnZ, now);
+        this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
+        this.volumetricExplosions.spawn(spawnX, spawnY, spawnZ, 26, 8);
+        this.audio.playExplosion(1.3);
+        this.triggerHitStop(0.12, 0.2);
+        this.crashSmokeTimer = 1.1;
+        this.crashSmokePos = { x: spawnX, y: spawnY, z: spawnZ };
       } else {
-
+        this.particles.spawnSparks(spawnX, spawnY, spawnZ, now);
+        this.particles.spawnSmoke(spawnX, spawnY, spawnZ, now);
         this.audio.playHit();
       }
-
-      if (this.dashActiveTimer > 0) {
-        dmg = 0;
-      }
-      this.health = Math.max(0, this.health - dmg);
-      this.helicopter.takeDamage(dmg);
-      this.lastCollisionDamageTime = now;
-      this.updateUI(now);
+    } else {
+      this.audio.playHit();
     }
+
+    if (this.dashActiveTimer > 0) dmg = 0;
+    this.health = Math.max(0, this.health - dmg);
+    this.helicopter.takeDamage(dmg);
+    this.lastCollisionDamageTime = now;
+    this.updateUI(now);
   };
 
   onGamepadConnected = (e: GamepadEvent) => {
@@ -1275,7 +1703,12 @@ export class GameEngine {
     if (detail.gamepadSensitivity !== undefined)
       next.gamepadSensitivity = THREE.MathUtils.clamp(detail.gamepadSensitivity, 0.4, 4);
     if (detail.quality !== undefined)
-      next.quality = detail.quality === 'high' ? 'high' : 'low';
+      next.quality =
+        detail.quality === 'high'
+          ? 'high'
+          : detail.quality === 'medium'
+            ? 'medium'
+            : 'low';
     if (detail.volume !== undefined)
       next.volume = THREE.MathUtils.clamp(detail.volume, 0, 1);
     if (detail.touchMode !== undefined) next.touchMode = detail.touchMode;
@@ -1324,20 +1757,13 @@ export class GameEngine {
   };
 
   private rebuildHelicopter() {
-    // Detach the old helicopter (dispose its GPU resources too — no leaks across rebuilds)
+    // Entity.destroy skips cached shared buffers, preventing remount/model-switch crashes.
     this.helicopter.body.removeEventListener("collide", this.onHelicopterCollide);
-    this.helicopter.mesh.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.geometry?.dispose();
-        const mat = child.material;
-        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-        else mat?.dispose();
-      }
-    });
     this.helicopter.destroy();
     // Build the newly selected model
     this.helicopter = new Helicopter(this.scene, this.world, this.playerModel);
     this.helicopter.body.addEventListener("collide", this.onHelicopterCollide);
+    this.delivery.setCarrierRoot(this.helicopter.mesh);
     this.movementTarget.set(0, 26, 0);
     this.updateUI(performance.now() / 1000);
   }
@@ -1458,23 +1884,21 @@ export class GameEngine {
     this.lastFiredWeapon = this.currentWeapon;
     this.lastFireTimestamp = time;
 
-    // Fire origin: the rotating chin turret whenever the gun is tracking an
-    // aim point (enemy auto-aim, mouse, or touch stick) — Machine Gun rounds
-    // leave the muzzle and fly exactly where the physical gun points.
-    // Missiles/rockets keep their wing/nose pod spawns.
-    const usingGun =
-      this.helicopter.gunAimMode && this.currentWeapon === WeaponType.MACHINE_GUN;
+    // Machine-gun rounds always leave the rotating chin turret's real muzzle
+    // and fly exactly where the physical barrel points. Missiles, rockets, and
+    // shotgun payloads keep their existing wing/nose spawn behavior.
+    const usingGun = this.currentWeapon === WeaponType.MACHINE_GUN;
     let originX: number, originY: number, originZ: number;
     let hDirX: number, hDirZ: number;
+    let dirY = 0;
     if (usingGun) {
-      const muzzlePos = this.helicopter.getMuzzlePosition(new THREE.Vector3());
-      const muzzleDir = this.helicopter.getMuzzleDirection(new THREE.Vector3());
+      const muzzlePos = this.helicopter.getMuzzlePosition(this.muzzlePositionScratch);
+      const muzzleDir = this.helicopter.getMuzzleDirection(this.muzzleDirectionScratch);
       originX = muzzlePos.x;
-      originY = muzzlePos.y - 0.25;
+      originY = muzzlePos.y;
       originZ = muzzlePos.z;
-      // Bullets fly in the actual gun direction (muzzle forward), not toward
-      // the aim point — keeps the visual + gameplay alignment correct.
       hDirX = muzzleDir.x;
+      dirY = muzzleDir.y;
       hDirZ = muzzleDir.z;
     } else {
       originX = this.helicopter.body.position.x;
@@ -1485,33 +1909,38 @@ export class GameEngine {
       hDirZ = this.aimPoint.z - originZ;
     }
     const aimLen = Math.sqrt(hDirX * hDirX + hDirZ * hDirZ);
-    if (aimLen > 0.001) {
+    if (!usingGun && aimLen > 0.001) {
       hDirX /= aimLen;
       hDirZ /= aimLen;
-    } else {
+    } else if (
+      !Number.isFinite(hDirX) || !Number.isFinite(dirY) || !Number.isFinite(hDirZ) ||
+      aimLen <= 0.001
+    ) {
       const fallback = this.getFallbackFireDirection();
       hDirX = fallback.x;
+      dirY = 0;
       hDirZ = fallback.z;
     }
     const heading = Math.atan2(hDirX, hDirZ);
     const cursorLock =
-      this.autoAimTarget?.active
-        ? this.autoAimTarget
-        : this.findAutoAimTarget(this.mouseAimValid ? 225 : 235, this.mouseAimValid);
+      this.currentWeapon === WeaponType.MACHINE_GUN
+        ? null
+        : this.autoAimTarget?.active
+          ? this.autoAimTarget
+          : this.findAutoAimTarget(this.mouseAimValid ? 225 : 235, this.mouseAimValid);
+    // Machine-gun rounds are ballistic along the physical barrel. Homing and
+    // projectile steering remain exclusive to the existing non-MG weapon paths.
     const lockTarget =
-      cursorLock ??
-      (weapon.homing || this.currentWeapon !== WeaponType.MACHINE_GUN
-        ? this.findLockTarget(hDirX, hDirZ, weapon.homing ? 230 : 170)
-        : null);
+      this.currentWeapon === WeaponType.MACHINE_GUN
+        ? null
+        : cursorLock ?? this.findLockTarget(hDirX, hDirZ, weapon.homing ? 230 : 170);
     const projectileAssist =
       weapon.homing
         ? 7.4
         : lockTarget
-          ? this.currentWeapon === WeaponType.MACHINE_GUN
-            ? 1.8
-            : this.currentWeapon === WeaponType.SHOTGUN
-              ? 1.2
-              : 2.8
+          ? this.currentWeapon === WeaponType.SHOTGUN
+            ? 1.2
+            : 2.8
           : 0;
 
     // Play appropriate sound
@@ -1580,10 +2009,11 @@ export class GameEngine {
         if (this.currentWeapon === WeaponType.SHOTGUN) damage *= 1.15;
       }
 
+      const spawnOffset = usingGun ? 0 : noseOffset;
       this.playerProjectiles.spawn(
-        originX + hDirX * noseOffset + rightUnitX * side * podSpacing,
+        originX + hDirX * spawnOffset + rightUnitX * side * podSpacing,
         originY,
-        originZ + hDirZ * noseOffset + rightUnitZ * side * podSpacing,
+        originZ + hDirZ * spawnOffset + rightUnitZ * side * podSpacing,
         dirX,
         dirZ,
         time,
@@ -1593,14 +2023,16 @@ export class GameEngine {
         weapon.color,
         lockTarget,
         projectileAssist,
+        usingGun ? dirY * weapon.speed : 0,
       );
     }
     if (totalCount === 1) this.muzzleFlip *= -1;
 
     // Weapon specific muzzle flash & shake (flash from the same origin as the bullets)
-    const fxX = originX + hDirX * noseOffset;
+    const fxOffset = usingGun ? 0 : noseOffset;
+    const fxX = originX + hDirX * fxOffset;
     const fxY = usingGun ? originY : muzzleY;
-    const fxZ = originZ + hDirZ * noseOffset;
+    const fxZ = originZ + hDirZ * fxOffset;
     
     // NOTE: MACHINE_GUN carries a small spread value (0.015 bullet spread), so
     // the shotgun branch must be keyed on the weapon TYPE, not spread > 0.
@@ -1629,6 +2061,7 @@ export class GameEngine {
    */
   private onEnemyDestroyed(enemy: Enemy, time: number) {
     this.totalKills++;
+    this.addThreat(enemy.type === EnemyType.BOSS ? 28 : enemy.isElite ? 7 : enemy.variant !== EnemyVariant.STANDARD ? 1.2 : 0.35);
     this.grantWeaponXp(this.lastFiredWeapon);
 
     // Kill streaks -> arcade announcements + slow-mo on multi-kills
@@ -1937,7 +2370,9 @@ export class GameEngine {
   applyPowerUp = (type: PowerUpType, time: number) => {
     switch (type) {
       case PowerUpType.HEALTH:
-        this.health = Math.min(100, this.health + 30);
+        // Cap at the actual max (hangar armor / maxed weapons push it past 100)
+        // so health pickups never silently waste healing.
+        this.health = Math.min(this.maxHealth, this.health + 30);
         this.helicopter.repair(30);
         break;
       case PowerUpType.AMMO:
@@ -2053,9 +2488,9 @@ export class GameEngine {
     const objectives = {
       sam: this.objectives.some((o) => o.active && o.type === ObjectiveType.SAM_SITE),
       radar: this.objectives.some((o) => o.active && o.type === ObjectiveType.RADAR_TOWER),
-      depot: this.objectives.some((o) => o.active && o.type === ObjectiveType.AMMO_DEPOT),
       count: this.objectives.filter((o) => o.active).length,
     };
+    const delivery = this.delivery.getHudSnapshot(this.helicopter.body.position, time);
 
     window.dispatchEvent(
       new CustomEvent("helistrike:update", {
@@ -2100,7 +2535,113 @@ export class GameEngine {
           },
           boss: boss ? { hp: Math.max(0, boss.hp), maxHp: boss.maxHp, phase: boss.phase } : null,
           objectives,
+          samThreat: this.getSamThreat(),
+          countermeasures: {
+            charges: this.countermeasures.charges,
+            maxCharges: this.countermeasures.maxCharges,
+            cooldown: this.countermeasures.cooldownRemaining,
+            ready: this.countermeasures.charges > 0 && this.countermeasures.cooldownRemaining <= 0,
+          },
+          threatSystem: {
+            points: this.threatPoints,
+            level: this.threatLevel,
+            name: THREAT_NAMES[this.threatLevel - 1],
+            rewardMultiplier: threatRewardMultiplier(this.threatLevel),
+          },
+          unsecuredCredits: this.unsecuredCredits,
+          extraction: this.extractionPosition ? {
+            distance: Math.round(Math.hypot(this.extractionPosition.x - this.helicopter.body.position.x, this.extractionPosition.z - this.helicopter.body.position.z)),
+            bearing: Math.atan2(this.extractionPosition.x - this.helicopter.body.position.x, -(this.extractionPosition.z - this.helicopter.body.position.z)) * 180 / Math.PI,
+            progress: this.extractionProgress,
+            active: this.extractionPressure,
+            carrying: this.delivery.isCarrying(),
+          } : null,
+          delivery,
+          credits: this.delivery.credits,
         },
+      }),
+    );
+    this.emitMinimap(time);
+  }
+
+  /**
+   * Tactical radar snapshot for the minimap HUD. Piggybacks on updateUI's
+   * ~12 Hz cadence and carries only positions — never entity objects. Regular
+   * enemies are filtered to the radar radius; the boss stays visible anywhere.
+   */
+  private emitMinimap(time: number) {
+    if (!this.isPlaying) return;
+    const range = 430;
+    const rangeSq = range * range;
+    const playerPos = this.helicopter.body.position;
+
+    const enemies: MinimapSnapshot["enemies"] = [];
+    for (const e of this.enemies) {
+      if (!e.active) continue;
+      const isBoss = e.type === EnemyType.BOSS;
+      const dx = e.body.position.x - playerPos.x;
+      const dz = e.body.position.z - playerPos.z;
+      if (!isBoss && dx * dx + dz * dz > rangeSq) continue;
+      enemies.push({
+        x: e.body.position.x,
+        z: e.body.position.z,
+        type: e.type,
+        variant: e.variant,
+        elite: e.isElite,
+        boss: isBoss,
+      });
+    }
+
+    const contract = this.delivery.activeContract;
+    let delivery: MinimapSnapshot["delivery"] = null;
+    if (contract && contract.state !== DeliveryState.FAILED) {
+      delivery = {
+        origin: { x: contract.originPosition.x, z: contract.originPosition.z },
+        destination: { x: contract.destinationPosition.x, z: contract.destinationPosition.z },
+        carrying:
+          contract.state === DeliveryState.CARRYING ||
+          contract.state === DeliveryState.DELIVERING,
+        state: contract.state,
+      };
+    }
+
+    const objectives: MinimapSnapshot["objectives"] = [];
+    for (const o of this.objectives) {
+      if (!o.active) continue;
+      objectives.push({
+        type: o.type,
+        x: o.position.x,
+        z: o.position.z,
+        samState: o.samState ?? undefined,
+        detectionRange: o.type === ObjectiveType.SAM_SITE ? SAM_DETECTION_RANGE : undefined,
+      });
+    }
+
+    const threats: MinimapSnapshot["threats"] = [];
+    for (const projectile of this.enemyProjectiles.pool) {
+      if (!projectile.active || projectile.homingStrength <= 0) continue;
+      threats.push({ x: projectile.pos.x, z: projectile.pos.z, kind: "HOMING_MISSILE", target: projectile.targetType });
+    }
+
+    window.dispatchEvent(
+      new CustomEvent("helistrike:minimap", {
+        detail: {
+          player: { x: playerPos.x, y: playerPos.y, z: playerPos.z, heading: this.helicopter.mesh.rotation.y },
+          enemies,
+          delivery,
+          objectives,
+          threats,
+          extraction: this.extractionPosition
+            ? {
+                x: this.extractionPosition.x,
+                z: this.extractionPosition.z,
+                active: this.extractionPressure,
+                radius: GameEngine.EXTRACTION_ZONE_RADIUS,
+                elevation: this.extractionPosition.y,
+              }
+            : null,
+          range,
+        } as MinimapSnapshot,
       }),
     );
   }
@@ -2131,9 +2672,15 @@ export class GameEngine {
     );
   }
 
-  dispatchGameOver(time: number) {
+  dispatchGameOver(time: number, status: "DESTROYED" | "EXTRACTED" = "DESTROYED", securedThreatBonus = 0) {
     if (this.gameOverDispatched) return;
     this.gameOverDispatched = true;
+    const lostUnsecured = status === "DESTROYED" ? this.unsecuredCredits : 0;
+    if (status === "DESTROYED") {
+      this.delivery.fail("PLAYER DOWN");
+      this.unsecuredCredits = 0;
+    }
+    this.clearExtraction();
     this.isPlaying = false;
     this.audio.stopMusic();
     this.isFiringMouse = false;
@@ -2151,6 +2698,13 @@ export class GameEngine {
           maxCombo: this.maxCombo,
           survivalTime: this.survivalTime,
           accuracy: accuracyFor(this.shotsHit, this.shotsFired),
+          status,
+          threatLevel: this.threatLevel,
+          deliveries: this.deliveriesCompleted,
+          samSitesDestroyed: this.samSitesDestroyed,
+          lostUnsecured,
+          securedThreatBonus,
+          credits: this.delivery.credits,
         },
       }),
     );
@@ -2298,19 +2852,106 @@ export class GameEngine {
     }
   }
 
-  /** Spawn a destroyable objective on a rooftop ahead of the player. */
+  private launchSamMissile(sam: Objective, time: number) {
+    const launch = sam.getSamLaunchPosition();
+    const player = this.helicopter.body.position;
+    const dx = player.x - launch.x;
+    const dz = player.z - launch.z;
+    const horizontal = Math.max(0.001, Math.hypot(dx, dz));
+    const speed = 112;
+    const projectile = this.enemyProjectiles.spawn(
+      launch.x, launch.y, launch.z,
+      dx / horizontal, dz / horizontal,
+      time, speed, 15, 8, 0xff4938,
+      { body: this.helicopter.body, active: true },
+      SAM_MISSILE_TURN_RATE,
+      ((player.y - launch.y) / horizontal) * speed,
+      0,
+      waveEnemyDamage(this.currentWave),
+    );
+    if (!projectile) return;
+    projectile.configureSamMissile(sam);
+    this.particles.spawnSmoke(launch.x, launch.y, launch.z, time);
+    this.particles.spawnSparks(launch.x, launch.y, launch.z, time);
+    this.audio.playSamMissileLaunch();
+  }
+
+  private getSamThreat() {
+    const player = this.helicopter.body.position;
+    let nearestMissile: Projectile | null = null;
+    let missileDistance = Infinity;
+    for (const projectile of this.enemyProjectiles.pool) {
+      if (
+        !projectile.active ||
+        projectile.homingStrength <= 0 ||
+        projectile.target?.body !== this.helicopter.body
+      ) continue;
+      const distance = Math.hypot(projectile.pos.x - player.x, projectile.pos.z - player.z);
+      if (distance < missileDistance) {
+        missileDistance = distance;
+        nearestMissile = projectile;
+      }
+    }
+    if (nearestMissile) {
+      return {
+        state: "INBOUND" as const,
+        progress: 1,
+        distance: Math.round(missileDistance),
+        bearing: Math.atan2(nearestMissile.pos.x - player.x, -(nearestMissile.pos.z - player.z)) * 180 / Math.PI,
+      };
+    }
+    let best: Objective | null = null;
+    for (const objective of this.objectives) {
+      if (!objective.active || objective.type !== ObjectiveType.SAM_SITE) continue;
+      if (objective.samState !== SamState.LOCKING && objective.samState !== SamState.TRACKING) continue;
+      if (!best || objective.samLockProgress > best.samLockProgress) best = objective;
+    }
+    if (!best) return null;
+    return {
+      state: best.samState === SamState.LOCKING ? "LOCKING" as const : "TRACKING" as const,
+      progress: best.samLockProgress,
+      distance: Math.round(best.distanceTo(player.x, player.z)),
+      bearing: Math.atan2(best.position.x - player.x, -(best.position.z - player.z)) * 180 / Math.PI,
+    };
+  }
+
+  /** Spawn a spaced rooftop or ground emplacement ahead of the player. */
   private spawnObjective() {
     const player = this.helicopter.body.position;
-    const lanes = [-78, -48, -24, 0, 24, 48, 78];
-    const laneX = lanes[Math.floor(Math.random() * lanes.length)] + (Math.random() - 0.5) * 14;
-    const z = player.z - 130 - Math.random() * 90;
-    let y = this.city.getHeightAt(laneX, z, 4);
-    if (y < 3) y = 2.0;
-
+    const lanes = [-120, -78, -48, -24, 0, 24, 48, 78, 120];
     const roll = Math.random();
-    let type = ObjectiveType.AMMO_DEPOT;
-    if (this.currentWave >= 2 && roll < 0.34) type = ObjectiveType.SAM_SITE;
-    else if (this.currentWave >= 3 && roll < 0.68) type = ObjectiveType.RADAR_TOWER;
+    let type = ObjectiveType.SAM_SITE;
+    if (this.currentWave >= 3 && roll >= 0.52) type = ObjectiveType.RADAR_TOWER;
+    const samCap = this.currentWave < 4 ? 1 : 2;
+    const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+    if (type === ObjectiveType.SAM_SITE && activeSams >= samCap) type = ObjectiveType.RADAR_TOWER;
+
+    let laneX = 0;
+    let z = player.z - 160;
+    let y = 2;
+    let placed = false;
+    for (let attempt = 0; attempt < 10 && !placed; attempt++) {
+      const rooftop = type === ObjectiveType.SAM_SITE && Math.random() < 0.46
+        ? this.city.rooftopSpots.filter((spot) =>
+            spot.y >= 8 &&
+            spot.z < player.z - 105 &&
+            spot.z > player.z - 245 &&
+            Math.abs(spot.x) < 145)
+        : [];
+      if (rooftop.length > 0) {
+        const spot = rooftop[Math.floor(Math.random() * rooftop.length)];
+        laneX = spot.x;
+        z = spot.z;
+        y = spot.y;
+      } else {
+        laneX = lanes[Math.floor(Math.random() * lanes.length)] + (Math.random() - 0.5) * 14;
+        z = player.z - 130 - Math.random() * 110;
+        y = this.city.getHeightAt(laneX, z, 4);
+        if (y < 3) y = 2;
+      }
+      placed = this.objectives.every((o) => !o.active || Math.hypot(o.position.x - laneX, o.position.z - z) >= SAM_MIN_SPACING);
+    }
+    if (!placed) return;
 
     const obj = new Objective(this.scene, this.world, laneX, y, z, type);
     obj.spawnTime = performance.now() / 1000;
@@ -2328,9 +2969,7 @@ export class GameEngine {
     this.announce(
       type === ObjectiveType.SAM_SITE
         ? "SAM SITE ONLINE"
-        : type === ObjectiveType.RADAR_TOWER
-          ? "RADAR TOWER DETECTED"
-          : "AMMO DEPOT SPOTTED",
+        : "RADAR TOWER DETECTED",
       "Destroy it to shift the battle",
       "#ff5566",
     );
@@ -2346,9 +2985,13 @@ export class GameEngine {
     this.triggerHitStop(0.24, 0.05);
 
     if (obj.type === ObjectiveType.SAM_SITE) {
+      this.samSitesDestroyed++;
+      this.addThreat(8);
       this.samSuppressionTimer = 18; // enemies fire slower for 18s
-      this.announce("SAM SITE DESTROYED", "Enemy accuracy reduced", "#35e66d");
+      this.delivery.awardCredits(55);
+      this.announce("SAM SITE DESTROYED", "+55 CR - airspace safer", "#35e66d");
     } else if (obj.type === ObjectiveType.RADAR_TOWER) {
+      this.addThreat(7);
       // EMP: damage all enemies
       for (const e of this.enemies) {
         if (e.active) {
@@ -2375,32 +3018,43 @@ export class GameEngine {
   }
 
   spawnEnemy() {
-    let type = EnemyType.BASIC;
-    const rand = Math.random();
-
-    // Procedurally assign harder enemies in later waves based on themes
-    if (this.currentWave >= 7) {
-      if (rand < 0.2) type = EnemyType.DRONE;
-      else if (rand < 0.4) type = EnemyType.TANK;
-      else if (rand < 0.7) type = EnemyType.SHOOTER;
-    } else if (this.currentWave >= 5) {
-      if (rand < 0.3) type = EnemyType.TANK;
-      else if (rand < 0.6) type = EnemyType.SHOOTER;
-      else if (rand < 0.8 && this.currentWave >= 6) type = EnemyType.DRONE;
-    } else if (this.currentWave % 4 === 0) {
-      // Swarm: mostly basic, some shooters
-      if (rand < 0.2) type = EnemyType.SHOOTER;
-    } else if (this.currentWave >= 3) {
-      if (rand < 0.2 + this.currentWave * 0.05) type = EnemyType.SHOOTER;
-      if (rand > 0.85 - this.currentWave * 0.02) type = EnemyType.TANK;
-    } else if (this.currentWave >= 2) {
-      if (rand < 0.3) type = EnemyType.SHOOTER;
+    // --- Threat-budget variant director ---
+    // Squads take priority: a picked composition queues its remaining members
+    // into pendingVariantQueue, drained one per cadence tick below, so a squad
+    // arrives as a staggered stream instead of a single-frame model spike.
+    let variant: EnemyVariant | null = null;
+    const directorWave = Math.max(this.currentWave, this.threatLevel * 2 - 1);
+    if (this.pendingVariantQueue.length > 0) {
+      variant = this.pendingVariantQueue.shift()!;
+    } else {
+      const squad = pickSquadForWave(directorWave);
+      if (squad && squad.length > 0) {
+        variant = squad[0];
+        this.pendingVariantQueue.push(...squad.slice(1));
+      } else {
+        variant = pickEnemyVariant(directorWave);
+      }
     }
 
-    // --- Wave personality: modifiers & attack patterns ---
+    // Per-variant soft caps: never stack unfair support/missile/rare units.
+    // If this variant is at its battlefield cap, fall back to the base hull.
+    let vConfig = ENEMY_VARIANTS[variant];
+    if (vConfig.maxActive !== undefined) {
+      let active = 0;
+      for (const e of this.enemies) if (e.active && e.variant === variant) active++;
+      if (active >= vConfig.maxActive) {
+        variant = EnemyVariant.STANDARD;
+        vConfig = ENEMY_VARIANTS[variant];
+      }
+    }
+    const type = vConfig.baseType;
+
+    // --- Base hull personality: modifiers & attack patterns ---
+    // (Variant behaviors take over movement via updateVariant; these add
+    //  flavor to the shared hull for STANDARD and capped-out units.)
     let modifier = EnemyModifier.NONE;
     let pattern = AttackPattern.CHASE;
-    const w = this.currentWave;
+    const w = directorWave;
     const r2 = Math.random();
 
     // Tanks: artillery or circle strafing from wave 3+; shielded from wave 5+
@@ -2424,6 +3078,9 @@ export class GameEngine {
     else if (type === EnemyType.BASIC && w >= 8 && Math.random() < 0.15) {
       modifier |= EnemyModifier.SHIELDED;
     }
+
+    // Variant units skip conflicting base patterns — updateVariant drives them.
+    if (variant !== EnemyVariant.STANDARD) pattern = AttackPattern.CHASE;
 
     let spot;
     let attempts = 0;
@@ -2474,7 +3131,7 @@ export class GameEngine {
       spot.z,
       type,
       spot.y,
-      { modifier, pattern },
+      { modifier, pattern, variant },
     );
     this.scaleEnemyForDifficulty(enemy);
     this.enemies.push(enemy);
@@ -2538,6 +3195,40 @@ export class GameEngine {
     this.audio.playEnemySpawn();
     this.addCameraImpulse(2.5);
     this.announce("ELITE MINIBOSS", "Brace for impact", "#ffdd55");
+  }
+
+  /**
+   * Wave-10 boss presentation: a short staged intro (warning → name → spawn)
+   * so the fight lands like an event instead of a pop-in. Player control is
+   * never removed; the boss simply enters after the framing beats (~2.7s).
+   */
+  private bossIntroActive = false;
+  private bossIntroStage = 0;
+  private bossIntroNextTime = 0;
+
+  private startBossBattle(time: number) {
+    if (this.bossIntroActive) return;
+    this.bossIntroActive = true;
+    this.bossIntroStage = 1;
+    this.bossIntroNextTime = time + 0.9;
+    this.announce("⚠ INCOMING ⚠", "Hostile gunship detected", "#ff3366");
+    this.audio.playUpgrade();
+  }
+
+  private updateBossIntro(time: number) {
+    if (!this.bossIntroActive || time < this.bossIntroNextTime) return;
+    if (this.bossIntroStage === 1) {
+      this.bossIntroStage = 2;
+      this.bossIntroNextTime = time + 0.9;
+      this.announce("ARCHON", "Shielded heavy gunship", "#d84cff");
+      this.audio.playUpgrade();
+    } else if (this.bossIntroStage === 2) {
+      this.bossIntroStage = 3;
+      this.bossIntroNextTime = time + 0.9;
+      this.spawnBossBattle(time);
+    } else {
+      this.bossIntroActive = false;
+    }
   }
 
   /**
@@ -2667,6 +3358,7 @@ export class GameEngine {
       const enemy = new Enemy(this.scene, this.world, d.x, d.z, d.type, d.y, {
         modifier: d.modifier ?? EnemyModifier.NONE,
         pattern: d.pattern ?? AttackPattern.CHASE,
+        variant: d.variant,
       });
       this.scaleEnemyForDifficulty(enemy);
       this.enemies.push(enemy);
@@ -2720,9 +3412,10 @@ export class GameEngine {
     }
 
     // Full boss battle every 10th wave; elite miniboss on the other 5th waves
+    this.updateBossIntro(time);
     if (this.currentWave % 10 === 0 && !this.minibossSpawnedThisWave) {
       this.minibossSpawnedThisWave = true;
-      this.spawnBossBattle(time);
+      this.startBossBattle(time);
     } else if (this.currentWave % 5 === 0 && !this.minibossSpawnedThisWave) {
       this.minibossSpawnedThisWave = true;
       this.spawnMiniboss(time);
@@ -2841,6 +3534,27 @@ export class GameEngine {
     }
   }
 
+  /** Count of active enemies of a given variant (used for event cap checks). */
+  private variantActiveCount(variant: EnemyVariant): number {
+    let count = 0;
+    for (const e of this.enemies) if (e.active && e.variant === variant) count++;
+    return count;
+  }
+
+  /**
+   * When a shield drone leaves the battlefield, clear its damage-reduction
+   * aura from every remaining enemy. Surviving shield drones re-apply their
+   * own aura on the next tick, so support never leaks across a death.
+   */
+  private releaseShieldAuras(removed: Enemy) {
+    if (removed.variant !== EnemyVariant.SHIELD_DRONE) return;
+    for (const other of this.enemies) {
+      if (other !== removed && other.active && other.incomingDamageMult < 1) {
+        other.incomingDamageMult = 1;
+      }
+    }
+  }
+
   triggerBattlefieldEvent(time: number) {
     const player = this.helicopter.body.position;
     const eventRoll = Math.random();
@@ -2861,13 +3575,30 @@ export class GameEngine {
       this.waveMessage = "CONVOY AMBUSH";
       this.waveTransitionTimer = 1.4;
       // Queue the convoy — tanks/shooters construct and arrive over the next
-      // few seconds instead of 4-8 full models in this single frame.
+      // few seconds instead of 4-8 full models in this single frame. Variants
+      // respect their battlefield caps so events never stack rare units.
+      const flakCapped = this.variantActiveCount(EnemyVariant.FLAK_TANK) >= (ENEMY_VARIANTS[EnemyVariant.FLAK_TANK].maxActive ?? 6);
+      const carrierCapped = this.variantActiveCount(EnemyVariant.MISSILE_CARRIER) >= (ENEMY_VARIANTS[EnemyVariant.MISSILE_CARRIER].maxActive ?? 2);
+      let carrierQueued = false;
       for (let i = 0; i < 4 + this.combatIntensity * 4; i++) {
+        const isTank = i % 2 === 0;
+        let variant: EnemyVariant | undefined;
+        if (isTank) {
+          if (!carrierCapped && !carrierQueued && this.currentWave >= 5) {
+            variant = EnemyVariant.MISSILE_CARRIER;
+            carrierQueued = true;
+          } else if (!flakCapped && this.currentWave >= 4) {
+            variant = EnemyVariant.FLAK_TANK;
+          }
+        } else if (this.currentWave >= 3) {
+          variant = pickEnemyVariant(this.currentWave);
+        }
         this.pendingEventSpawns.push({
-          type: i % 2 === 0 ? EnemyType.TANK : EnemyType.SHOOTER,
+          type: isTank ? EnemyType.TANK : EnemyType.SHOOTER,
           x: -70 + i * 35,
           z: eventZ - i * 12,
           y: 7,
+          variant,
         });
         if (this.isPlaying) this.totalEnemiesInWave++;
       }
@@ -2875,12 +3606,23 @@ export class GameEngine {
       this.waveMessage = "AIR RAID";
       this.waveTransitionTimer = 1.4;
       // Queue the raid — drones trickle in rather than an 8-14 model spike.
+      const kamikazeCapped = this.variantActiveCount(EnemyVariant.KAMIKAZE_DRONE) >= (ENEMY_VARIANTS[EnemyVariant.KAMIKAZE_DRONE].maxActive ?? 6);
+      let kamikazeQueued = 0;
       for (let i = 0; i < 8 + this.combatIntensity * 6; i++) {
+        // ~25% of a raid are kamikaze divers (capped); the rest are scouts/standard.
+        let variant: EnemyVariant | undefined;
+        if (this.currentWave >= 3 && !kamikazeCapped && kamikazeQueued < 2 && Math.random() < 0.25) {
+          variant = EnemyVariant.KAMIKAZE_DRONE;
+          kamikazeQueued++;
+        } else if (this.currentWave >= 2 && Math.random() < 0.5) {
+          variant = EnemyVariant.SCOUT_DRONE;
+        }
         this.pendingEventSpawns.push({
           type: EnemyType.DRONE,
           x: player.x + (Math.random() - 0.5) * 160,
           z: eventZ - Math.random() * 130,
           y: player.y + 2 + Math.random() * 14,
+          variant,
         });
         if (this.isPlaying) this.totalEnemiesInWave++;
       }
@@ -2948,14 +3690,6 @@ export class GameEngine {
   }
 
   updateKeyboardMovement(delta: number) {
-    if (this.dashActiveTimer > 0) {
-      // During a dash don't accumulate new input, but let the input ramp settle so
-      // the ship doesn't ghost-drift in the dash direction once the dash ends.
-      const settle = 1 - Math.exp(-delta * 12.0);
-      this.keyboardVelocity.x *= 1 - settle;
-      this.keyboardVelocity.y *= 1 - settle;
-      return;
-    }
     let moveX = 0;
     let moveZ = 0;
 
@@ -3001,24 +3735,15 @@ export class GameEngine {
       normZ = moveZ / mag;
     }
 
-    // Keyboard is digital — ramp it near-instantly (response 24/s, 90% in
-    // ~0.1s) so input feels immediate; the velocity-level exp response in
-    // Helicopter.update does the real smoothing. Analog sticks still glide.
+    // Digital input is immediate. The single physical response layer lives in
+    // Helicopter.update, so there is no input-lag smoothing stack.
     const targetMag = Math.min(1, mag);
-    const targetVelocityX = normX * targetMag;
-    const targetVelocityY = normZ * targetMag;
-    const inputLerpFactor = 1 - Math.exp(-delta * 24.0);
-    this.keyboardVelocity.x = THREE.MathUtils.lerp(this.keyboardVelocity.x, targetVelocityX, inputLerpFactor);
-    this.keyboardVelocity.y = THREE.MathUtils.lerp(this.keyboardVelocity.y, targetVelocityY, inputLerpFactor);
+    this.keyboardVelocity.set(normX * targetMag, normZ * targetMag);
 
     const inputLength = this.keyboardVelocity.length();
     if (inputLength > 0.005) {
       this.hasInputThisFrame = true;
-      const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1;
-      const afterburnerBoost = this.afterburnerActive ? 1.55 : 1;
-      // Arcade style: High target speed so the target jumps to the tight clamp boundary almost instantly
-      // Phase 2: keyboardVelocity is now the movement command direction (no
-      // position-target integration) — the helicopter applies it directly.
+      // keyboardVelocity is a normalized command, not a smoothed velocity.
     }
 
     // Afterburner: hold Shift to burn fuel for speed + damage
@@ -3029,19 +3754,17 @@ export class GameEngine {
 
     // Phase 2: vertical is fully separate from horizontal — Space = climb,
     // Alt = descend, each with velocity-based accel/brake in the helicopter.
-    // The engine just conveys the input direction (-1..1, lerp-smoothed).
+    // The engine conveys vertical input directly; vertical physics supplies weight.
     if (moveY !== 0) this.hasInputThisFrame = true;
-    const vLerp = 1 - Math.exp(-delta * 18.0); // 90% in ~0.13s
-    this.verticalInput = THREE.MathUtils.lerp(this.verticalInput, moveY, vLerp);
+    this.verticalInput = moveY;
   }
 
 
 
   tick = () => {
-    // Phase 1: never re-schedule after dispose — a stale rAF (StrictMode/HMR
-    // unmount race) must not spin a second game loop against a dead renderer.
-    if (this.disposed) return;
-    this.animationFrame = requestAnimationFrame(this.tick);
+    if (this.disposed || !this.running) return;
+    this.animationFrameId = requestAnimationFrame(this.tick);
+    this.frameCount++;
 
     const time = performance.now() / 1000;
     // Phase 1: clamp frame spikes so a 0.2–2s hitch (tab switch, GC, driver
@@ -3051,7 +3774,7 @@ export class GameEngine {
     let realDelta = time - this.lastTime;
     this.lastTime = time;
     if (!Number.isFinite(realDelta) || realDelta < 0) realDelta = 0;
-    realDelta = Math.min(realDelta, 0.05);
+    realDelta = Math.min(realDelta, GameEngine.MAX_SIMULATION_DT);
 
     // Rolling FPS (read-only, no allocations)
     this.fpsFrames++;
@@ -3084,7 +3807,7 @@ export class GameEngine {
     if (!this.isPlaying) {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
-      this.helicopter.animateRotors(0, 60, Math.max(delta, 1 / TARGET_RENDER_FPS));
+      this.helicopter.animateRotors(0, 60, delta);
       this.updateCamera(delta);
       this.renderFrame();
       return;
@@ -3094,37 +3817,41 @@ export class GameEngine {
     this.pollGamepad(time, delta);
     this.updateKeyboardMovement(delta);
 
-    // Update dash timers and mechanics
-    if (this.dashCooldownTimer > 0) {
-      this.dashCooldownTimer -= delta;
-    }
-    if (this.dashActiveTimer > 0) {
-      this.dashActiveTimer -= delta;
-      const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1.0;
-      // Bell-curve speed: surge to max mid-dash, ease back out — the ship arrives
-      // at a crawl so the PD controller handoff is seamless instead of a hard yank.
-      const dashTotal = 0.28;
-      const progress = 1 - Math.max(0, this.dashActiveTimer) / dashTotal;
-      const dashSpeed = 155 * speedBoost * Math.sin(Math.min(1, progress) * Math.PI);
-      this.helicopter.body.velocity.x = this.dashDirection.x * dashSpeed;
-      this.helicopter.body.velocity.z = this.dashDirection.z * dashSpeed;
-
-      // Claim this frame as input so the idle target-decay doesn't fight the dash
-      // handoff (the target tracks the body, then hands off to the controller).
-      this.hasInputThisFrame = true;
-      this.movementTarget.x = this.helicopter.body.position.x;
-      this.movementTarget.z = this.helicopter.body.position.z;
+    // Explicit READY → DASHING → COOLDOWN state machine.
+    if (this.dashState === "DASHING") {
+      this.dashActiveTimer = Math.max(0, this.dashActiveTimer - delta);
+      if (this.dashActiveTimer === 0) {
+        this.dashState = "COOLDOWN";
+        this.dashCooldownTimer = MOVEMENT_CONFIG.dashCooldown;
+      } else {
+        const progress = 1 - this.dashActiveTimer / MOVEMENT_CONFIG.dashDuration;
+        const speedBoost = this.speedBoostTimer > 0 ? MOVEMENT_CONFIG.speedBoostMultiplier : 1;
+        const dashSpeed = THREE.MathUtils.lerp(
+          MOVEMENT_CONFIG.dashSpeed,
+          MOVEMENT_CONFIG.maxHorizontalSpeed * 1.05,
+          progress,
+        ) * speedBoost;
+        this.helicopter.body.velocity.x = this.dashDirection.x * dashSpeed;
+        this.helicopter.body.velocity.z = this.dashDirection.z * dashSpeed;
+        this.hasInputThisFrame = true;
+      }
+    } else if (this.dashState === "COOLDOWN") {
+      this.dashCooldownTimer = Math.max(0, this.dashCooldownTimer - delta);
+      if (this.dashCooldownTimer === 0) this.dashState = "READY";
     }
 
     // Phase 2: no idle-decay or position-target clamp — movement is
     // velocity-controlled; the body is the source of truth.
 
     // Fuel drain (afterburner burns much faster; fuel-efficiency upgrade slows it)
-    const fuelEfficiencyMult = Math.max(0.4, 1 - this.runUpgrades.fuelEfficiency * 0.3);
+    const permanentFuelMult = Math.max(0.7, 1 - this.hangarUpgrades.fuelSystems * 0.06);
+    const fuelEfficiencyMult = Math.max(0.4, 1 - this.runUpgrades.fuelEfficiency * 0.3) * permanentFuelMult;
     const burnRate =
       this.fuelDrainPerSecond * fuelEfficiencyMult * (this.afterburnerActive ? this.afterburnerDrainPerSecond : 1);
     this.currentFuel = Math.max(0, this.currentFuel - burnRate * delta);
-    if (this.afterburnerActive && this.health > 0 && Math.random() < 0.5) {
+    this.afterburnerEffectTimer = Math.max(0, this.afterburnerEffectTimer - delta);
+    if (this.afterburnerActive && this.health > 0 && this.afterburnerEffectTimer === 0) {
+      this.afterburnerEffectTimer = 0.05;
       const wingX = this.helicopter.body.position.x;
       this.particles.spawnSmoke(wingX - 2, this.helicopter.body.position.y - 1, this.helicopter.body.position.z, time);
       this.particles.spawnSmoke(wingX + 2, this.helicopter.body.position.y - 1, this.helicopter.body.position.z, time);
@@ -3137,6 +3864,9 @@ export class GameEngine {
     }
     this.emitStatsIfChanged();
     this.city.update(this.helicopter.body.position, this.world, delta);
+    this.delivery.update(time, delta, this.helicopter.body.position, this.currentWave);
+    this.updateCountermeasures(delta, time);
+    this.updateThreatAndExtraction(delta, time);
     this.updateTurrets(time, delta);
     this.updateCrashSmoke(delta, time);
 
@@ -3151,14 +3881,29 @@ export class GameEngine {
       const showMarker = dist < 260;
       if (obj.beacon) obj.beacon.visible = showMarker;
       if (obj.labelSprite) obj.labelSprite.visible = showMarker;
+      if (obj.active && obj.type === ObjectiveType.SAM_SITE) {
+        const result = obj.updateSam(this.helicopter.body.position, time, delta, this.currentWave);
+        if (result?.beep) this.audio.playSamLockBeep(obj.samLockProgress);
+        if (result?.fired) this.launchSamMissile(obj, time);
+        if (this.delivery.isCarrying() && dist <= SAM_DETECTION_RANGE) this.delivery.markSamExposure();
+        const damageStage = obj.getDamageStage();
+        if (damageStage > 0 && obj.damageFxTimer <= 0) {
+          const target = obj.targetPoint;
+          this.particles.spawnSmoke(target.x, target.y, target.z, time);
+          if (damageStage === 2) this.particles.spawnSparks(target.x, target.y, target.z, time);
+          obj.damageFxTimer = damageStage === 2 ? 0.16 : 0.38;
+        }
+      }
       // Cull objectives far behind the player
       if (obj.position.z > playerZ + 120) {
         obj.destroy();
         this.objectives.splice(i, 1);
       }
     }
-    // SAM sites fire homing-ish shots at the player while alive
+    // Preserve the battlefield-wide suppression hook while each site now owns
+    // its targeting, lock, launch, and reload cadence.
     this.samActive = this.objectives.some((o) => o.active && o.type === ObjectiveType.SAM_SITE);
+    /* Legacy global SAM cadence replaced by per-site state machines.
     if (this.samActive) {
       this.samFireTimer -= delta;
       if (this.samFireTimer <= 0) {
@@ -3168,23 +3913,34 @@ export class GameEngine {
           const p = this.helicopter.body.position;
           const dx = p.x - sam.position.x;
           const dz = p.z - sam.position.z;
-          const len = Math.sqrt(dx * dx + dz * dz) || 1;
-          this.enemyProjectiles.spawn(
-            sam.position.x,
-            sam.position.y + 4,
-            sam.position.z,
-            dx / len,
-            dz / len,
-            time,
-            200,
-            8,
-            0,
-            0xff5544,
-          );
-          this.audio.playEnemyFire();
+          const hDist = Math.sqrt(dx * dx + dz * dz) || 1;
+          // Range gate: a site hundreds of units away shouldn't lob blind
+          // shots across the map — engage inside a useful envelope only.
+          if (hDist < 460) {
+            const speed = 210;
+            const dy = p.y - (sam.position.y + 4);
+            this.enemyProjectiles.spawn(
+              sam.position.x,
+              sam.position.y + 4,
+              sam.position.z,
+              dx / hDist,
+              dz / hDist,
+              time,
+              speed,
+              8,
+              0,
+              0xff5544,
+              { body: this.helicopter.body, active: true }, // homing target
+              2.2, // homing strength — tracks, but stays dodgeable
+              (dy / hDist) * speed, // initial vertical aim at the player
+              0,
+            );
+            this.audio.playEnemyFire();
+          }
         }
       }
     }
+    */
     if (this.samSuppressionTimer > 0) {
       this.samSuppressionTimer = Math.max(0, this.samSuppressionTimer - delta);
     }
@@ -3265,7 +4021,7 @@ export class GameEngine {
     // --- Survival encounter messaging ---
     if (this.waveTransitionTimer > 0) {
       this.waveTransitionTimer -= delta;
-      if (this.animationFrame % 30 === 0) this.updateUI(time);
+      if (this.frameCount % 30 === 0) this.updateUI(time);
     }
 
     // --- Reload Timer ---
@@ -3280,21 +4036,19 @@ export class GameEngine {
       }
     }
 
-    // --- Helicopter controls & Weapons ---
+    // Keep the last finite player position as the NaN-recovery anchor.
+    const playerBodyPosition = this.helicopter.body.position;
     if (
-      (this.isFiringMouse || this.isFiringGamepad) &&
-      this.health > 0
+      Number.isFinite(playerBodyPosition.x) &&
+      Number.isFinite(playerBodyPosition.y) &&
+      Number.isFinite(playerBodyPosition.z)
     ) {
-      this.fireWeapons(time);
+      this.movementTarget.set(
+        playerBodyPosition.x,
+        playerBodyPosition.y,
+        playerBodyPosition.z,
+      );
     }
-
-    // Phase 2: sync movementTarget to the body (used only as a safe
-    // fallback for NaN recovery now — movement is velocity-controlled).
-    this.movementTarget.set(
-      this.helicopter.body.position.x,
-      this.helicopter.body.position.y,
-      this.helicopter.body.position.z,
-    );
     this.helicopter.setAim(this.aimPoint.x, this.aimPoint.z);
 
     // --- Weather & Environment ---
@@ -3356,13 +4110,14 @@ export class GameEngine {
       this.helicopter.mesh.position.copy(hp as any);
     }
 
-    this.world.step(1 / 60, delta, 3);
-
+    // Apply the controller before the fixed physics step so key presses affect
+    // this frame's integration and collision callbacks get the final say on
+    // inward wall velocity.
     this.windCannon.set(this.weather.windForce.x, 0, this.weather.windForce.z);
     const hoverFloor = this.city.getHeightAt(
       this.helicopter.body.position.x,
       this.helicopter.body.position.z,
-      1.5,
+      0.5,
     );
     this.helicopter.setHoverFloor(hoverFloor);
     this.helicopter.update(
@@ -3375,18 +4130,54 @@ export class GameEngine {
         afterburner: this.afterburnerActive
           ? MOVEMENT_CONFIG.afterburnerMultiplier
           : 1,
+        cargoMultiplier: this.delivery.isCarrying()
+          ? cargoMovementMultiplier(this.hangarUpgrades.cargoRig)
+          : 1,
       },
     );
+
+    // Aim pivots are now current, so machine-gun shots leave the live muzzle.
+    if (
+      (this.isFiringMouse || this.isFiringGamepad) &&
+      this.health > 0
+    ) {
+      this.fireWeapons(time);
+    }
+
+    this.world.step(1 / 60, delta, 3);
+
+    // Catch solver/contact corruption before enemies, projectiles, or the camera
+    // can consume it in this frame.
+    const steppedPosition = this.helicopter.body.position;
+    const steppedVelocity = this.helicopter.body.velocity;
+    if (
+      !Number.isFinite(steppedPosition.x) ||
+      !Number.isFinite(steppedPosition.y) ||
+      !Number.isFinite(steppedPosition.z) ||
+      !Number.isFinite(steppedVelocity.x) ||
+      !Number.isFinite(steppedVelocity.y) ||
+      !Number.isFinite(steppedVelocity.z)
+    ) {
+      steppedPosition.set(
+        this.movementTarget.x,
+        this.movementTarget.y,
+        this.movementTarget.z,
+      );
+      steppedVelocity.set(0, 0, 0);
+      this.helicopter.body.angularVelocity.set(0, 0, 0);
+    }
+
     // World-bound clamp (the city scrolls forever in z; x has a hard boundary).
     const bx = this.helicopter.body.position.x;
-    const BOUND = 210;
-    if (bx > BOUND) {
-      this.helicopter.body.position.x = BOUND;
+    const bound = MOVEMENT_CONFIG.worldBoundX;
+    if (bx > bound) {
+      this.helicopter.body.position.x = bound;
       if (this.helicopter.body.velocity.x > 0) this.helicopter.body.velocity.x = 0;
-    } else if (bx < -BOUND) {
-      this.helicopter.body.position.x = -BOUND;
+    } else if (bx < -bound) {
+      this.helicopter.body.position.x = -bound;
       if (this.helicopter.body.velocity.x < 0) this.helicopter.body.velocity.x = 0;
     }
+    this.helicopter.syncBodyTransform();
 
     // Engine sound based on speed
     const currentSpeed = Math.sqrt(
@@ -3399,6 +4190,7 @@ export class GameEngine {
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (!e.active) {
+        this.releaseShieldAuras(e);
         e.destroy();
         this.enemies.splice(i, 1);
         continue;
@@ -3419,6 +4211,7 @@ export class GameEngine {
             { type: e.type, pos: [e.body.position.x, e.body.position.y, e.body.position.z] },
           );
         }
+        this.releaseShieldAuras(e);
         e.destroy();
         this.enemies.splice(i, 1);
         continue;
@@ -3541,7 +4334,11 @@ export class GameEngine {
       this.shotsHit++;
       const objDmg = proj.damage * (proj.blastRadius > 0 ? 1.1 : 1.0);
       const destroyed = obj.takeDamage(objDmg);
-      this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 14, time, 9);
+      this.hitMarkerTimer = 0.12;
+      this.hitMarkerPosition.set(obj.targetPoint.x, obj.targetPoint.y, obj.targetPoint.z);
+      this.particles.spawnSparks(proj.pos.x, proj.pos.y, proj.pos.z, time);
+      if (proj.blastRadius > 0) this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 14, time, 9);
+      this.audio.playHit();
       if (destroyed) {
         this.destroyObjective(obj, time);
       }
@@ -3669,14 +4466,16 @@ export class GameEngine {
     for (let i = this.powerups.length - 1; i >= 0; i--) {
       const pu = this.powerups[i];
 
-      // Gentle magnet: XP gems drift toward the player when close (VS feel)
+      // Magnet: XP gems drift toward the player when close (VS feel). Pull is
+      // strong enough to actually catch the helicopter (cruise ~68 u/s), so
+      // gems dropped beside/behind the flight path aren't left behind.
       if (pu.type === PowerUpType.XP_GEM) {
         const dx = playerPos.x - pu.mesh.position.x;
         const dz = playerPos.z - pu.mesh.position.z;
         const dist = Math.sqrt(dx * dx + dz * dz);
-        const magnetRadius = 22;
+        const magnetRadius = 24;
         if (dist > 0.1 && dist < magnetRadius) {
-          const pull = (1 - dist / magnetRadius) * 26 * delta;
+          const pull = (1 - dist / magnetRadius) * 52 * delta;
           pu.position.x += (dx / dist) * pull;
           pu.position.z += (dz / dist) * pull;
         }
@@ -3738,18 +4537,8 @@ export class GameEngine {
     this.renderFrame();
   };
 
-  /**
-   * Phase 3 — single controlled camera-impulse entry point. Heavy one-shot
-   * events only (bomb, boss slam, major collapse, heavy hit, crash); sets the
-   * impulse value once (strongest wins while decaying). The camera applies a
-   * restrained scaled offset that decays to zero — never modifies the base.
-   */
-  addCameraImpulse(strength: number) {
-    this.cameraShake = Math.min(
-      GameEngine.CAMERA_IMPULSE_MAX,
-      Math.max(this.cameraShake, strength),
-    );
-  }
+  /** Phase 1 intentionally disables all gameplay camera impulses. */
+  addCameraImpulse(_strength: number) {}
 
   /** Distance-falloff explosion impulse: far → none, nearby → small, very
    *  close + large → stronger but capped. */
@@ -3763,29 +4552,21 @@ export class GameEngine {
   }
 
   updateCamera(delta: number) {
-    const speed = Math.sqrt(
-      this.helicopter.body.velocity.x ** 2 + this.helicopter.body.velocity.z ** 2,
-    );
-    let camTargetX = this.helicopter.body.position.x;
-    // Pulled closer (44 vs 52) so near-field buildings occupy less of the frame
-    let camTargetZ = this.helicopter.body.position.z + 44 + this.combatIntensity * 8;
+    const heli = this.helicopter.body.position;
+    const velocity = this.helicopter.body.velocity;
+    if (
+      !Number.isFinite(heli.x) || !Number.isFinite(heli.y) || !Number.isFinite(heli.z) ||
+      !Number.isFinite(velocity.x) || !Number.isFinite(velocity.z)
+    ) return;
 
-    // Keep the velocity feed-forward mild so direction reversals don't overshoot
-    camTargetX += this.helicopter.body.velocity.x * 0.24;
-    camTargetZ += this.helicopter.body.velocity.z * 0.24;
-
-    // Delta-aware follow response: snappier than the old fixed 0.1/frame
-    // (~6.3/s at 60fps → ~9/s now) so the camera keeps up with the faster
-    // player without feeling twitchy. One smoothing layer, applied once.
-    const camLerp = 1 - Math.exp(-(this.isPlaying ? 9.0 : 3.5) * delta);
+    const speed = Math.hypot(velocity.x, velocity.z);
+    const camTargetX = heli.x + THREE.MathUtils.clamp(velocity.x * 0.18, -7, 7);
+    const camTargetZ =
+      heli.z + 44 + this.combatIntensity * 8 + THREE.MathUtils.clamp(velocity.z * 0.16, -7, 7);
+    const camLerp = 1 - Math.exp(-(this.isPlaying ? 10 : 3.5) * delta);
     this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camLerp;
     this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camLerp;
 
-    // Obstruction: any building the camera→helicopter view line passes through
-    // raises the camera above its top (+6 clearance) so skyscrapers between the
-    // camera and the player never swallow the action. Uses the stable base
-    // position so gun shake never bounces the camera over rooftops.
-    const heli = this.helicopter.body.position;
     const blockedTop = this.city.getCameraBlockedHeight(
       this.baseCamPos.x,
       this.baseCamPos.y,
@@ -3794,67 +4575,44 @@ export class GameEngine {
       heli.y,
       heli.z,
     );
-    const baseCamY = 62 + Math.min(speed * 0.1, 9) + this.combatIntensity * 5;
+    const baseCamY = heli.y + 36 + Math.min(speed * 0.08, 7) + this.combatIntensity * 5;
     const camTargetY = blockedTop > 0 ? Math.max(baseCamY, blockedTop + 6) : baseCamY;
-    const camYLerp = 1 - Math.exp(-(blockedTop > 0 ? 7.5 : 5.0) * delta);
+    const camYLerp = 1 - Math.exp(-(blockedTop > 0 ? 8 : 6) * delta);
     this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camYLerp;
 
-    const targetFov = 52 + Math.min(speed * 0.08, 7) + this.combatIntensity * 5;
-    this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4.0 * delta));
+    const targetFov = 52 + Math.min(speed * 0.07, 6) + this.combatIntensity * 4;
+    this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4 * delta));
     this.camera.updateProjectionMatrix();
+    this.camera.position.copy(this.baseCamPos);
 
-    if (this.cameraShake > 0) {
-      // Restrained positional impulse (X/Y only) inside the decaying envelope;
-      // Z never moves (it would shift the camera-to-player distance and feed
-      // the occlusion ray start). No camera roll, ever.
-      const shake = this.cameraShake * GameEngine.CAMERA_IMPULSE_SCALE;
-      this.shakeOffset.set(
-        (Math.random() - 0.5) * shake,
-        (Math.random() - 0.5) * shake,
-        0,
-      );
-      this.camera.position.copy(this.baseCamPos).add(this.shakeOffset);
-    } else {
-      this.camera.position.copy(this.baseCamPos);
-    }
-    // Decay always runs so cameraShake never lingers (no accumulation).
-    if (this.cameraShake > 0) {
-      this.cameraShake *= Math.exp(-GameEngine.SHAKE_DECAY_RATE * delta);
-      if (this.cameraShake < 0.01) this.cameraShake = 0;
-    }
-
-    // Pass 3 — camera occlusion: ghost buildings between the camera and the
-    // player so the helicopter never gets swallowed by the skyline. Detection
-    // is throttled; render-state only, so collisions/height queries/destruction
-    // are untouched. When not playing, targets drop to 0 and ghosts restore.
-    const heliPos = this.helicopter.body.position;
     this.city.updateOcclusion(
       this.baseCamPos.x,
       this.baseCamPos.y,
       this.baseCamPos.z,
-      heliPos.x,
-      heliPos.y,
-      heliPos.z,
+      heli.x,
+      heli.y,
+      heli.z,
       delta,
       this.isPlaying,
     );
 
-    // Phase 2: subtle velocity look-ahead — the view drifts a few units along
-    // the travel direction so speed reads dynamically (no shake). Clamped and
-    // driven by the (already smoothed) body velocity, so it's deterministic.
-    const lookSpeed = Math.sqrt(
-      this.helicopter.body.velocity.x ** 2 + this.helicopter.body.velocity.z ** 2,
-    );
-    const lookAhead = Math.min(9, lookSpeed * 0.12);
-    const lookNx = lookSpeed > 0.001 ? this.helicopter.body.velocity.x / lookSpeed : 0;
-    const lookNz = lookSpeed > 0.001 ? this.helicopter.body.velocity.z / lookSpeed : 0;
+    const desiredLookX = heli.x + THREE.MathUtils.clamp(velocity.x * 0.1, -4, 4);
+    const desiredLookY = Math.max(8, Math.min(70, heli.y + 2));
+    const desiredLookZ = heli.z - 9 + THREE.MathUtils.clamp(velocity.z * 0.12, -7, 5);
+    const lookLerp = 1 - Math.exp(-12 * delta);
+    this.cameraLookAtTarget.x += (desiredLookX - this.cameraLookAtTarget.x) * lookLerp;
+    this.cameraLookAtTarget.y += (desiredLookY - this.cameraLookAtTarget.y) * lookLerp;
+    this.cameraLookAtTarget.z += (desiredLookZ - this.cameraLookAtTarget.z) * lookLerp;
 
-    // Look-at tracks the player's altitude so the subject stays centered
-    // whether it's skimming the streets or flying over the towers.
-    this.camera.lookAt(
-      this.helicopter.body.position.x + lookNx * lookAhead,
-      Math.max(16, Math.min(70, this.helicopter.body.position.y + 2)),
-      this.helicopter.body.position.z - 9 + lookNz * lookAhead,
-    );
+    if (
+      Number.isFinite(this.camera.position.x) &&
+      Number.isFinite(this.camera.position.y) &&
+      Number.isFinite(this.camera.position.z) &&
+      Number.isFinite(this.cameraLookAtTarget.x) &&
+      Number.isFinite(this.cameraLookAtTarget.y) &&
+      Number.isFinite(this.cameraLookAtTarget.z)
+    ) {
+      this.camera.lookAt(this.cameraLookAtTarget);
+    }
   }
 }

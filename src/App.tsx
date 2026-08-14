@@ -1,9 +1,25 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { GameEngine, HelicopterModel } from './game';
-import type { GameSettings, UpgradeId, UpgradeOption } from './game';
+import {
+  EnemyVariant,
+  GameEngine,
+  HANGAR_UPGRADE_INFO,
+  HelicopterModel,
+  buyHangarUpgrade,
+  readDeliveryCredits,
+  readHangarUpgrades,
+} from './game';
+import type {
+  DeliveryHudSnapshot,
+  GameSettings,
+  HangarUpgradeId,
+  HangarUpgrades,
+  MinimapSnapshot,
+  UpgradeId,
+  UpgradeOption,
+} from './game';
 import { readMastery } from './game/logic';
-import { coinsForScore, formatDuration } from './game/logic';
+import { formatDuration } from './game/logic';
 
 type GameMode = 'menu' | 'playing' | 'paused' | 'gameover';
 
@@ -13,6 +29,12 @@ type RunStats = {
   maxCombo: number;
   accuracy: number;
   wave: number;
+  status?: 'DESTROYED' | 'EXTRACTED';
+  threatLevel?: number;
+  deliveries?: number;
+  samSitesDestroyed?: number;
+  lostUnsecured?: number;
+  securedThreatBonus?: number;
 };
 
 type PerfStats = {
@@ -129,10 +151,504 @@ function KeyCap({ children }: { children: ReactNode }) {
   );
 }
 
+const CONTROL_HINTS: { keys: string; label: string }[] = [
+  { keys: 'W A S D', label: 'Move' },
+  { keys: 'SPACE / ALT', label: 'Climb / Descend' },
+  { keys: 'SHIFT', label: 'Afterburner' },
+  { keys: 'HOLD FIRE', label: 'Shoot' },
+  { keys: 'C', label: 'Deploy Flares' },
+];
+
+/** Contextual onboarding: a short fading hint sequence after each run starts.
+ *  Replaces the old always-on control bar — hints never persist during combat. */
+function ControlHints({ runId }: { runId: number }) {
+  const [idx, setIdx] = useState(0);
+  const [visible, setVisible] = useState(false);
+
+  // runId effect: starts the sequence at hint 0, then advances to hint 1.
+  useEffect(() => {
+    setIdx(0);
+    setVisible(false);
+    let timeout: ReturnType<typeof setTimeout> = setTimeout(() => {
+      setVisible(true);
+      timeout = setTimeout(() => {
+        setVisible(false);
+        timeout = setTimeout(() => setIdx(1), 450);
+      }, 2400);
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [runId]);
+
+  // idx effect: show the hint, hide it, then advance to the next (or stay
+  // hidden on the last hint). Re-mounts its timers on every idx change.
+  useEffect(() => {
+    if (idx === 0) return;
+    setVisible(true);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    timers.push(
+      setTimeout(() => {
+        setVisible(false);
+        if (idx < CONTROL_HINTS.length - 1) {
+          timers.push(setTimeout(() => setIdx(idx + 1), 450));
+        }
+      }, 2400),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, [idx]);
+
+  const hint = CONTROL_HINTS[idx];
+  return (
+    <div
+      className={`pointer-events-none absolute bottom-6 left-1/2 z-30 -translate-x-1/2 transition-opacity duration-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
+    >
+      <div className="hud-panel flex items-center gap-3 px-4 py-2">
+        <KeyCap>{hint.keys}</KeyCap>
+        <span className="text-xs font-black uppercase tracking-[0.2em] text-white/90" style={{ textShadow: '0 2px 0 rgba(0,0,0,0.55)' }}>
+          {hint.label}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function Meter({ value, color }: { value: number; color: string }) {
   return (
     <div className="h-4 w-28 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-44">
       <div className={`h-full ${color} transition-[width] duration-300`} style={{ width: `${clampPercent(value)}%` }} />
+    </div>
+  );
+}
+
+// --- Tactical minimap ------------------------------------------------------
+// A north-up radar fed by the engine's ~12 Hz `helistrike:minimap` snapshot.
+// The snapshot lives in a ref and is drawn imperatively on a canvas — no React
+// re-renders, no entity objects in the UI layer.
+function drawMinimap(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  snap: MinimapSnapshot | null,
+) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const R = Math.min(W, H) / 2 - 20;
+  const cx = W / 2;
+  const cy = H / 2;
+  const t = performance.now() / 1000;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Panel
+  ctx.beginPath();
+  ctx.moveTo(6 + 20, 6);
+  ctx.arcTo(W - 6, 6, W - 6, H - 6, 20);
+  ctx.arcTo(W - 6, H - 6, 6, H - 6, 20);
+  ctx.arcTo(6, H - 6, 6, 6, 20);
+  ctx.arcTo(6, 6, W - 6, 6, 20);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(6, 13, 28, 0.74)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(120, 190, 255, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Grid rings + cross
+  ctx.strokeStyle = 'rgba(120, 190, 255, 0.11)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, R * 0.55, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - R, cy);
+  ctx.lineTo(cx + R, cy);
+  ctx.moveTo(cx, cy - R);
+  ctx.lineTo(cx, cy + R);
+  ctx.stroke();
+
+  if (!snap) {
+    ctx.fillStyle = 'rgba(160, 210, 255, 0.5)';
+    ctx.font = '700 15px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('NO SIGNAL', cx, cy);
+    return;
+  }
+
+  const range = Math.max(1, snap.range);
+  // North-up: world +X right, world -Z (forward) up.
+  const toX = (x: number) => cx + ((x - snap.player.x) / range) * R;
+  const toY = (z: number) => cy + ((z - snap.player.z) / range) * R;
+  const edgeX = (dx: number, dz: number) => {
+    const len = Math.hypot(dx, dz) || 1;
+    return { x: cx + (dx / len) * (R - 14), y: cy + (dz / len) * (R - 14) };
+  };
+
+  // Route line: player → destination while carrying (clamped to the radar edge)
+  if (snap.delivery?.carrying) {
+    const d = snap.delivery.destination;
+    const dx = d.x - snap.player.x;
+    const dz = d.z - snap.player.z;
+    const outside = Math.hypot(dx, dz) > range;
+    const end = outside ? edgeX(dx, dz) : { x: toX(d.x), y: toY(d.z) };
+    ctx.strokeStyle = 'rgba(85, 242, 194, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Delivery markers
+  if (snap.delivery) {
+    const origin = snap.delivery.origin;
+    const dest = snap.delivery.destination;
+    // Destination: bright green diamond, clamped to the edge when out of range
+    const ddx = dest.x - snap.player.x;
+    const ddz = dest.z - snap.player.z;
+    const destOutside = Math.hypot(ddx, ddz) > range;
+    const dp = destOutside ? edgeX(ddx, ddz) : { x: toX(dest.x), y: toY(dest.z) };
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(dp.x, dp.y - 9);
+    ctx.lineTo(dp.x + 7, dp.y);
+    ctx.lineTo(dp.x, dp.y + 9);
+    ctx.lineTo(dp.x - 7, dp.y);
+    ctx.closePath();
+    ctx.fillStyle = snap.delivery.carrying ? 'rgba(85, 242, 194, 0.95)' : 'rgba(85, 242, 194, 0.55)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(240, 255, 250, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+
+    // Origin: amber crate, only while the pickup is still relevant
+    if (!snap.delivery.carrying) {
+      const ox = toX(origin.x);
+      const oy = toY(origin.z);
+      if (Math.abs(ox - cx) <= R && Math.abs(oy - cy) <= R) {
+        const pulse = 0.7 + Math.sin(t * 4.5) * 0.3;
+        ctx.fillStyle = `rgba(255, 189, 63, ${pulse.toFixed(2)})`;
+        ctx.fillRect(ox - 4.5, oy - 4.5, 9, 9);
+        ctx.strokeStyle = 'rgba(255, 235, 170, 0.9)';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(ox - 4.5, oy - 4.5, 9, 9);
+      }
+    }
+  }
+
+  // Objectives
+  for (const o of snap.objectives) {
+    const dx = o.x - snap.player.x;
+    const dz = o.z - snap.player.z;
+    if (Math.hypot(dx, dz) > range) continue;
+    const ox = toX(o.x);
+    const oy = toY(o.z);
+    if (o.type === 0) {
+      // SAM — red warning triangle
+      ctx.beginPath();
+      ctx.moveTo(ox, oy - 9);
+      ctx.lineTo(ox + 8, oy + 7);
+      ctx.lineTo(ox - 8, oy + 7);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 85, 102, 0.95)';
+      ctx.fill();
+    } else {
+      // RADAR — antenna mast + dish
+      ctx.strokeStyle = 'rgba(126, 224, 255, 0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy + 6);
+      ctx.lineTo(ox, oy - 6);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ox, oy - 6, 4, Math.PI, 0);
+      ctx.stroke();
+    }
+  }
+
+  // Friendly extraction marker stays clamped to the radar edge.
+  if (snap.extraction) {
+    const dx = snap.extraction.x - snap.player.x;
+    const dz = snap.extraction.z - snap.player.z;
+    const dist = Math.hypot(dx, dz);
+    const inRange = dist <= range;
+    const ep = inRange ? { x: toX(snap.extraction.x), y: toY(snap.extraction.z) } : edgeX(dx, dz);
+    // Zone radius: pulsing green circle so the landing area itself reads.
+    if (inRange && snap.extraction.radius > 0) {
+      const rPx = Math.max(3, (snap.extraction.radius / range) * R);
+      const pulse = 0.5 + Math.sin(t * 3) * 0.15;
+      ctx.beginPath();
+      ctx.arc(ep.x, ep.y, rPx, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(85, 242, 162, ${pulse.toFixed(2)})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ep.x, ep.y, rPx * 0.45, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = snap.extraction.active ? 'rgba(100,255,175,1)' : 'rgba(85,242,162,0.9)';
+    ctx.font = '900 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('H', ep.x, ep.y);
+    ctx.strokeStyle = 'rgba(210,255,230,0.9)';
+    ctx.strokeRect(ep.x - 8, ep.y - 8, 16, 16);
+    // Pad elevation vs the player — "▲ 42m" reads as a rooftop to climb to.
+    const dy = snap.extraction.elevation - (snap.player.y ?? 0);
+    const dir = dy > 4 ? '▲' : dy < -4 ? '▼' : '≈';
+    ctx.font = '800 9px system-ui, sans-serif';
+    ctx.fillStyle = dy > 4 ? 'rgba(255, 189, 63, 0.95)' : 'rgba(160, 230, 200, 0.95)';
+    ctx.fillText(`${dir} ${Math.abs(Math.round(dy))}m`, ep.x, ep.y + 16);
+  }
+
+  // Enemies inside the radar radius
+  for (const e of snap.enemies) {
+    if (e.boss) continue;
+    const dx = e.x - snap.player.x;
+    const dz = e.z - snap.player.z;
+    if (Math.hypot(dx, dz) > range) continue;
+    const ex = toX(e.x);
+    const ey = toY(e.z);
+    // Variant markers override base-type icons — color/roll says "what is it".
+    const v = e.variant;
+    if (v === EnemyVariant.KAMIKAZE_DRONE) {
+      const pulse = 0.55 + 0.45 * Math.abs(Math.sin(t * 7));
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 7);
+      ctx.lineTo(ex + 5.5, ey + 5);
+      ctx.lineTo(ex - 5.5, ey + 5);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(255, 34, 68, ${pulse})`;
+      ctx.fill();
+    } else if (v === EnemyVariant.SCOUT_DRONE) {
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 7);
+      ctx.lineTo(ex + 3.5, ey);
+      ctx.lineTo(ex, ey + 7);
+      ctx.lineTo(ex - 3.5, ey);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 120, 140, 0.95)';
+      ctx.fill();
+    } else if (v === EnemyVariant.ATTACK_GUNSHIP || v === EnemyVariant.ROCKET_GUNSHIP || v === EnemyVariant.HEAVY_GUNSHIP) {
+      const size = v === EnemyVariant.HEAVY_GUNSHIP ? 9 : v === EnemyVariant.ROCKET_GUNSHIP ? 6.5 : 6;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - size);
+      ctx.lineTo(ex + size * 0.75, ey);
+      ctx.lineTo(ex, ey + size);
+      ctx.lineTo(ex - size * 0.75, ey);
+      ctx.closePath();
+      ctx.fillStyle = v === EnemyVariant.ROCKET_GUNSHIP ? 'rgba(255, 170, 51, 0.95)' : 'rgba(255, 90, 90, 0.95)';
+      ctx.fill();
+    } else if (v === EnemyVariant.MISSILE_CARRIER) {
+      // Amber missile marker: slim body + fin
+      ctx.fillStyle = 'rgba(255, 194, 63, 0.95)';
+      ctx.fillRect(ex - 1.5, ey - 7, 3, 12);
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 7);
+      ctx.lineTo(ex - 5, ey - 3.5);
+      ctx.lineTo(ex + 5, ey - 3.5);
+      ctx.closePath();
+      ctx.fill();
+    } else if (v === EnemyVariant.FLAK_TANK || v === EnemyVariant.SIEGE_TANK) {
+      const size = v === EnemyVariant.SIEGE_TANK ? 9 : 6;
+      ctx.fillStyle = 'rgba(255, 120, 60, 0.95)';
+      ctx.fillRect(ex - size * 0.5, ey - size * 0.5, size, size);
+      ctx.fillStyle = 'rgba(255, 60, 60, 0.95)';
+      ctx.beginPath();
+      ctx.arc(ex, ey, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (v === EnemyVariant.SHIELD_DRONE) {
+      ctx.beginPath();
+      ctx.arc(ex, ey, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(85, 238, 255, 0.95)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ex, ey, 1.8, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 60, 60, 0.95)';
+      ctx.fill();
+    } else if (v === EnemyVariant.REPAIR_DRONE) {
+      ctx.beginPath();
+      ctx.arc(ex, ey, 4.5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(85, 255, 153, 0.95)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ex, ey, 2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(85, 255, 153, 0.95)';
+      ctx.fill();
+    } else if (e.type === 1) {
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 6);
+      ctx.lineTo(ex + 4.5, ey);
+      ctx.lineTo(ex, ey + 6);
+      ctx.lineTo(ex - 4.5, ey);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 80, 80, 0.95)';
+      ctx.fill();
+    } else if (e.type === 2) {
+      ctx.fillStyle = 'rgba(255, 80, 80, 0.95)';
+      ctx.fillRect(ex - 3.5, ey - 3.5, 7, 7);
+    } else if (e.type === 3) {
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 6);
+      ctx.lineTo(ex + 5, ey + 4);
+      ctx.lineTo(ex - 5, ey + 4);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 120, 120, 0.95)';
+      ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(255, 70, 70, 0.9)';
+      ctx.beginPath();
+      ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (e.elite) {
+      ctx.strokeStyle = 'rgba(255, 170, 60, 0.95)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  // Repaint SAMs above normal contacts and reveal the envelope only while engaged.
+  for (const o of snap.objectives) {
+    if (o.type !== 0) continue;
+    const dx = o.x - snap.player.x;
+    const dz = o.z - snap.player.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > range) continue;
+    const ox = toX(o.x);
+    const oy = toY(o.z);
+    const engaged = o.samState === 'TRACKING' || o.samState === 'LOCKING' || o.samState === 'FIRING';
+    if (engaged && o.detectionRange) {
+      ctx.beginPath();
+      ctx.arc(ox, oy, Math.min(R, (o.detectionRange / range) * R), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 77, 62, 0.045)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 105, 70, 0.16)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    const lockPulse = o.samState === 'LOCKING' ? 0.58 + Math.abs(Math.sin(t * 9)) * 0.42 : 0.9;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy - 10);
+    ctx.lineTo(ox + 9, oy + 8);
+    ctx.lineTo(ox - 9, oy + 8);
+    ctx.closePath();
+    ctx.fillStyle = o.samState === 'RELOADING'
+      ? 'rgba(255, 174, 70, 0.72)'
+      : `rgba(255, 65, 82, ${lockPulse})`;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 235, 210, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  for (const threat of snap.threats) {
+    const dx = threat.x - snap.player.x;
+    const dz = threat.z - snap.player.z;
+    const dist = Math.hypot(dx, dz);
+    const mp = dist > range ? edgeX(dx, dz) : { x: toX(threat.x), y: toY(threat.z) };
+    ctx.save();
+    ctx.translate(mp.x, mp.y);
+    ctx.rotate(Math.atan2(dx, -dz));
+    ctx.fillStyle = threat.target === 'DECOY' ? 'rgba(130, 220, 190, 0.9)' : 'rgba(255, 153, 45, 0.98)';
+    ctx.fillRect(-1.8, -7, 3.6, 12);
+    ctx.beginPath();
+    ctx.moveTo(0, -9);
+    ctx.lineTo(4.5, -4);
+    ctx.lineTo(-4.5, -4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Boss — large crimson ring, clamped to the edge if far away
+  for (const e of snap.enemies) {
+    if (!e.boss) continue;
+    const dx = e.x - snap.player.x;
+    const dz = e.z - snap.player.z;
+    const dist = Math.hypot(dx, dz);
+    const bp = dist > range ? edgeX(dx, dz) : { x: toX(e.x), y: toY(e.z) };
+    const pulse = 1 + Math.sin(t * 3) * 0.12;
+    ctx.strokeStyle = 'rgba(255, 60, 80, 0.95)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(bp.x, bp.y, 11 * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bp.x, bp.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 60, 80, 0.9)';
+    ctx.fill();
+  }
+
+  // Player — centered heading arrow (body heading only; gun aim never affects it).
+  // The engine sets heading = atan2(velocity.x, velocity.z), so the nose points
+  // along world (sin h, cos h). North-up (screen up = world -Z) then needs a
+  // canvas rotation of PI - h: forward (-Z, h=PI) points up, strafe right (+X,
+  // h=PI/2) points right.
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(Math.PI - snap.player.heading);
+  ctx.beginPath();
+  ctx.moveTo(0, -12);
+  ctx.lineTo(8, 9);
+  ctx.lineTo(0, 5);
+  ctx.lineTo(-8, 9);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(110, 235, 255, 0.95)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(240, 255, 255, 0.95)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function MinimapPanel() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const snapRef = useRef<MinimapSnapshot | null>(null);
+
+  useEffect(() => {
+    const onMinimap = (e: Event) => {
+      snapRef.current = (e as CustomEvent<MinimapSnapshot>).detail;
+    };
+    window.addEventListener('helistrike:minimap', onMinimap);
+    return () => window.removeEventListener('helistrike:minimap', onMinimap);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    let raf = 0;
+    const render = () => {
+      raf = requestAnimationFrame(render);
+      drawMinimap(ctx, canvas, snapRef.current);
+    };
+    raf = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <div className="pointer-events-none absolute right-4 top-28 z-20 sm:right-6">
+      <canvas
+        ref={canvasRef}
+        width={360}
+        height={360}
+        className="block"
+        style={{ width: 'min(180px, 26vw)', height: 'min(180px, 26vw)' }}
+        aria-label="Tactical minimap"
+      />
     </div>
   );
 }
@@ -196,7 +712,7 @@ function ThreeDMenu({
         <div className="menu-rig">
           <div className="menu-card">
             <div className="menu-title-slab">
-              <span>{isGameOver ? 'Run Ended' : 'Heli-Strike'}</span>
+              <span>{isGameOver ? (stats?.status === 'EXTRACTED' ? 'Run Complete — Extracted' : 'Aircraft Destroyed') : 'Heli-Strike'}</span>
             </div>
 
             <div className="mt-5 grid grid-cols-3 gap-3 text-center">
@@ -232,6 +748,13 @@ function ThreeDMenu({
                   <span>Accuracy</span>
                   <strong>{Math.round(stats.accuracy * 100)}%</strong>
                 </div>
+                <div className="run-stat"><span>Threat</span><strong>{stats.threatLevel ?? 1}</strong></div>
+                <div className="run-stat"><span>Deliveries</span><strong>{stats.deliveries ?? 0}</strong></div>
+                <div className="run-stat"><span>SAM Sites</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
+                <div className="run-stat">
+                  <span>{stats.status === 'EXTRACTED' ? 'Bonus Secured' : 'Bonus Lost'}</span>
+                  <strong>{stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR</strong>
+                </div>
               </div>
             )}
 
@@ -263,6 +786,7 @@ function ThreeDMenu({
               <div className="menu-chip">Space Climb</div>
               <div className="menu-chip">Alt Descend</div>
               <div className="menu-chip col-span-2 text-center text-[#ff3344] bg-[#ff3344]/10 border-[#ff3344]/30 py-1.5 rounded-[5px] border">Q / R-Click Lock Salvo</div>
+              <div className="menu-chip col-span-2 text-center text-[#ffbd3f]">C Deploy Flares</div>
               <div className="menu-chip col-span-2 text-center border-white/20 py-1.5 rounded-[5px]">ESC / P Pause</div>
             </div>
           </div>
@@ -467,23 +991,19 @@ function SettingsPanel({
               <div className="setting-row">
                 <div>
                   <div className="setting-label">Visual Quality</div>
-                  <div className="setting-desc">High enables bloom FX & sharp pixels</div>
+                  <div className="setting-desc">Low/Medium scale render resolution; High adds bloom FX & max pixels</div>
                 </div>
                 <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onChange({ quality: 'low' })}
-                    className={`seg-btn ${settings.quality === 'low' ? 'seg-on' : ''}`}
-                  >
-                    Low
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onChange({ quality: 'high' })}
-                    className={`seg-btn ${settings.quality === 'high' ? 'seg-on' : ''}`}
-                  >
-                    High
-                  </button>
+                  {(['low', 'medium', 'high'] as const).map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      onClick={() => onChange({ quality: q })}
+                      className={`seg-btn ${settings.quality === q ? 'seg-on' : ''}`}
+                    >
+                      {q === 'low' ? 'Low' : q === 'medium' ? 'Medium' : 'High'}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -582,12 +1102,18 @@ function HelicopterCard({
 function HangarScreen({
   mastery,
   playerModel,
+  credits,
+  hangarUpgrades,
   onSelectModel,
+  onBuyUpgrade,
   onBack,
 }: {
   mastery: number[];
   playerModel: HelicopterModel;
+  credits: number;
+  hangarUpgrades: HangarUpgrades;
   onSelectModel: (m: HelicopterModel) => void;
+  onBuyUpgrade: (id: HangarUpgradeId) => void;
   onBack: () => void;
 }) {
   return (
@@ -599,7 +1125,48 @@ function HangarScreen({
               Hangar
             </div>
             <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-white/60">
-              Pick your aircraft — mastery persists across runs
+              Aircraft, weapon mastery, and permanent systems
+            </div>
+
+            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-lg border border-[#ffe66d]/55 bg-[#3d2b08]/65 px-3 py-1.5">
+              <CoinIcon />
+              <span className="text-xl font-black text-[#ffe66d]">{credits.toLocaleString()} CREDITS</span>
+            </div>
+
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#7ee0ff]">
+              Permanent Systems
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+              {(Object.entries(HANGAR_UPGRADE_INFO) as [HangarUpgradeId, (typeof HANGAR_UPGRADE_INFO)[HangarUpgradeId]][]).map(([id, info]) => {
+                const rank = hangarUpgrades[id];
+                const cost = info.costs[rank];
+                const maxed = cost === undefined;
+                const affordable = !maxed && credits >= cost;
+                return (
+                  <div key={id} className="flex flex-col rounded-xl border-2 border-white/18 bg-[#12294a]/85 px-3 py-3 text-center">
+                    <div className="text-xs font-black uppercase tracking-wide text-white">{info.name}</div>
+                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#7ee0ff]">Rank {rank} / {info.costs.length}</div>
+                    <div className="mt-2 flex justify-center gap-1">
+                      {info.costs.map((_, index) => index + 1).map((level) => (
+                        <span key={level} className={`h-1.5 w-8 rounded-full ${level <= rank ? 'bg-[#55f2c2]' : 'bg-white/12'}`} />
+                      ))}
+                    </div>
+                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-white/65">{info.description}</div>
+                    <button
+                      type="button"
+                      disabled={!affordable}
+                      onClick={() => onBuyUpgrade(id)}
+                      className={`mt-3 rounded-md border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
+                        affordable
+                          ? 'border-[#ffe66d] bg-[#ffe66d]/18 text-[#ffe66d] hover:bg-[#ffe66d]/28'
+                          : 'cursor-not-allowed border-white/12 bg-black/15 text-white/35'
+                      }`}
+                    >
+                      {maxed ? 'Max Rank' : `${cost} Credits`}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
 
             {/* Player aircraft selector */}
@@ -685,9 +1252,12 @@ export default function App() {
   const engineRef = useRef<GameEngine | null>(null);
   const modeRef = useRef<GameMode>('menu');
   const [mode, setMode] = useState<GameMode>('menu');
+  const [hintsKey, setHintsKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showHangar, setShowHangar] = useState(false);
   const [mastery, setMastery] = useState<number[]>(() => readMastery());
+  const [credits, setCredits] = useState(() => readDeliveryCredits());
+  const [hangarUpgrades, setHangarUpgrades] = useState<HangarUpgrades>(() => readHangarUpgrades());
   const [playerModel, setPlayerModel] = useState<HelicopterModel>(() => {
     try {
       const n = Number(window.localStorage.getItem('helistrike:playerModel'));
@@ -737,6 +1307,16 @@ export default function App() {
     isPainting: boolean;
     ready: boolean;
   } | null>(null);
+  const [countermeasureInfo, setCountermeasureInfo] = useState<{
+    charges: number; maxCharges: number; cooldown: number; ready: boolean;
+  } | null>(null);
+  const [threatInfo, setThreatInfo] = useState<{
+    points: number; level: number; name: string; rewardMultiplier: number;
+  } | null>(null);
+  const [unsecuredCredits, setUnsecuredCredits] = useState(0);
+  const [extraction, setExtraction] = useState<{
+    distance: number; bearing: number; progress: number; active: boolean; carrying: boolean;
+  } | null>(null);
   const [upgradeOffer, setUpgradeOffer] = useState<UpgradeOption[] | null>(null);
   const [announcement, setAnnouncement] = useState<{
     text: string;
@@ -747,9 +1327,15 @@ export default function App() {
   const [objectives, setObjectives] = useState<{
     sam: boolean;
     radar: boolean;
-    depot: boolean;
     count: number;
   } | null>(null);
+  const [samThreat, setSamThreat] = useState<{
+    state: 'TRACKING' | 'LOCKING' | 'INBOUND';
+    progress: number;
+    distance: number;
+    bearing: number;
+  } | null>(null);
+  const [delivery, setDelivery] = useState<DeliveryHudSnapshot | null>(null);
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
   const [showPerf, setShowPerf] = useState(true);
 
@@ -784,6 +1370,7 @@ export default function App() {
     if (!canvasRef.current) return;
     const engine = new GameEngine(canvasRef.current);
     engineRef.current = engine;
+    (window as any).__engine = engine; // TEMP debug hook — remove before final
 
     // Apply persisted settings + auto-detect touch
     const persisted = readSettings();
@@ -805,8 +1392,15 @@ export default function App() {
       setComboInfo(e.detail.combo || null);
       setStatusInfo(e.detail.status || null);
       setSalvoInfo(e.detail.salvo || null);
+      setCountermeasureInfo(e.detail.countermeasures || null);
+      setThreatInfo(e.detail.threatSystem || null);
+      setUnsecuredCredits(e.detail.unsecuredCredits ?? 0);
+      setExtraction(e.detail.extraction || null);
       setBossInfo(e.detail.boss || null);
       setObjectives(e.detail.objectives || null);
+      setSamThreat(e.detail.samThreat || null);
+      setDelivery(e.detail.delivery || null);
+      if (Number.isFinite(e.detail.credits)) setCredits(e.detail.credits);
 
       const storedHighScore = readHighScore();
       if (nextScore > storedHighScore) {
@@ -839,6 +1433,12 @@ export default function App() {
         maxCombo: e.detail.maxCombo ?? 0,
         accuracy: e.detail.accuracy ?? 0,
         wave: e.detail.wave ?? 0,
+        status: e.detail.status ?? 'DESTROYED',
+        threatLevel: e.detail.threatLevel ?? 1,
+        deliveries: e.detail.deliveries ?? 0,
+        samSitesDestroyed: e.detail.samSitesDestroyed ?? 0,
+        lostUnsecured: e.detail.lostUnsecured ?? 0,
+        securedThreatBonus: e.detail.securedThreatBonus ?? 0,
       });
 
       const storedHighScore = readHighScore();
@@ -922,6 +1522,7 @@ export default function App() {
     setRunStats(null);
     setIsNewBest(false);
     setShowHangar(false);
+    setHintsKey((k) => k + 1);
     engineRef.current?.startGame();
   };
 
@@ -930,6 +1531,7 @@ export default function App() {
     setRunStats(null);
     setIsNewBest(false);
     setShowHangar(false);
+    setHintsKey((k) => k + 1);
     engineRef.current?.startGame();
   };
 
@@ -954,6 +1556,13 @@ export default function App() {
     window.dispatchEvent(new CustomEvent('helistrike:player-model', { detail: { model } }));
   };
 
+  const purchaseHangarUpgrade = (id: HangarUpgradeId) => {
+    const result = buyHangarUpgrade(credits, hangarUpgrades, id);
+    if (!result.purchased) return;
+    setCredits(result.credits);
+    setHangarUpgrades(result.upgrades);
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' && e.key.toLowerCase() !== 'p') return;
@@ -969,7 +1578,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [mode, showSettings, upgradeOffer]);
 
-  const coins = coinsForScore(score);
   const textShadow = { textShadow: '0 2px 0 rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.35)' };
   const hudDim = mode !== 'playing' ? 'opacity-35' : 'opacity-100';
   const dangerOpacity = mode === 'playing' ? clampPercent(35 - health) / 100 : 0;
@@ -992,7 +1600,8 @@ export default function App() {
           Heli-Strike Arcade Assault
         </div>
 
-        <div className="absolute left-4 top-3 flex flex-col gap-2 sm:left-6 sm:top-5">
+        <div className={`hud-panel absolute left-4 top-3 flex flex-col gap-1.5 px-3 py-2 sm:left-6 sm:top-5 ${health <= 30 ? 'hud-danger' : ''}`}>
+          <div className="hud-label">Systems</div>
           <div className="flex items-center gap-2">
             <HeartIcon />
             <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
@@ -1005,15 +1614,27 @@ export default function App() {
           </div>
         </div>
 
-        <div className="absolute left-1/2 top-3 -translate-x-1/2 text-center sm:top-5">
-          <div className="text-xs font-extrabold uppercase tracking-[0.14em] sm:text-sm sm:tracking-[0.18em]" style={textShadow}>Stage {wave === 0 ? '-' : wave}</div>
-          <div className="mt-1 text-2xl font-black leading-none sm:text-3xl" style={textShadow}>{score.toLocaleString()}</div>
+        <div className="hud-panel absolute left-1/2 top-3 -translate-x-1/2 px-6 py-1.5 text-center sm:top-5">
+          <div className="hud-label">Stage {wave === 0 ? '-' : wave}</div>
+          <div className="mt-0.5 text-2xl font-black leading-none sm:text-3xl" style={textShadow}>{score.toLocaleString()}</div>
         </div>
 
-        <div className="absolute right-4 top-4 flex items-center gap-2 sm:right-6 sm:top-6">
+        <div className="hud-panel absolute right-4 top-4 flex items-center gap-2 px-3 py-1.5 sm:right-6 sm:top-6">
           <CoinIcon />
-          <span className="text-3xl font-black leading-none" style={textShadow}>{coins.toLocaleString()}</span>
+          <div className="text-right">
+            <div className="text-2xl font-black leading-none" style={textShadow}>{credits.toLocaleString()}</div>
+            {unsecuredCredits > 0 && <div className="mt-1 text-[9px] font-black uppercase tracking-wider text-[#ffbd3f]">Unsecured +{unsecuredCredits.toLocaleString()}</div>}
+          </div>
         </div>
+
+        {threatInfo && mode === 'playing' && (
+          <div className="hud-panel absolute left-1/2 top-[4.6rem] -translate-x-1/2 px-3 py-1 text-center">
+            <div className="hud-label">Threat {'█'.repeat(threatInfo.level)}{'░'.repeat(5 - threatInfo.level)}</div>
+            <div className={`text-[11px] font-black uppercase ${threatInfo.level >= 4 ? 'text-[#ff5566]' : threatInfo.level >= 2 ? 'text-[#ffbd3f]' : 'text-[#bfeeff]'}`}>
+              {threatInfo.name} · x{threatInfo.rewardMultiplier.toFixed(2)} reward
+            </div>
+          </div>
+        )}
 
         {/* Destroyable objective indicators */}
         {objectives && objectives.count > 0 && mode === 'playing' && (
@@ -1028,11 +1649,139 @@ export default function App() {
                 📡 RADAR
               </span>
             )}
-            {objectives.depot && (
-              <span className="rounded-[4px] border border-[#ffaa33]/70 bg-[#3d2b08]/70 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#ffd68f]" style={textShadow}>
-                📦 DEPOT
-              </span>
-            )}
+          </div>
+        )}
+
+        {samThreat && mode === 'playing' && (
+          <div className="pointer-events-none absolute left-1/2 top-[10.2rem] w-[min(290px,70vw)] -translate-x-1/2 text-center">
+            <div className={`rounded-md border px-3 py-1.5 backdrop-blur-sm ${
+              samThreat.state === 'INBOUND'
+                ? 'border-[#ff3344] bg-[#4a0710]/85 text-[#ff8b96]'
+                : samThreat.state === 'LOCKING'
+                  ? 'border-[#ff9b3d]/80 bg-[#3e2108]/75 text-[#ffc16f]'
+                  : 'border-[#ffd35c]/45 bg-[#352b0b]/55 text-[#ffe392]'
+            }`}>
+              <div className="flex items-center justify-center gap-2 text-xs font-black uppercase tracking-[0.2em]" style={textShadow}>
+                <span style={{ transform: `rotate(${samThreat.bearing}deg)` }}>▲</span>
+                <span>{samThreat.state === 'INBOUND' ? 'Missile inbound' : samThreat.state === 'LOCKING' ? 'SAM lock' : 'SAM tracking'}</span>
+                <span className="text-white/70">{samThreat.distance}m</span>
+              </div>
+              {samThreat.state === 'LOCKING' && (
+                <div className="mt-1 h-1 overflow-hidden rounded-full bg-black/50">
+                  <div className="h-full bg-[#ff9b3d]" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
+                </div>
+              )}
+              {samThreat.state === 'INBOUND' && countermeasureInfo?.ready && (
+                <div className="mt-1 text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]">[C] Flares ready</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
+        {mode === 'playing' && <MinimapPanel />}
+
+        {countermeasureInfo && mode === 'playing' && (
+          <div className="hud-panel pointer-events-none absolute left-4 top-[19rem] px-3 py-2 sm:left-6 sm:top-[19.5rem]">
+            <div className="hud-label text-[#ffbd3f]">Flares · C</div>
+            <div className="mt-1 text-base tracking-[0.18em] text-[#ffbd3f]">
+              {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
+            </div>
+            {countermeasureInfo.cooldown > 0 && <div className="text-[10px] font-black text-white/65">{countermeasureInfo.cooldown.toFixed(1)}s</div>}
+          </div>
+        )}
+
+        {extraction && mode === 'playing' && (
+          <div className="pointer-events-none absolute right-4 top-[29rem] w-[min(250px,44vw)] sm:right-6 sm:top-[29.5rem]">
+            <div className="hud-panel border-[#55f2a2]/60 px-3 py-2">
+              <div className="hud-label text-[#55f2a2]">Extraction Available</div>
+              <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{unsecuredCredits} CR</span></div>
+              {extraction.active && (
+                <div className="mt-2"><div className="text-[10px] font-black uppercase">Extracting {Math.round(extraction.progress * 100)}%</div><div className="mt-1 h-1.5 bg-black/45"><div className="h-full bg-[#55f2a2]" style={{ width: `${clampPercent(extraction.progress * 100)}%` }} /></div></div>
+              )}
+              {extraction.carrying && <div className="mt-1 text-[9px] font-black text-[#ffbd3f]">ACTIVE DELIVERY WILL BE ABANDONED</div>}
+            </div>
+          </div>
+        )}
+
+        {extraction && extraction.distance > 70 && mode === 'playing' && (
+          <div className="pointer-events-none absolute left-1/2 top-[24%] -translate-x-1/2 text-center">
+            <div className="text-3xl font-black text-[#55f2a2]" style={{ ...textShadow, transform: `rotate(${extraction.bearing}deg)` }}>▲</div>
+            <div className="text-[10px] font-black uppercase tracking-widest" style={textShadow}>Extract · {extraction.distance}m</div>
+          </div>
+        )}
+
+        {/* Compact delivery contract card */}
+        {delivery && mode === 'playing' && (
+          <div className="pointer-events-none absolute right-4 top-[19rem] w-[min(250px,44vw)] sm:right-6 sm:top-[19.5rem]">
+            <div className={`hud-panel px-3 py-2.5 ${delivery.difficulty === 'HIGH_VALUE' ? 'border-[#d78cff]/70' : 'border-[#55f2c2]/45'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="hud-label text-[#55f2c2]">Delivery</span>
+                <span className={`rounded-[3px] px-1.5 py-0.5 text-[9px] font-black tracking-wider ${
+                  delivery.difficulty === 'HIGH_VALUE'
+                    ? 'bg-[#d78cff]/25 text-[#edc8ff]'
+                    : delivery.difficulty === 'RISKY'
+                      ? 'bg-[#ff8a44]/25 text-[#ffbd8e]'
+                      : 'bg-white/10 text-white/55'
+                }`}>
+                  {delivery.difficulty.replace('_', ' ')}
+                </span>
+              </div>
+              <div className="mt-1 text-base font-black uppercase tracking-wide text-white" style={textShadow}>
+                <span className="mr-1.5 text-[#ffbd3f]">{delivery.cargoIcon}</span>{delivery.cargoName}
+              </div>
+              <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] font-black uppercase tracking-wider">
+                <span className={delivery.action === 'PICKUP' ? 'text-[#ffbd3f]' : 'text-[#55f2c2]'}>{delivery.action}</span>
+                <span className="text-white">{delivery.distance >= 1000 ? `${(delivery.distance / 1000).toFixed(1)} km` : `${delivery.distance} m`}</span>
+              </div>
+              <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-wide text-white/55">{delivery.destinationName}</div>
+              <div className="mt-2 flex items-end justify-between gap-2 border-t border-white/12 pt-1.5">
+                <div>
+                  <div className="hud-label">Reward</div>
+                  <div className="text-sm font-black text-[#ffe66d]">{delivery.reward} CR</div>
+                  {delivery.samRiskBonus > 0 && <div className="text-[9px] font-black uppercase text-[#ff9b3d]">+{delivery.samRiskBonus} SAM risk</div>}
+                </div>
+                {delivery.timeBonusRemaining !== null && (
+                  <div className="text-right">
+                    <div className="hud-label">Time Bonus</div>
+                    <div className={delivery.timeBonusRemaining > 0 ? 'text-sm font-black text-[#55f2c2]' : 'text-sm font-black text-white/35'}>
+                      {formatDuration(delivery.timeBonusRemaining)}
+                    </div>
+                  </div>
+                )}
+              </div>
+              {(delivery.state === 'PICKUP_READY' || delivery.state === 'DELIVERING') && (
+                <div className="mt-2">
+                  <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
+                    <span className={delivery.state === 'DELIVERING' ? 'text-[#55f2c2]' : 'text-[#ffbd3f]'}>
+                      Hold position
+                    </span>
+                    <span className="text-white/60">{Math.round(clampPercent(delivery.progress * 100))}%</span>
+                  </div>
+                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/45">
+                    <div
+                      className={`h-full transition-[width] duration-75 ${delivery.state === 'DELIVERING' ? 'bg-[#55f2c2]' : 'bg-[#ffbd3f]'}`}
+                      style={{ width: `${clampPercent(delivery.progress * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Edge-style route direction cue; the world beacon takes over nearby. */}
+        {delivery && delivery.action !== 'COMPLETE' && delivery.distance > 70 && mode === 'playing' && (
+          <div className="pointer-events-none absolute left-1/2 top-[20%] -translate-x-1/2 text-center">
+            <div
+              className={`mx-auto text-3xl font-black ${delivery.action === 'PICKUP' ? 'text-[#ffbd3f]' : 'text-[#55f2c2]'}`}
+              style={{ ...textShadow, transform: `rotate(${delivery.bearing}deg)` }}
+            >
+              ▲
+            </div>
+            <div className="mt-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-white" style={textShadow}>
+              {delivery.action} · {delivery.distance}m
+            </div>
           </div>
         )}
 
@@ -1052,15 +1801,15 @@ export default function App() {
 
         {/* Boss health bar */}
         {bossInfo && mode === 'playing' && (
-          <div className="absolute left-1/2 top-[4.5rem] w-[min(460px,68vw)] -translate-x-1/2">
-            <div className="mb-1 text-center text-xs font-black uppercase tracking-[0.22em] text-[#d84cff]" style={textShadow}>
-              Boss
-            </div>
-            <div className="h-3.5 overflow-hidden rounded-[4px] border-2 border-[#d84cff]/80 bg-black/45 shadow-[0_3px_0_rgba(0,0,0,0.35)]">
-              <div
-                className="h-full bg-gradient-to-r from-[#6b1fc2] to-[#d84cff] transition-[width] duration-200"
-                style={{ width: `${clampPercent((bossInfo.hp / Math.max(1, bossInfo.maxHp)) * 100)}%` }}
-              />
+          <div className="absolute left-1/2 top-[4.5rem] w-[min(480px,70vw)] -translate-x-1/2">
+            <div className="hud-panel px-3 py-2">
+              <div className="hud-label text-[#e79bff]">Hostile Gunship — Archon</div>
+              <div className="mt-1.5 h-3.5 overflow-hidden rounded-[2px] border border-black/60 bg-black/55 shadow-[0_2px_0_rgba(0,0,0,0.35)]">
+                <div
+                  className="h-full bg-gradient-to-r from-[#6b1fc2] to-[#d84cff] transition-[width] duration-200"
+                  style={{ width: `${clampPercent((bossInfo.hp / Math.max(1, bossInfo.maxHp)) * 100)}%` }}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -1076,30 +1825,32 @@ export default function App() {
           </button>
         )}
 
-        {/* Weapon HUD */}
+        {/* Weapon HUD — Tier 1 */}
         {weaponInfo && mode === 'playing' && (
           <div className="pointer-events-none absolute left-4 top-20 flex flex-col gap-1 sm:left-6 sm:top-24">
-            <div className="flex items-center gap-2">
-              <BulletIcon />
-              <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
-                {weaponInfo.name}
-              </span>
-              {(weaponInfo.level ?? 1) > 1 && (
-                <span className="rounded-[4px] border border-[#7ee0ff]/70 bg-[#0a2a3a]/70 px-1.5 py-0.5 text-[10px] font-black text-[#7ee0ff]">
-                  LV.{weaponInfo.level}
+            <div className="hud-panel px-3 py-2">
+              <div className="flex items-center gap-2">
+                <BulletIcon />
+                <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
+                  {weaponInfo.name}
                 </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              {weaponInfo.reloading ? (
-                <span className="text-sm font-black text-yellow-300" style={textShadow}>
-                  RELOADING... {Math.ceil(weaponInfo.reloadTimer)}s
-                </span>
-              ) : (
-                <span className="text-sm font-black" style={textShadow}>
-                  {weaponInfo.ammo} / {weaponInfo.maxAmmo}
-                </span>
-              )}
+                {(weaponInfo.level ?? 1) > 1 && (
+                  <span className="rounded-[3px] border border-[#7ee0ff]/60 bg-[#0a2a3a]/80 px-1.5 py-0.5 text-[10px] font-black text-[#7ee0ff]">
+                    LV.{weaponInfo.level}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                {weaponInfo.reloading ? (
+                  <span className="text-sm font-black text-yellow-300" style={textShadow}>
+                    RELOADING... {Math.ceil(weaponInfo.reloadTimer)}s
+                  </span>
+                ) : (
+                  <span className="text-sm font-black" style={textShadow}>
+                    {weaponInfo.ammo} / {weaponInfo.maxAmmo}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1121,16 +1872,17 @@ export default function App() {
           </div>
         )}
 
-        {/* Salvo HUD */}
+        {/* Salvo HUD — Tier 2 */}
         {salvoInfo && mode === 'playing' && (
           <div className="pointer-events-none absolute left-4 top-34 flex flex-col gap-1 sm:left-6 sm:top-38">
+            <div className="hud-panel px-3 py-2">
             <div className="flex items-center gap-2">
               <TargetIcon />
               <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
                 Multi-Salvo
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="mt-1 flex items-center gap-2">
               {salvoInfo.isPainting ? (
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-black text-red-400 animate-pulse uppercase" style={textShadow}>
@@ -1166,6 +1918,7 @@ export default function App() {
                 </span>
               )}
             </div>
+            </div>
           </div>
         )}
 
@@ -1188,73 +1941,42 @@ export default function App() {
         )}
 
         {statusInfo && mode === 'playing' && (
-          <div className="pointer-events-none absolute right-4 top-28 flex flex-col items-end gap-1 text-xs font-black uppercase tracking-[0.12em] sm:right-6 sm:top-32">
+          <div className={`pointer-events-none absolute right-4 flex flex-col items-end gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80 sm:right-6 ${delivery ? 'top-[29rem] sm:top-[30rem]' : 'top-[19rem] sm:top-[19.5rem]'}`}>
             {statusInfo.threat > 0.68 && (
-              <div className="rounded-[5px] border border-[#ff3344]/70 bg-[#40101a]/70 px-3 py-1 text-[#ffd3d7]" style={textShadow}>
+              <div className="hud-status border-[#ff3344]/60 text-[#ffd3d7]" style={textShadow}>
                 Threat High
               </div>
             )}
             {statusInfo.afterburner && (
-              <div className="rounded-[5px] border border-[#ff7722]/80 bg-[#3d1f08]/80 px-3 py-1 text-[#ffb066] animate-pulse" style={textShadow}>
+              <div className="hud-status border-[#ff7722]/60 text-[#ffb066] animate-pulse" style={textShadow}>
                 🔥 Afterburner
               </div>
             )}
             {statusInfo.risk && statusInfo.risk > 1 && (
-              <div className="rounded-[5px] border border-[#ff3344]/80 bg-[#3d0a12]/80 px-3 py-1 text-[#ff8899]" style={textShadow}>
+              <div className="hud-status border-[#ff3344]/60 text-[#ff8899]" style={textShadow}>
                 RISK x{statusInfo.risk.toFixed(2)}
               </div>
             )}
             {statusInfo.damageBoost > 0 && (
-              <div className="rounded-[5px] border border-[#ffe66d]/70 bg-[#3d2b08]/70 px-3 py-1 text-[#ffe66d]" style={textShadow}>
+              <div className="hud-status border-[#ffe66d]/50 text-[#ffe66d]" style={textShadow}>
                 Damage {Math.ceil(statusInfo.damageBoost)}s
               </div>
             )}
             {statusInfo.shield > 0 && (
-              <div className="rounded-[5px] border border-[#80d8ff]/70 bg-[#092a3f]/70 px-3 py-1 text-[#bfeeff]" style={textShadow}>
+              <div className="hud-status border-[#80d8ff]/50 text-[#bfeeff]" style={textShadow}>
                 Shield {Math.ceil(statusInfo.shield)}s
               </div>
             )}
             {statusInfo.speedBoost > 0 && (
-              <div className="rounded-[5px] border border-[#ff88ff]/70 bg-[#38113a]/70 px-3 py-1 text-[#ffd0ff]" style={textShadow}>
+              <div className="hud-status border-[#ff88ff]/50 text-[#ffd0ff]" style={textShadow}>
                 Boost {Math.ceil(statusInfo.speedBoost)}s
               </div>
             )}
           </div>
         )}
 
-        {mode === 'playing' && !touchDevice && (
-          <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-[6px] border border-white/30 bg-[#102447]/55 px-4 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_8px_24px_rgba(0,0,0,0.2),inset_0_0_18px_rgba(255,230,109,0.12)] backdrop-blur-sm">
-            <div className="flex items-center gap-1">
-              <KeyCap>WASD</KeyCap>
-              <span style={textShadow}>Move</span>
-            </div>
-            <div className="h-6 w-px bg-white/25" />
-            <div className="flex items-center gap-1">
-              <KeyCap>Shift</KeyCap>
-              <span style={textShadow}>Afterburn</span>
-            </div>
-            <div className="h-6 w-px bg-white/25" />
-            <div className="flex items-center gap-1">
-              <KeyCap>Space</KeyCap>
-              <span style={textShadow}>Climb</span>
-            </div>
-            <div className="h-6 w-px bg-white/25" />
-            <div className="flex items-center gap-1">
-              <KeyCap>Alt</KeyCap>
-              <span style={textShadow}>Descend</span>
-            </div>
-            <div className="h-6 w-px bg-white/25" />
-            <div className="flex items-center gap-1">
-              <BulletIcon />
-              <span style={textShadow}>Hold Fire</span>
-            </div>
-            <div className="h-6 w-px bg-white/25" />
-            <div className="flex items-center gap-1">
-              <KeyCap>1-4</KeyCap>
-              <span style={textShadow}>Weapons</span>
-            </div>
-          </div>
-        )}
+        {/* Contextual onboarding — short fading hints, never a persistent bar */}
+        {mode === 'playing' && !touchDevice && <ControlHints runId={hintsKey} />}
       </div>
 
       {mode === 'playing' && waveMessage && (
@@ -1271,6 +1993,12 @@ export default function App() {
           <VirtualJoystick side="left" onStick={dispatchStick('helistrike:left-stick')} />
           <VirtualJoystick side="right" onStick={dispatchStick('helistrike:right-stick')} />
           <FireButton onFire={setFire} />
+          <button
+            type="button"
+            aria-label="Deploy flares"
+            onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:countermeasure')); }}
+            className="pointer-events-auto absolute bottom-36 right-8 h-16 w-16 rounded-full border-2 border-[#ffbd3f] bg-[#613914]/80 text-[10px] font-black uppercase text-[#ffe0a0]"
+          >Flares</button>
         </div>
       )}
 
@@ -1320,7 +2048,10 @@ export default function App() {
         <HangarScreen
           mastery={mastery}
           playerModel={playerModel}
+          credits={credits}
+          hangarUpgrades={hangarUpgrades}
           onSelectModel={selectPlayerModel}
+          onBuyUpgrade={purchaseHangarUpgrade}
           onBack={() => setShowHangar(false)}
         />
       )}
@@ -1354,4 +2085,3 @@ export default function App() {
     </div>
   );
 }
-
