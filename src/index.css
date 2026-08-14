@@ -391,9 +391,16 @@ body,
  * while Tier-2/3 (score, statuses) stay subordinate.
  * ------------------------------------------------------------------------ */
 .hud-panel {
-  position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.26);
-  background: linear-gradient(180deg, rgba(9, 22, 50, 0.84), rgba(4, 11, 30, 0.8));
+  /* NOTE: no `position` here on purpose — unlayered CSS beats Tailwind's
+     `.absolute`/`.relative` utilities in the cascade, and a hardcoded
+     `position: relative` was silently converting every `absolute` HUD panel
+     into a flow element (panels stacked vertically instead of in the
+     designed three-column layout). Let the utility class win. */
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  /* Readability pass: more opaque so panels stay legible over the bright
+     sky; `filter: drop-shadow` (not box-shadow) because clip-path clips
+     box-shadows outside the clipped shape. */
+  background: linear-gradient(180deg, rgba(9, 22, 50, 0.95), rgba(4, 11, 30, 0.93));
   clip-path: polygon(
     0 0,
     calc(100% - 10px) 0,
@@ -406,6 +413,7 @@ body,
     0 0 0 1px rgba(0, 0, 0, 0.4),
     0 3px 0 rgba(0, 0, 0, 0.3),
     inset 0 0 16px rgba(126, 224, 255, 0.05);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.28));
 }
 
 .hud-panel.hud-danger {
@@ -417,23 +425,24 @@ body,
 }
 
 .hud-label {
-  font-size: 0.58rem;
+  font-size: 0.62rem;
   font-weight: 900;
   letter-spacing: 0.24em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.52);
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+  color: rgba(255, 255, 255, 0.66);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .hud-status {
   border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(4, 11, 30, 0.6);
+  background: rgba(4, 11, 30, 0.82);
   padding: 3px 9px;
   font-size: 0.62rem;
   font-weight: 900;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
 }
 
 /* Arcade announcement toast (kill streaks, objectives, phases) */

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { FOG_CLEAR_COLOR, FOG_STORM_COLOR, SKY_CLEAR_COLOR, SKY_STORM_COLOR } from "./types";
+import { FOG_CLEAR_COLOR, FOG_STORM_COLOR, FOG_NEAR, FOG_FAR, SKY_CLEAR_COLOR, SKY_STORM_COLOR } from "./types";
 
 const ParticleVert = `
   attribute vec3 velocity;
@@ -175,12 +175,17 @@ export class WeatherSystem {
     this.stormIntensity +=
       (this.targetIntensity - this.stormIntensity) * delta * 0.1;
 
-    // Fog management (Pass 8): base density dropped so near-field combat stays
-    // sharp; storms still thicken it, capped low enough that skyscraper
-    // silhouettes and enemy glows keep their separation.
-    const fogDensity = 0.004 + this.stormIntensity * 0.0046;
-    const fog = scene.fog as THREE.FogExp2;
-    fog.density = fogDensity;
+    // Fog management (low-poly pass): the scene uses a linear fog band with a
+    // completely clear near-field; storms pull the far plane in and darken the
+    // color, capped low enough that skyscraper silhouettes and enemy glows
+    // keep their separation.
+    const fog = scene.fog;
+    if (fog instanceof THREE.FogExp2) {
+      fog.density = 0.004 + this.stormIntensity * 0.0046;
+    } else if (fog instanceof THREE.Fog) {
+      fog.near = FOG_NEAR;
+      fog.far = Math.max(FOG_FAR - this.stormIntensity * 90, FOG_NEAR + 60);
+    }
     fog.color.copy(this.tempColor.copy(this.clearFog).lerp(this.stormFog, this.stormIntensity));
     if (scene.background instanceof THREE.Color) {
       scene.background.copy(this.tempColor.copy(this.clearColor).lerp(this.stormColor, this.stormIntensity * 0.82));

@@ -122,10 +122,10 @@ export class CityEnvironment {
   private honkCooldown = 0;
 
   /** Lazy per-mesh material clones so shared cached materials are never mutated. */
-  private damageMats = new WeakMap<THREE.Mesh, THREE.MeshLambertMaterial>();
+  private damageMats = new WeakMap<THREE.Mesh, THREE.MeshLambertMaterial | THREE.MeshToonMaterial>();
 
   /** Camera-occlusion clone-on-ghost map (shared materials are never faded in place). */
-  private occlusionMats = new WeakMap<THREE.Mesh, THREE.MeshLambertMaterial | THREE.MeshBasicMaterial>();
+  private occlusionMats = new WeakMap<THREE.Mesh, THREE.MeshLambertMaterial | THREE.MeshToonMaterial | THREE.MeshBasicMaterial>();
   /** Reused detection buffer — no per-frame allocations. */
   private occlusionScratch: { block: CityBlock; strength: number }[] = [];
   private occlusionTimer = 0;
@@ -159,7 +159,7 @@ export class CityEnvironment {
         const d = 10 + this.hash(i * 5 + p, 11) * 18;
         const h = 4 + this.hash(i * 7 + p, 13) * 4;
         const puff = createBox(w, h, d, 0xffffff);
-        const m = puff.material as THREE.MeshLambertMaterial;
+        const m = puff.material as THREE.MeshToonMaterial;
         m.opacity = 0.9;
         m.transparent = true;
         m.depthWrite = false;
@@ -2037,7 +2037,7 @@ export class CityEnvironment {
       // Clone the shared cached material — smoke is translucent, and mutating
       // the shared Lambert entry in place would poison every other mesh using
       // the same color (Pass 10 audit).
-      const smokeMat = (smoke.material as THREE.MeshLambertMaterial).clone();
+      const smokeMat = (smoke.material as THREE.MeshToonMaterial).clone();
       smokeMat.transparent = true;
       smokeMat.opacity = 0.18;
       smoke.material = smokeMat;
@@ -2844,9 +2844,9 @@ export class CityEnvironment {
    * clone lazily per mesh on first damage. Returns null for non-Lambert meshes
    * (glows are never color-darkened, only scaled/hidden).
    */
-  private ensureMutableMaterial(mesh: THREE.Mesh): THREE.MeshLambertMaterial | null {
+  private ensureMutableMaterial(mesh: THREE.Mesh): THREE.MeshLambertMaterial | THREE.MeshToonMaterial | null {
     const mat = mesh.material;
-    if (!(mat instanceof THREE.MeshLambertMaterial)) return null;
+    if (!(mat instanceof THREE.MeshLambertMaterial) && !(mat instanceof THREE.MeshToonMaterial)) return null;
     if (mat.userData.shared) {
       let clone = this.damageMats.get(mesh);
       if (!clone) {
@@ -3137,7 +3137,7 @@ export class CityEnvironment {
         mesh.userData.ghostCastShadow = undefined;
       }
       const mat = mesh.material;
-      if (!(mat instanceof THREE.MeshLambertMaterial) && !(mat instanceof THREE.MeshBasicMaterial)) continue;
+      if (!(mat instanceof THREE.MeshLambertMaterial) && !(mat instanceof THREE.MeshToonMaterial) && !(mat instanceof THREE.MeshBasicMaterial)) continue;
       if (ghosted) {
         const priv = this.ensureOccludableMaterial(mesh, mat);
         if (priv) this.setGhostState(priv, opacity);
@@ -3154,8 +3154,8 @@ export class CityEnvironment {
    */
   private ensureOccludableMaterial(
     mesh: THREE.Mesh,
-    mat: THREE.MeshLambertMaterial | THREE.MeshBasicMaterial,
-  ): THREE.MeshLambertMaterial | THREE.MeshBasicMaterial | null {
+    mat: THREE.MeshLambertMaterial | THREE.MeshToonMaterial | THREE.MeshBasicMaterial,
+  ): THREE.MeshLambertMaterial | THREE.MeshToonMaterial | THREE.MeshBasicMaterial | null {
     if (!mat.userData.shared) return mat;
     let clone = this.occlusionMats.get(mesh);
     if (!clone) {

@@ -11,8 +11,15 @@ export const SKY_CLEAR_COLOR = 0x8fb0c9;
 export const SKY_STORM_COLOR = 0x51647f;
 export const FOG_CLEAR_COLOR = 0xb5b2a4;
 export const FOG_STORM_COLOR = 0x29364f;
-/** Exponential fog density — tuned so mid-distance reads as depth, not haze. */
-export const FOG_DENSITY = 0.004;
+/**
+ * Linear fog band (low-poly pass): near-field combat stays completely clear,
+ * the midground builds depth, and the far skyline melts into the horizon.
+ * FOG_NEAR is where fog starts (nothing before it), FOG_FAR is full fog.
+ * Widened from (80, 340) so typical combat range (~150-250u) reads clearly
+ * instead of sitting in heavy haze.
+ */
+export const FOG_NEAR = 120;
+export const FOG_FAR = 440;
 export const TARGET_RENDER_FPS = 60;
 export const MAX_RENDER_PIXEL_RATIO = 1.0;
 

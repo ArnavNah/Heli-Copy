@@ -213,7 +213,7 @@ function ControlHints({ runId }: { runId: number }) {
 
 function Meter({ value, color }: { value: number; color: string }) {
   return (
-    <div className="h-4 w-28 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-44">
+    <div className="h-4 w-24 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-48">
       <div className={`h-full ${color} transition-[width] duration-300`} style={{ width: `${clampPercent(value)}%` }} />
     </div>
   );
@@ -1370,7 +1370,6 @@ export default function App() {
     if (!canvasRef.current) return;
     const engine = new GameEngine(canvasRef.current);
     engineRef.current = engine;
-    (window as any).__engine = engine; // TEMP debug hook — remove before final
 
     // Apply persisted settings + auto-detect touch
     const persisted = readSettings();
@@ -1578,7 +1577,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [mode, showSettings, upgradeOffer]);
 
-  const textShadow = { textShadow: '0 2px 0 rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.35)' };
+  // Readability pass: heavier drop shadow so white numbers read clean over
+  // the bright low-poly sky instead of washing out.
+  const textShadow = { textShadow: '0 2px 0 rgba(0,0,0,0.62), 0 3px 10px rgba(0,0,0,0.55), 0 0 16px rgba(0,0,0,0.3)' };
   const hudDim = mode !== 'playing' ? 'opacity-35' : 'opacity-100';
   const dangerOpacity = mode === 'playing' ? clampPercent(35 - health) / 100 : 0;
 
@@ -1605,30 +1606,33 @@ export default function App() {
           <div className="flex items-center gap-2">
             <HeartIcon />
             <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
-            <span className="min-w-10 text-xl font-black leading-none" style={textShadow}>{Math.round(health)}</span>
+            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(health)}</span>
           </div>
           <div className="flex items-center gap-2">
             <GasIcon />
             <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
-            <span className="min-w-10 text-xl font-black leading-none" style={textShadow}>{Math.round(fuel)}%</span>
+            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(fuel)}%</span>
           </div>
         </div>
 
         <div className="hud-panel absolute left-1/2 top-3 -translate-x-1/2 px-6 py-1.5 text-center sm:top-5">
           <div className="hud-label">Stage {wave === 0 ? '-' : wave}</div>
-          <div className="mt-0.5 text-2xl font-black leading-none sm:text-3xl" style={textShadow}>{score.toLocaleString()}</div>
+          <div className="mt-0.5 text-3xl font-black leading-none sm:text-4xl" style={textShadow}>{score.toLocaleString()}</div>
         </div>
 
         <div className="hud-panel absolute right-4 top-4 flex items-center gap-2 px-3 py-1.5 sm:right-6 sm:top-6">
           <CoinIcon />
           <div className="text-right">
-            <div className="text-2xl font-black leading-none" style={textShadow}>{credits.toLocaleString()}</div>
-            {unsecuredCredits > 0 && <div className="mt-1 text-[9px] font-black uppercase tracking-wider text-[#ffbd3f]">Unsecured +{unsecuredCredits.toLocaleString()}</div>}
+            <div className="text-3xl font-black leading-none" style={textShadow}>{credits.toLocaleString()}</div>
+            {unsecuredCredits > 0 && <div className="mt-1 text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>Unsecured +{unsecuredCredits.toLocaleString()}</div>}
           </div>
         </div>
 
+        {/* Center stack: Threat, objectives, SAM banner flow top-down with a
+            fixed gap — nothing can collide (combo + boss live below it). */}
+        <div className="pointer-events-none absolute left-1/2 top-[4.6rem] flex -translate-x-1/2 flex-col items-center gap-1.5">
         {threatInfo && mode === 'playing' && (
-          <div className="hud-panel absolute left-1/2 top-[4.6rem] -translate-x-1/2 px-3 py-1 text-center">
+          <div className="hud-panel px-3 py-1 text-center">
             <div className="hud-label">Threat {'█'.repeat(threatInfo.level)}{'░'.repeat(5 - threatInfo.level)}</div>
             <div className={`text-[11px] font-black uppercase ${threatInfo.level >= 4 ? 'text-[#ff5566]' : threatInfo.level >= 2 ? 'text-[#ffbd3f]' : 'text-[#bfeeff]'}`}>
               {threatInfo.name} · x{threatInfo.rewardMultiplier.toFixed(2)} reward
@@ -1638,7 +1642,7 @@ export default function App() {
 
         {/* Destroyable objective indicators */}
         {objectives && objectives.count > 0 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[7.5rem] flex -translate-x-1/2 items-center gap-2">
+          <div className="flex items-center gap-2">
             {objectives.sam && (
               <span className="rounded-[4px] border border-[#ff5566]/70 bg-[#3d0f14]/70 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#ff99aa]" style={textShadow}>
                 🎯 SAM
@@ -1653,7 +1657,7 @@ export default function App() {
         )}
 
         {samThreat && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[10.2rem] w-[min(290px,70vw)] -translate-x-1/2 text-center">
+          <div className="w-[min(290px,70vw)] text-center">
             <div className={`rounded-md border px-3 py-1.5 backdrop-blur-sm ${
               samThreat.state === 'INBOUND'
                 ? 'border-[#ff3344] bg-[#4a0710]/85 text-[#ff8b96]'
@@ -1677,12 +1681,13 @@ export default function App() {
             </div>
           </div>
         )}
+        </div>
 
         {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
         {mode === 'playing' && <MinimapPanel />}
 
         {countermeasureInfo && mode === 'playing' && (
-          <div className="hud-panel pointer-events-none absolute left-4 top-[19rem] px-3 py-2 sm:left-6 sm:top-[19.5rem]">
+          <div className="hud-panel pointer-events-none absolute left-4 top-[20.5rem] px-3 py-2 sm:left-6 sm:top-[21rem]">
             <div className="hud-label text-[#ffbd3f]">Flares · C</div>
             <div className="mt-1 text-base tracking-[0.18em] text-[#ffbd3f]">
               {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
@@ -1692,7 +1697,7 @@ export default function App() {
         )}
 
         {extraction && mode === 'playing' && (
-          <div className="pointer-events-none absolute right-4 top-[29rem] w-[min(250px,44vw)] sm:right-6 sm:top-[29.5rem]">
+          <div className="pointer-events-none absolute right-4 top-[32.5rem] w-[min(250px,44vw)] sm:right-6 sm:top-[33rem]">
             <div className="hud-panel border-[#55f2a2]/60 px-3 py-2">
               <div className="hud-label text-[#55f2a2]">Extraction Available</div>
               <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{unsecuredCredits} CR</span></div>
@@ -1738,13 +1743,13 @@ export default function App() {
               <div className="mt-2 flex items-end justify-between gap-2 border-t border-white/12 pt-1.5">
                 <div>
                   <div className="hud-label">Reward</div>
-                  <div className="text-sm font-black text-[#ffe66d]">{delivery.reward} CR</div>
+                  <div className="text-base font-black text-[#ffe66d]">{delivery.reward} CR</div>
                   {delivery.samRiskBonus > 0 && <div className="text-[9px] font-black uppercase text-[#ff9b3d]">+{delivery.samRiskBonus} SAM risk</div>}
                 </div>
                 {delivery.timeBonusRemaining !== null && (
                   <div className="text-right">
                     <div className="hud-label">Time Bonus</div>
-                    <div className={delivery.timeBonusRemaining > 0 ? 'text-sm font-black text-[#55f2c2]' : 'text-sm font-black text-white/35'}>
+                    <div className={delivery.timeBonusRemaining > 0 ? 'text-base font-black text-[#55f2c2]' : 'text-base font-black text-white/35'}>
                       {formatDuration(delivery.timeBonusRemaining)}
                     </div>
                   </div>
@@ -1799,9 +1804,10 @@ export default function App() {
           </div>
         )}
 
-        {/* Boss health bar */}
+        {/* Boss health bar — below the combo display so it never collides
+            with the Threat panel at top-[4.6rem]. */}
         {bossInfo && mode === 'playing' && (
-          <div className="absolute left-1/2 top-[4.5rem] w-[min(480px,70vw)] -translate-x-1/2">
+          <div className="absolute left-1/2 top-[18.5rem] w-[min(480px,70vw)] -translate-x-1/2">
             <div className="hud-panel px-3 py-2">
               <div className="hud-label text-[#e79bff]">Hostile Gunship — Archon</div>
               <div className="mt-1.5 h-3.5 overflow-hidden rounded-[2px] border border-black/60 bg-black/55 shadow-[0_2px_0_rgba(0,0,0,0.35)]">
@@ -1818,20 +1824,21 @@ export default function App() {
           <button
             type="button"
             onClick={pauseGame}
-            className="pointer-events-auto absolute right-4 top-14 rounded-[6px] border-2 border-white/70 bg-[#264fb1]/80 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#16265f,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#315fd0] active:translate-y-1 active:shadow-[0_2px_0_#16265f,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-16"
+            className="pointer-events-auto absolute right-4 top-[4.6rem] rounded-[6px] border-2 border-white/70 bg-[#264fb1]/85 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#16265f,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#315fd0] active:translate-y-1 active:shadow-[0_2px_0_#16265f,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[5.2rem]"
             style={textShadow}
           >
             Pause
           </button>
         )}
 
-        {/* Weapon HUD — Tier 1 */}
-        {weaponInfo && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-4 top-20 flex flex-col gap-1 sm:left-6 sm:top-24">
+        {/* Weapon + XP + Salvo — one left stack with a fixed gap so the panels
+            can never collide as content grows (LV badges, reloading, locks). */}
+        <div className="pointer-events-none absolute left-4 top-[8.25rem] flex flex-col items-start gap-2 sm:left-6 sm:top-[9rem]">
+          {weaponInfo && mode === 'playing' && (
             <div className="hud-panel px-3 py-2">
               <div className="flex items-center gap-2">
                 <BulletIcon />
-                <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
+                <span className="text-base font-black uppercase tracking-wider" style={textShadow}>
                   {weaponInfo.name}
                 </span>
                 {(weaponInfo.level ?? 1) > 1 && (
@@ -1842,22 +1849,19 @@ export default function App() {
               </div>
               <div className="mt-1 flex items-center gap-2">
                 {weaponInfo.reloading ? (
-                  <span className="text-sm font-black text-yellow-300" style={textShadow}>
+                  <span className="text-base font-black text-yellow-300" style={textShadow}>
                     RELOADING... {Math.ceil(weaponInfo.reloadTimer)}s
                   </span>
                 ) : (
-                  <span className="text-sm font-black" style={textShadow}>
+                  <span className="text-base font-black" style={textShadow}>
                     {weaponInfo.ammo} / {weaponInfo.maxAmmo}
                   </span>
                 )}
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Run level + XP bar (Vampire-Survivors style) */}
-        {mode === 'playing' && (
-          <div className="pointer-events-none absolute left-4 top-[11.5rem] flex flex-col gap-1 sm:left-6 sm:top-[13.5rem]">
+          {mode === 'playing' && (
             <div className="flex items-center gap-2">
               <span className="rounded-[4px] border border-[#56e6ff]/80 bg-[#0a2a3a]/80 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#bfeeff]" style={textShadow}>
                 LV.{runLevel}
@@ -1869,62 +1873,60 @@ export default function App() {
                 />
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Salvo HUD — Tier 2 */}
-        {salvoInfo && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-4 top-34 flex flex-col gap-1 sm:left-6 sm:top-38">
+          {salvoInfo && mode === 'playing' && (
             <div className="hud-panel px-3 py-2">
-            <div className="flex items-center gap-2">
-              <TargetIcon />
-              <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
-                Multi-Salvo
-              </span>
-            </div>
-            <div className="mt-1 flex items-center gap-2">
-              {salvoInfo.isPainting ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-black text-red-400 animate-pulse uppercase" style={textShadow}>
-                    Locking:
-                  </span>
-                  <div className="flex gap-0.5">
-                    {[0, 1, 2, 3, 4, 5].map((idx) => {
-                      const active = idx < salvoInfo.locks;
-                      return (
-                        <div
-                          key={idx}
-                          className={`h-4.5 w-3.5 border border-black/45 rounded-[2px] transition-all duration-150 ${active ? 'bg-[#ff3344] shadow-[0_0_8px_#ff3344] border-red-300' : 'bg-black/40'}`}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : salvoInfo.cooldown > 0 ? (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-black text-white/50" style={textShadow}>
-                    COOLDOWN
-                  </span>
-                  <div className="h-2 w-20 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
-                    <div className="h-full bg-red-400/50 transition-all duration-300" style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }} />
-                  </div>
-                  <span className="text-xs font-black text-white/60" style={textShadow}>
-                    {salvoInfo.cooldown}s
-                  </span>
-                </div>
-              ) : (
-                <span className="text-xs font-extrabold text-[#35e66d] animate-pulse" style={textShadow}>
-                  READY (HOLD Q / R-CLICK)
+              <div className="flex items-center gap-2">
+                <TargetIcon />
+                <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
+                  Multi-Salvo
                 </span>
-              )}
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                {salvoInfo.isPainting ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-red-400 animate-pulse uppercase" style={textShadow}>
+                      Locking:
+                    </span>
+                    <div className="flex gap-0.5">
+                      {[0, 1, 2, 3, 4, 5].map((idx) => {
+                        const active = idx < salvoInfo.locks;
+                        return (
+                          <div
+                            key={idx}
+                            className={`h-4.5 w-3.5 border border-black/45 rounded-[2px] transition-all duration-150 ${active ? 'bg-[#ff3344] shadow-[0_0_8px_#ff3344] border-red-300' : 'bg-black/40'}`}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : salvoInfo.cooldown > 0 ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-black text-white/50" style={textShadow}>
+                      COOLDOWN
+                    </span>
+                    <div className="h-2 w-20 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+                      <div className="h-full bg-red-400/50 transition-all duration-300" style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }} />
+                    </div>
+                    <span className="text-xs font-black text-white/60" style={textShadow}>
+                      {salvoInfo.cooldown}s
+                    </span>
+                  </div>
+                ) : (
+                  <span className="text-xs font-extrabold text-[#35e66d] animate-pulse" style={textShadow}>
+                    READY (HOLD Q / R-CLICK)
+                  </span>
+                )}
+              </div>
             </div>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Combo Display with expiry timer bar */}
+        {/* Combo Display with expiry timer bar — sits below the center stack
+            so it never collides with Threat/objectives/SAM banner. */}
         {comboInfo && comboInfo.count > 1 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 text-center">
+          <div className="pointer-events-none absolute left-1/2 top-[14.5rem] -translate-x-1/2 text-center">
             <div className="text-2xl font-black text-yellow-300" style={textShadow}>
               {comboInfo.count}x COMBO
             </div>
@@ -1941,7 +1943,7 @@ export default function App() {
         )}
 
         {statusInfo && mode === 'playing' && (
-          <div className={`pointer-events-none absolute right-4 flex flex-col items-end gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80 sm:right-6 ${delivery ? 'top-[29rem] sm:top-[30rem]' : 'top-[19rem] sm:top-[19.5rem]'}`}>
+          <div className={`pointer-events-none absolute right-4 flex flex-col items-end gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80 sm:right-6 top-[37.5rem] sm:top-[38rem]`}>
             {statusInfo.threat > 0.68 && (
               <div className="hud-status border-[#ff3344]/60 text-[#ffd3d7]" style={textShadow}>
                 Threat High

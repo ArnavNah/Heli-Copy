@@ -28,7 +28,8 @@ import {
   EnemyType,
   EnemyVariant,
   FOG_CLEAR_COLOR,
-  FOG_DENSITY,
+  FOG_NEAR,
+  FOG_FAR,
   GameSettings,
   HelicopterModel,
   MAX_RENDER_PIXEL_RATIO,
@@ -410,14 +411,17 @@ export class GameEngine {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO));
     this.renderer.setClearColor(SKY_CLEAR_COLOR);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    // Low-poly pass: ACES filmic tone mapping was crushing the muted city
+    // palette into a dark night haze. Stylized low-poly art wants flat colors
+    // to stay flat and bright, so tone mapping is off (NoToneMapping).
+    this.renderer.toneMapping = THREE.NoToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = false;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(SKY_CLEAR_COLOR);
-    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, FOG_DENSITY);
+    this.scene.fog = new THREE.Fog(FOG_CLEAR_COLOR, FOG_NEAR, FOG_FAR);
     this.scene.add(createSkyDome());
 
     this.camera = new THREE.PerspectiveCamera(
@@ -454,13 +458,13 @@ export class GameEngine {
     this.world.defaultContactMaterial.friction = 0;
     this.world.defaultContactMaterial.restitution = 0;
 
-    // Pass 8 lighting: warm key + neutral ambient + cool fill. Warm sunlit
-    // faces against cool shadow faces gives every low-poly box a clear
-    // lit / midtone / shadow read without flat blue silhouettes.
-    const ambient = new THREE.HemisphereLight(0xf3e8d6, 0x5f6b66, 1.05);
+    // Readability lighting: ambient kept strong enough that the whole city is
+    // clearly visible, with a warm key light for the toon gradient bands. Too
+    // little ambient turned the world into a dark night haze.
+    const ambient = new THREE.HemisphereLight(0xf3e8d6, 0x5f6b66, 1.25);
     this.scene.add(ambient);
 
-    const softKey = new THREE.DirectionalLight(0xffe7c4, 1.45);
+    const softKey = new THREE.DirectionalLight(0xffe7c4, 1.7);
     softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
     softKey.shadow.camera.left = -180;
@@ -479,7 +483,7 @@ export class GameEngine {
     this.scene.add(rimLight);
 
     const sunCore = new THREE.Mesh(
-      new THREE.SphereGeometry(8, 18, 10),
+      new THREE.SphereGeometry(8, 10, 6),
       createGlowMaterial(0xffdd7a, 0.58),
     );
     sunCore.position.set(-116, 118, -178);

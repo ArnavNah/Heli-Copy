@@ -330,7 +330,7 @@ export class Helicopter extends Entity {
     this.tailRotor.add(tailBlurDisc);
     baseGroup.add(this.tailRotor);
     // Shield Bubble Mesh
-    const shieldGeo = new THREE.SphereGeometry(3.6, 16, 16);
+    const shieldGeo = new THREE.SphereGeometry(3.6, 10, 8);
     const shieldMat = new THREE.MeshBasicMaterial({
       color: 0x4488ff,
       transparent: true,
@@ -366,13 +366,13 @@ export class Helicopter extends Entity {
   /** Default Apache attack helicopter (original design). */
   private buildApache(
     baseGroup: THREE.Group,
-    bodyMat: THREE.MeshLambertMaterial,
-    darkBodyMat: THREE.MeshLambertMaterial,
-    glassMat: THREE.MeshLambertMaterial,
-    metalMat: THREE.MeshLambertMaterial,
-    bladeMat: THREE.MeshLambertMaterial,
-    ordnanceMat: THREE.MeshLambertMaterial,
-    accentMat: THREE.MeshLambertMaterial,
+    bodyMat: THREE.MeshToonMaterial,
+    darkBodyMat: THREE.MeshToonMaterial,
+    glassMat: THREE.MeshToonMaterial,
+    metalMat: THREE.MeshToonMaterial,
+    bladeMat: THREE.MeshToonMaterial,
+    ordnanceMat: THREE.MeshToonMaterial,
+    accentMat: THREE.MeshToonMaterial,
   ) {
     // Main Fuselage
     const fuselage = createBox(2.2, 1.6, 5.8, 0x2d3a2e);
@@ -500,12 +500,12 @@ export class Helicopter extends Entity {
   /** NIGHTHAWK — angular stealth gunship with twin tails and a dark fuselage. */
   private buildNighthawk(
     baseGroup: THREE.Group,
-    bodyMat: THREE.MeshLambertMaterial,
-    darkBodyMat: THREE.MeshLambertMaterial,
-    glassMat: THREE.MeshLambertMaterial,
-    metalMat: THREE.MeshLambertMaterial,
-    bladeMat: THREE.MeshLambertMaterial,
-    accentMat: THREE.MeshLambertMaterial,
+    bodyMat: THREE.MeshToonMaterial,
+    darkBodyMat: THREE.MeshToonMaterial,
+    glassMat: THREE.MeshToonMaterial,
+    metalMat: THREE.MeshToonMaterial,
+    bladeMat: THREE.MeshToonMaterial,
+    accentMat: THREE.MeshToonMaterial,
   ) {
     const hull = createBox(2.0, 1.3, 6.4, 0x242c30);
     hull.material = bodyMat;
@@ -588,12 +588,12 @@ export class Helicopter extends Entity {
   /** WARLOCK — heavy gunship: bulky hull, wide wings, dual rotor mast, heavy ordnance. */
   private buildWarlock(
     baseGroup: THREE.Group,
-    bodyMat: THREE.MeshLambertMaterial,
-    darkBodyMat: THREE.MeshLambertMaterial,
-    glassMat: THREE.MeshLambertMaterial,
-    metalMat: THREE.MeshLambertMaterial,
-    bladeMat: THREE.MeshLambertMaterial,
-    accentMat: THREE.MeshLambertMaterial,
+    bodyMat: THREE.MeshToonMaterial,
+    darkBodyMat: THREE.MeshToonMaterial,
+    glassMat: THREE.MeshToonMaterial,
+    metalMat: THREE.MeshToonMaterial,
+    bladeMat: THREE.MeshToonMaterial,
+    accentMat: THREE.MeshToonMaterial,
   ) {
     const hull = createBox(2.5, 1.9, 6.6, 0x3a4436);
     hull.material = bodyMat;
@@ -952,7 +952,8 @@ export class Helicopter extends Entity {
     this.mesh.traverse((child) => {
       if (
         child instanceof THREE.Mesh &&
-        child.material instanceof THREE.MeshLambertMaterial
+        (child.material instanceof THREE.MeshLambertMaterial ||
+          child.material instanceof THREE.MeshToonMaterial)
       ) {
         const baseColor = child.material.userData.baseColor as
           | THREE.Color
@@ -1752,7 +1753,7 @@ export class Enemy extends Entity {
 
     // Shield bubble visual (SHIELDED modifier)
     if ((this.modifier & EnemyModifier.SHIELDED) !== 0) {
-      const shieldGeo = new THREE.SphereGeometry(radius * 1.35, 14, 12);
+      const shieldGeo = new THREE.SphereGeometry(radius * 1.35, 10, 8);
       const shieldMat = new THREE.MeshBasicMaterial({
         color: 0x55eeff,
         transparent: true,
@@ -2459,7 +2460,7 @@ export class Enemy extends Entity {
       const clone = material.clone();
       clone.userData = { ...(clone.userData ?? {}), shared: false };
       child.material = clone;
-      if (clone instanceof THREE.MeshLambertMaterial) {
+      if (clone instanceof THREE.MeshLambertMaterial || clone instanceof THREE.MeshToonMaterial) {
         clone.emissive.setHex(0x000000);
         clones.push({ material: clone, baseColor: new THREE.Color(0x000000) });
       } else if (clone instanceof THREE.MeshBasicMaterial) {
@@ -2477,7 +2478,7 @@ export class Enemy extends Entity {
       if (!this.flashClones) return;
       const strength = Math.max(0, Math.min(1, this.hitFlashTimer / Enemy.HIT_FLASH_DURATION));
       for (const entry of this.flashClones) {
-        if (entry.material instanceof THREE.MeshLambertMaterial) {
+        if (entry.material instanceof THREE.MeshLambertMaterial || entry.material instanceof THREE.MeshToonMaterial) {
           entry.material.emissive.copy(Enemy.HIT_FLASH_COLOR).multiplyScalar(strength * 0.85);
         } else if (entry.material instanceof THREE.MeshBasicMaterial) {
           entry.material.color.copy(entry.baseColor).lerp(Enemy.HIT_FLASH_COLOR, strength);
@@ -2485,7 +2486,7 @@ export class Enemy extends Entity {
       }
     } else if (this.flashClones) {
       for (const entry of this.flashClones) {
-        if (entry.material instanceof THREE.MeshLambertMaterial) {
+        if (entry.material instanceof THREE.MeshLambertMaterial || entry.material instanceof THREE.MeshToonMaterial) {
           entry.material.emissive.setHex(0x000000);
         } else if (entry.material instanceof THREE.MeshBasicMaterial) {
           entry.material.color.copy(entry.baseColor);
@@ -3386,13 +3387,13 @@ export class PowerUp {
     this.mesh.add(core);
 
     const halo = new THREE.Mesh(
-      new THREE.SphereGeometry(2.0, 12, 8),
+      new THREE.SphereGeometry(2.0, 10, 6),
       createGlowMaterial(color, 0.18),
     );
     this.mesh.add(halo);
 
     // Outer glow ring
-    const ringGeom = new THREE.TorusGeometry(2.2, 0.15, 8, 16);
+    const ringGeom = new THREE.TorusGeometry(2.2, 0.15, 6, 12);
     const ringMat = new THREE.MeshBasicMaterial({
       color,
       transparent: true,

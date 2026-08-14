@@ -1,10 +1,29 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
+// Low-poly pass: a shared 3-stop toon gradient map. NearestFilter keeps the
+// bands hard (lit face / midtone / shadow face), which is what makes flat-shaded
+// boxes read as low-poly art instead of Lambert's smooth per-vertex gradients.
+// IMPORTANT: three's toon shader samples it with coord = dotNL*0.5+0.5, so the
+// BRIGHT texel must be at the RIGHT end (faces toward the sun = coord 1). An
+// inverted array silently turned sunlit faces dark — the whole city read as a
+// night scene.
+const TOON_GRADIENT = (() => {
+  const gradient = new THREE.DataTexture(new Uint8Array([130, 195, 255]), 3, 1, THREE.RedFormat);
+  gradient.minFilter = THREE.NearestFilter;
+  gradient.magFilter = THREE.NearestFilter;
+  gradient.generateMipmaps = false;
+  gradient.needsUpdate = true;
+  return gradient;
+})();
+
 export function createLowPolyMaterial(colorHex: number) {
-  const material = new THREE.MeshLambertMaterial({
+  // Note: r184 MeshToonMaterial has no flatShading flag (it extends Material
+  // directly), so the faceted low-poly look comes from baking per-face normals
+  // into the geometry (toNonIndexed + computeVertexNormals) instead.
+  const material = new THREE.MeshToonMaterial({
     color: colorHex,
-    flatShading: true,
+    gradientMap: TOON_GRADIENT,
     emissive: colorHex,
     emissiveIntensity: 0.025,
   });
@@ -22,14 +41,14 @@ export const ENV_PALETTE = {
   concrete: 0x9aa0a3,
   /** Dark concrete pads and plazas. */
   darkConcrete: 0x4f525a,
-  /** Warm asphalt — grand avenue. */
-  asphalt: 0x3d3a3e,
-  /** Darker asphalt — side streets. */
-  asphaltDark: 0x2f2d31,
+  /** Warm asphalt — grand avenue (brightened for ground readability). */
+  asphalt: 0x49454a,
+  /** Darker asphalt — side streets (brightened for ground readability). */
+  asphaltDark: 0x3d3a3f,
   /** Industrial metal / sheds. */
-  industrialMetal: 0x525b66,
+  industrialMetal: 0x5e6977,
   /** Generic rooftop tone. */
-  rooftop: 0x555a61,
+  rooftop: 0x636a74,
   /** Soft glass accent for windows. */
   glassAccent: 0xbcd6de,
   /** Muted military olive. */
@@ -43,7 +62,7 @@ export const ENV_PALETTE = {
 // shared instances are never mutated in place (see city.ts ensureMutableMaterial).
 
 const boxGeometryCache = new Map<string, THREE.BufferGeometry>();
-const lambertMaterialCache = new Map<number, THREE.MeshLambertMaterial>();
+const lambertMaterialCache = new Map<number, THREE.MeshToonMaterial>();
 
 /** Return a shared non-indexed box geometry for a snapped size. */
 export function getBoxGeometry(width: number, height: number, depth: number): THREE.BufferGeometry {
@@ -58,8 +77,8 @@ export function getBoxGeometry(width: number, height: number, depth: number): TH
   return geometry;
 }
 
-/** Return a shared Lambert material for a color (marked `shared` for clone-on-write). */
-export function getLowPolyMaterial(colorHex: number): THREE.MeshLambertMaterial {
+/** Return a shared toon material for a color (marked `shared` for clone-on-write). */
+export function getLowPolyMaterial(colorHex: number): THREE.MeshToonMaterial {
   let material = lambertMaterialCache.get(colorHex);
   if (!material) {
     material = createLowPolyMaterial(colorHex);
@@ -173,8 +192,9 @@ export function createSkyDome() {
     depthWrite: false,
     uniforms: {
       // Pass 8: deep slate top + warm haze horizon so the dome melts into the
-      // warm fog — distant buildings fade to haze, never to cyan.
-      topColor: { value: new THREE.Color(0x26395e) },
+      // warm fog — distant buildings fade to haze, never to cyan. Brightened
+      // from 0x26395e so the scene reads daytime, not night.
+      topColor: { value: new THREE.Color(0x3d5c8f) },
       horizonColor: { value: new THREE.Color(0xc6b398) },
       sunColor: { value: new THREE.Color(0xffc36b) },
     },
@@ -227,7 +247,10 @@ export function getCylinderGeometry(radius: number, height: number, radialSegmen
   const key = `${radius.toFixed(2)}|${height.toFixed(2)}|${radialSegments}`;
   let geometry = cylinderGeometryCache.get(key);
   if (!geometry) {
-    geometry = new THREE.CylinderGeometry(radius, radius, height, radialSegments, 1);
+    // Non-indexed + per-face normals = hard facets on every cylinder (same
+    // trick as getBoxGeometry), so toon banding reads crisp on tanks/silos.
+    geometry = new THREE.CylinderGeometry(radius, radius, height, radialSegments, 1)
+      .toNonIndexed();
     geometry.computeVertexNormals();
     geometry.userData.shared = true;
     cylinderGeometryCache.set(key, geometry);
