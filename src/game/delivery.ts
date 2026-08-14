@@ -96,9 +96,13 @@ export interface DeliveryHudSnapshot {
 }
 
 export interface HangarUpgrades {
+  engine: number;
+  rotor: number;
   armor: number;
-  fuelSystems: number;
-  cargoRig: number;
+  airframe: number;
+  fuel: number;
+  targeting: number;
+  weaponSystem: number;
   countermeasures: number;
 }
 
@@ -108,20 +112,40 @@ export const HANGAR_UPGRADE_INFO: Record<
   HangarUpgradeId,
   { name: string; description: string; costs: number[] }
 > = {
+  engine: {
+    name: "Engine",
+    description: "Improves speed and afterburner efficiency",
+    costs: [230, 500, 850, 1280, 1780],
+  },
+  rotor: {
+    name: "Rotor",
+    description: "Improves climb and vertical acceleration",
+    costs: [220, 480, 820, 1220, 1700],
+  },
   armor: {
-    name: "Reinforced Armor",
+    name: "Armor",
     description: "+10 maximum hull integrity per rank",
-    costs: [300, 650, 1100],
+    costs: [260, 560, 930, 1380, 1900],
   },
-  fuelSystems: {
-    name: "Efficient Turbines",
+  airframe: {
+    name: "Airframe",
+    description: "Improves stability, cargo handling, and collision resilience",
+    costs: [240, 520, 880, 1320, 1820],
+  },
+  fuel: {
+    name: "Fuel",
     description: "6% lower fuel consumption per rank",
-    costs: [250, 550, 950],
+    costs: [250, 540, 900, 1340, 1840],
   },
-  cargoRig: {
-    name: "Cargo Stabilizer",
-    description: "Reduces the cargo handling penalty",
-    costs: [275, 600, 1000],
+  targeting: {
+    name: "Targeting",
+    description: "Improves gun tracking and auto-aim range",
+    costs: [240, 530, 900, 1360, 1880],
+  },
+  weaponSystem: {
+    name: "Weapon System",
+    description: "Improves ammo reserves, reloads, and handling",
+    costs: [270, 590, 980, 1450, 1980],
   },
   countermeasures: {
     name: "Countermeasures",
@@ -194,7 +218,16 @@ export const CARRY_ABANDON_SECONDS = 240;
 
 const CREDIT_STORAGE_KEY = "helistrike:credits";
 const UPGRADE_STORAGE_KEY = "helistrike:hangarUpgrades";
-const DEFAULT_UPGRADES: HangarUpgrades = { armor: 0, fuelSystems: 0, cargoRig: 0, countermeasures: 0 };
+const DEFAULT_UPGRADES: HangarUpgrades = {
+  engine: 0,
+  rotor: 0,
+  armor: 0,
+  airframe: 0,
+  fuel: 0,
+  targeting: 0,
+  weaponSystem: 0,
+  countermeasures: 0,
+};
 
 function storage(): Storage | null {
   try {
@@ -227,17 +260,21 @@ export function readHangarUpgrades(): HangarUpgrades {
     if (!raw) return { ...DEFAULT_UPGRADES };
     const parsed = JSON.parse(raw) as Partial<HangarUpgrades>;
     return {
+      engine: clampUpgradeRank(parsed.engine),
+      rotor: clampUpgradeRank(parsed.rotor),
       armor: clampUpgradeRank(parsed.armor),
-      fuelSystems: clampUpgradeRank(parsed.fuelSystems),
-      cargoRig: clampUpgradeRank(parsed.cargoRig),
-      countermeasures: clampUpgradeRank(parsed.countermeasures, 5),
+      airframe: clampUpgradeRank(parsed.airframe ?? (parsed as { cargoRig?: unknown }).cargoRig),
+      fuel: clampUpgradeRank(parsed.fuel ?? (parsed as { fuelSystems?: unknown }).fuelSystems),
+      targeting: clampUpgradeRank(parsed.targeting),
+      weaponSystem: clampUpgradeRank(parsed.weaponSystem),
+      countermeasures: clampUpgradeRank(parsed.countermeasures),
     };
   } catch {
     return { ...DEFAULT_UPGRADES };
   }
 }
 
-function clampUpgradeRank(value: unknown, max = 3): number {
+function clampUpgradeRank(value: unknown, max = 5): number {
   const rank = Number(value);
   return Number.isFinite(rank) ? Math.max(0, Math.min(max, Math.floor(rank))) : 0;
 }

@@ -1,16 +1,16 @@
 import type * as THREE from "three";
 import type * as CANNON from "cannon-es";
 import type { SamState } from "./sam";
+import type { MissionType } from "./mission";
 
-// Pass 8 art direction: the scene used to stack cyan sky + cyan fog + icy
-// lighting into one blue wash that drowned gameplay. Fog is now a warm neutral
-// haze (distant buildings fade into the horizon instead of turning cyan) and
-// the clear sky is a muted steel blue. Storm colors stay dark/moody so
-// silhouettes remain readable.
-export const SKY_CLEAR_COLOR = 0x8fb0c9;
-export const SKY_STORM_COLOR = 0x51647f;
-export const FOG_CLEAR_COLOR = 0xb5b2a4;
-export const FOG_STORM_COLOR = 0x29364f;
+// Desert warzone art direction: warm hazy sky over a sand battlefield. The
+// clear sky is a pale dry blue, and the fog is a dust-colored haze so distant
+// structures melt into the horizon instead of turning cyan. Storm colors stay
+// dark/moody so silhouettes remain readable.
+export const SKY_CLEAR_COLOR = 0xa9c6d3;
+export const SKY_STORM_COLOR = 0x55656b;
+export const FOG_CLEAR_COLOR = 0xd8c9a2;
+export const FOG_STORM_COLOR = 0x3a4038;
 /**
  * Linear fog band (low-poly pass): near-field combat stays completely clear,
  * the midground builds depth, and the far skyline melts into the horizon.
@@ -104,6 +104,13 @@ export type MinimapExtraction = {
   elevation: number;
 };
 
+export type MinimapMission = {
+  x: number;
+  z: number;
+  type: MissionType;
+  targetKind?: "SAM" | "RADAR" | "DELIVERY" | "ELITE" | "AREA";
+};
+
 export interface MinimapSnapshot {
   player: { x: number; y: number; z: number; heading: number };
   enemies: MinimapEnemy[];
@@ -111,6 +118,7 @@ export interface MinimapSnapshot {
   objectives: MinimapObjective[];
   threats: MinimapThreat[];
   extraction: MinimapExtraction | null;
+  mission: MinimapMission | null;
   range: number;
 }
 
@@ -285,6 +293,8 @@ export enum PowerUpType {
   BOMB,
   FUEL,
   XP_GEM,
+  SALVAGE,
+  COUNTERMEASURE,
 }
 
 export enum PowerUpState {

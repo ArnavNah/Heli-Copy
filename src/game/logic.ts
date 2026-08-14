@@ -20,12 +20,22 @@ export interface DifficultyConfig {
   maxRisk: number;
   /** Objective HP multiplier. */
   objectiveHp: number;
+  /** Threat-budget multiplier for special composition pressure. */
+  threatBudget: number;
+  /** Extra elite probability added by difficulty. */
+  eliteChance: number;
+  /** Extra special/squad probability added by difficulty. */
+  specialChance: number;
+  /** SAM lock-time multiplier (<1 = faster). */
+  samLock: number;
+  /** Extraction hold-time multiplier (>1 = more forgiving). */
+  extractionHold: number;
 }
 
 export const DIFFICULTIES: Record<Difficulty, DifficultyConfig> = {
-  casual: { enemyHp: 0.75, enemyDamage: 0.7, spawnRate: 0.8, maxRisk: 0.5, objectiveHp: 0.8 },
-  normal: { enemyHp: 1, enemyDamage: 1, spawnRate: 1, maxRisk: 0.75, objectiveHp: 1 },
-  hard: { enemyHp: 1.45, enemyDamage: 1.35, spawnRate: 1.25, maxRisk: 1.0, objectiveHp: 1.35 },
+  casual: { enemyHp: 0.75, enemyDamage: 0.7, spawnRate: 0.8, maxRisk: 0.5, objectiveHp: 0.8, threatBudget: 0.82, eliteChance: -0.015, specialChance: -0.04, samLock: 1.18, extractionHold: 1.18 },
+  normal: { enemyHp: 1, enemyDamage: 1, spawnRate: 1, maxRisk: 0.75, objectiveHp: 1, threatBudget: 1, eliteChance: 0, specialChance: 0, samLock: 1, extractionHold: 1 },
+  hard: { enemyHp: 1.25, enemyDamage: 1.25, spawnRate: 1.12, maxRisk: 1.0, objectiveHp: 1.2, threatBudget: 1.24, eliteChance: 0.035, specialChance: 0.06, samLock: 0.88, extractionHold: 0.94 },
 };
 
 /** Total enemies to spawn for a given wave number. */
@@ -39,7 +49,22 @@ export function waveEnemyCount(wave: number): number {
  * (wave ~46) so late runs stay challenging without becoming sponges.
  */
 export function waveEnemyPower(wave: number): number {
-  return Math.min(9, 1 + (wave - 1) * 0.18);
+  return Math.min(4.5, 1 + Math.max(0, wave - 1) * 0.12);
+}
+
+export const SPAWN_CONFIG = {
+  minDistance: 70,
+  maxDistance: 245,
+  separation: 12,
+  maxQueue: 24,
+  maxPerTick: 1,
+} as const;
+
+/** Total composition cost the normal horde director may spend this wave. */
+export function waveThreatBudget(wave: number, threatLevel = 1): number {
+  const safeWave = Math.max(1, Math.floor(wave));
+  const safeThreat = Math.max(1, Math.min(5, Math.floor(threatLevel)));
+  return Math.round((16 + safeWave * 7) * (1 + (safeThreat - 1) * 0.12));
 }
 
 /**
@@ -155,9 +180,10 @@ export function runLevelForXp(xp: number, maxLevel = MAX_RUN_LEVEL): number {
  * XP gem value dropped by an enemy kill, by enemy type. Tanks and bosses are
  * XP jackpots; the swarm is steady pocket change.
  */
-export function xpForEnemyType(type: EnemyType, isElite: boolean): number {
+export function xpForEnemyType(type: EnemyType, isElite: boolean, variant: EnemyVariant = EnemyVariant.STANDARD): number {
   if (type === EnemyType.BOSS) return 50;
   if (isElite) return 15; // elite miniboss
+  if (variant !== EnemyVariant.STANDARD) return Math.max(3, Math.min(8, Math.round(ENEMY_VARIANTS[variant].threat * 2.5)));
   if (type === EnemyType.TANK) return 5;
   if (type === EnemyType.DRONE) return 3;
   if (type === EnemyType.SHOOTER) return 2;
@@ -474,6 +500,14 @@ export const SQUAD_TEMPLATES: SquadTemplate[] = [
   { members: [EnemyVariant.SIEGE_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.SCOUT_DRONE], minWave: 9, weight: 0.4 }, // Siege push
 ];
 
+export function compositionThreatCost(members: readonly EnemyVariant[]): number {
+  return members.reduce((sum, variant) => sum + (ENEMY_VARIANTS[variant]?.threat ?? 1), 0);
+}
+
+export function compositionFitsBudget(members: readonly EnemyVariant[], remaining: number): boolean {
+  return compositionThreatCost(members) <= Math.max(0, remaining) + 1e-6;
+}
+
 /** Pick a squad template for the wave, or null for an individual spawn. */
 export function pickSquadForWave(wave: number, rng: () => number = Math.random): EnemyVariant[] | null {
   const eligible = SQUAD_TEMPLATES.filter((s) => s.minWave <= wave);
@@ -536,26 +570,37 @@ export type UpgradeId =
   | 'fuelEfficiency'
   | 'shield'
   | 'speed'
+  | 'armor'
+  | 'repair'
+  | 'xpMagnet'
+  | 'dashCooldown'
   | 'bomb';
+
+export type UpgradeCategory = 'OFFENSE' | 'DEFENSE' | 'MOBILITY' | 'UTILITY' | 'WEAPON';
 
 export interface UpgradeOption {
   id: UpgradeId;
   title: string;
   desc: string;
   icon: string;
+  category: UpgradeCategory;
 }
 
 export const UPGRADE_POOL: UpgradeOption[] = [
-  { id: 'damage', title: 'Overclock Rounds', desc: '+25% weapon damage (all weapons)', icon: '⚡' },
-  { id: 'fireRate', title: 'Hair Trigger', desc: '+18% fire rate (all weapons)', icon: '🔥' },
-  { id: 'ammo', title: 'Extended Mag', desc: '+30% max ammo (all weapons)', icon: '📦' },
-  { id: 'reload', title: 'Speed Loader', desc: 'Reload 25% faster', icon: '🔧' },
-  { id: 'salvoCooldown', title: 'Salvo Overclock', desc: 'Multi-salvo cooldown -35%', icon: '🎯' },
-  { id: 'maxHealth', title: 'Reinforced Hull', desc: '+20 max health and heal 20', icon: '🛡️' },
-  { id: 'fuelEfficiency', title: 'Turbine Tune', desc: 'Fuel drain -30%', icon: '⛽' },
-  { id: 'shield', title: 'Aegis Field', desc: 'Immediate 8s energy shield', icon: '🔮' },
-  { id: 'speed', title: 'Afterburners', desc: '+20% move speed for 12s', icon: '💨' },
-  { id: 'bomb', title: 'Airstrike', desc: 'Instantly clear the screen', icon: '💣' },
+  { id: 'damage', title: 'Overclock Rounds', desc: '+25% weapon damage (all weapons)', icon: '⚡', category: 'OFFENSE' },
+  { id: 'fireRate', title: 'Hair Trigger', desc: '+18% fire rate (all weapons)', icon: '🔥', category: 'WEAPON' },
+  { id: 'ammo', title: 'Extended Mag', desc: '+30% max ammo (all weapons)', icon: '📦', category: 'WEAPON' },
+  { id: 'reload', title: 'Speed Loader', desc: 'Reload 25% faster', icon: '🔧', category: 'WEAPON' },
+  { id: 'salvoCooldown', title: 'Salvo Overclock', desc: 'Multi-salvo cooldown -35%', icon: '🎯', category: 'WEAPON' },
+  { id: 'maxHealth', title: 'Reinforced Hull', desc: '+20 max health and heal 20', icon: '🛡️', category: 'DEFENSE' },
+  { id: 'armor', title: 'Reactive Armor', desc: '+6% damage mitigation (24% cap)', icon: '🧱', category: 'DEFENSE' },
+  { id: 'repair', title: 'Field Repair', desc: 'Repair 25 hull and improve future repairs', icon: '🔩', category: 'DEFENSE' },
+  { id: 'fuelEfficiency', title: 'Turbine Tune', desc: 'Fuel drain -30%', icon: '⛽', category: 'UTILITY' },
+  { id: 'xpMagnet', title: 'Magnetic Winch', desc: '+30% XP pickup range', icon: '🧲', category: 'UTILITY' },
+  { id: 'shield', title: 'Aegis Field', desc: 'Immediate 8s energy shield', icon: '🔮', category: 'DEFENSE' },
+  { id: 'speed', title: 'Afterburners', desc: '+20% move speed for 12s', icon: '💨', category: 'MOBILITY' },
+  { id: 'dashCooldown', title: 'Vector Jets', desc: 'Dash cooldown -15%', icon: '💨', category: 'MOBILITY' },
+  { id: 'bomb', title: 'Airstrike', desc: 'Instantly clear the screen', icon: '💣', category: 'OFFENSE' },
 ];
 
 /** Pick `count` distinct random upgrades (clamped to the pool size). */
@@ -563,9 +608,14 @@ export function pickUpgrades(count: number, rng: () => number = Math.random): Up
   const n = Math.max(1, Math.min(count, UPGRADE_POOL.length));
   const pool = [...UPGRADE_POOL];
   const picks: UpgradeOption[] = [];
+  const usedCategories = new Set<UpgradeCategory>();
   for (let i = 0; i < n; i++) {
-    const idx = Math.floor(rng() * pool.length);
+    const diverse = pool.filter((option) => !usedCategories.has(option.category));
+    const source = diverse.length > 0 ? diverse : pool;
+    const choice = source[Math.floor(rng() * source.length)];
+    const idx = pool.indexOf(choice);
     picks.push(pool.splice(idx, 1)[0]);
+    usedCategories.add(choice.category);
   }
   return picks;
 }
@@ -683,25 +733,31 @@ export function occlusionStrength(tEntry: number): number {
 }
 
 /**
- * Deterministic repeating district schedule — 14 chunks ≈ 1,850 units of
- * flight ≈ ~35s at cruise speed, so every zone cycles regularly instead of
- * lumping together by random chance.
+ * Deterministic repeating district schedule — 18 chunks of mostly desert and
+ * military base terrain (~2,376 units of flight ≈ ~45s at cruise speed), so
+ * the battlefield reads as a desert warzone. All 10 districts still appear
+ * (tests enforce coverage + no back-to-back repeats); the dense city zones
+ * become rare outposts in the sand.
  */
 export const DISTRICT_SCHEDULE: DistrictName[] = [
-  'downtown',
-  'midtown',
-  'industrial',
-  'residential',
-  'midtown',
-  'waterfront',
-  'downtown',
-  'residential',
+  'desert',
+  'base',
   'desert',
   'industrial',
+  'desert',
   'forest',
-  'midtown',
   'base',
+  'desert',
+  'midtown',
+  'desert',
   'ruins',
+  'desert',
+  'waterfront',
+  'base',
+  'desert',
+  'residential',
+  'desert',
+  'downtown',
 ];
 
 /** District for a chunk id — stable for a given id (the world never shifts). */

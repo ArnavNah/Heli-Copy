@@ -3,10 +3,17 @@ import {
   CountermeasureState,
   countermeasureConfig,
   settleExtraction,
+  salvageCreditsFor,
+  salvageForEnemy,
+  salvageForObjective,
+  securedEnemyBounty,
+  securedObjectiveReward,
   threatBonusFor,
+  threatDirectorConfig,
   threatLevelForPoints,
   threatRewardMultiplier,
 } from "./mechanics";
+import { EnemyType, ObjectiveType } from "./types";
 
 describe("countermeasures", () => {
   it("uses one charge per valid edge and observes cooldown", () => {
@@ -49,5 +56,34 @@ describe("threat economy", () => {
     const result = settleExtraction(2460, 780);
     expect(result).toEqual({ wallet: 3240, securedBonus: 780, unsecured: 0 });
     expect(settleExtraction(result.wallet, result.unsecured).wallet).toBe(3240);
+  });
+
+  it("converts salvage linearly only when extraction settles", () => {
+    expect(salvageCreditsFor(28)).toBe(140);
+    expect(settleExtraction(1000, 120, 28)).toEqual({ wallet: 1260, securedBonus: 260, unsecured: 0 });
+  });
+
+  it("keeps basic enemies from becoming a direct credit grind", () => {
+    expect(securedEnemyBounty(EnemyType.BASIC, false)).toBe(0);
+    expect(securedEnemyBounty(EnemyType.SHOOTER, false)).toBe(0);
+    expect(securedEnemyBounty(EnemyType.DRONE, true)).toBeGreaterThan(0);
+    expect(securedEnemyBounty(EnemyType.BOSS, false)).toBeGreaterThan(securedEnemyBounty(EnemyType.DRONE, true));
+  });
+
+  it("pays objectives and salvage at bounded values", () => {
+    expect(securedObjectiveReward(ObjectiveType.SAM_SITE)).toBeGreaterThan(securedObjectiveReward(ObjectiveType.AMMO_DEPOT));
+    expect(securedObjectiveReward(ObjectiveType.RADAR_TOWER)).toBeGreaterThan(0);
+    expect(salvageForObjective(ObjectiveType.SAM_SITE)).toBeGreaterThan(0);
+    expect(salvageForEnemy(EnemyType.BASIC, false)).toBe(0);
+    expect(salvageForEnemy(EnemyType.BOSS, false)).toBeGreaterThan(salvageForEnemy(EnemyType.TANK, false));
+  });
+
+  it("raises composition pressure through threat without exploding active counts", () => {
+    const low = threatDirectorConfig(1);
+    const extreme = threatDirectorConfig(5);
+    expect(extreme.directorWaveBonus).toBeGreaterThan(low.directorWaveBonus);
+    expect(extreme.eliteChanceBonus).toBeGreaterThan(low.eliteChanceBonus);
+    expect(extreme.activeEnemyCapBonus).toBeLessThanOrEqual(8);
+    expect(extreme.spawnIntervalMult).toBeGreaterThanOrEqual(0.78);
   });
 });

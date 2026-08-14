@@ -55,20 +55,25 @@ body,
 
 .menu-card {
   width: min(520px, calc(100vw - 32px));
-  border: 3px solid rgba(255, 255, 255, 0.72);
-  border-radius: 8px;
-  background:
-    linear-gradient(160deg, rgba(48, 104, 204, 0.86), rgba(20, 42, 103, 0.92)),
-    radial-gradient(circle at 18% 0%, rgba(255, 230, 109, 0.26), transparent 32%);
+  border: 1px solid rgba(232, 214, 160, 0.5);
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(16, 18, 12, 0.96), rgba(8, 9, 6, 0.97));
+  clip-path: polygon(
+    0 0,
+    calc(100% - 12px) 0,
+    100% 12px,
+    100% 100%,
+    12px 100%,
+    0 calc(100% - 12px)
+  );
   padding: 24px;
   box-shadow:
-    0 8px 0 #16265f,
-    0px 22px 34px rgba(15, 35, 72, 0.38),
-    0 0 46px rgba(127, 246, 255, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.34),
-    inset 0 -22px 42px rgba(3, 12, 39, 0.22);
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 6px 0 rgba(0, 0, 0, 0.45),
+    inset 0 0 22px rgba(255, 208, 120, 0.06);
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5)) drop-shadow(0 18px 34px rgba(0, 0, 0, 0.4));
   transform-style: preserve-3d;
-  backdrop-filter: blur(8px) saturate(1.12);
+  backdrop-filter: blur(8px) saturate(1.05);
 }
 
 .menu-title-slab {
@@ -76,35 +81,37 @@ body,
   align-items: center;
   justify-content: center;
   min-height: 70px;
-  border: 3px solid rgba(255, 255, 255, 0.78);
-  border-radius: 6px;
-  background: #ef233c;
+  border: 1.5px solid rgba(232, 214, 160, 0.75);
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(26, 30, 20, 0.97), rgba(12, 14, 9, 0.98));
+  clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 100%, 0 100%);
   box-shadow:
-    0 7px 0 #8f1421,
-    0 0 22px rgba(255, 51, 68, 0.38),
-    inset 0 1px 0 rgba(255, 255, 255, 0.34);
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 5px 0 rgba(0, 0, 0, 0.45),
+    inset 0 0 22px rgba(255, 208, 120, 0.08);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5));
   transform: translateZ(34px);
 }
 
 .menu-title-slab span {
-  color: white;
+  color: #ffe66d;
   font-size: clamp(2rem, 7vw, 4.4rem);
   font-weight: 1000;
   line-height: 1;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.45);
+  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.6), 0 0 18px rgba(255, 230, 109, 0.3);
   text-align: center;
 }
 
 .menu-stat {
-  border: 2px solid rgba(255, 255, 255, 0.42);
-  border-radius: 6px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(232, 214, 160, 0.42);
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(22, 24, 16, 0.92), rgba(10, 11, 8, 0.94));
   padding: 10px 8px;
   box-shadow:
-    0 4px 0 rgba(18, 31, 77, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    0 4px 0 rgba(0, 0, 0, 0.42),
+    inset 0 0 14px rgba(255, 208, 120, 0.05);
   transform: translateZ(18px);
 }
 
@@ -132,14 +139,14 @@ body,
 }
 
 .menu-chip {
-  border: 2px solid rgba(255, 255, 255, 0.28);
-  border-radius: 5px;
-  background: rgba(5, 16, 48, 0.22);
+  border: 1px solid rgba(232, 214, 160, 0.32);
+  border-radius: 0;
+  background: rgba(12, 13, 9, 0.78);
   padding: 8px 10px;
   text-align: center;
   box-shadow:
-    0 3px 0 rgba(18, 31, 77, 0.5),
-    inset 0 0 16px rgba(127, 246, 255, 0.08);
+    0 3px 0 rgba(0, 0, 0, 0.4),
+    inset 0 0 14px rgba(255, 208, 120, 0.04);
 }
 
 @keyframes menu-float {
@@ -153,13 +160,13 @@ body,
 }
 
 .run-stat {
-  border: 2px solid rgba(255, 255, 255, 0.32);
-  border-radius: 6px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.06));
+  border: 1px solid rgba(232, 214, 160, 0.35);
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(20, 22, 15, 0.9), rgba(9, 10, 7, 0.92));
   padding: 8px 4px;
   box-shadow:
-    0 3px 0 rgba(18, 31, 77, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    0 3px 0 rgba(0, 0, 0, 0.38),
+    inset 0 0 12px rgba(255, 208, 120, 0.04);
 }
 
 .run-stat span,
@@ -188,19 +195,22 @@ body,
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.24);
-  border-radius: 6px;
-  background: rgba(5, 16, 48, 0.28);
+  border: 1px solid rgba(232, 214, 160, 0.32);
+  border-radius: 0;
+  background: rgba(12, 13, 9, 0.78);
   padding: 12px 14px;
-  box-shadow: inset 0 0 16px rgba(127, 246, 255, 0.07);
+  box-shadow:
+    0 3px 0 rgba(0, 0, 0, 0.35),
+    inset 0 0 14px rgba(255, 208, 120, 0.04);
 }
 
 .setting-label {
   font-weight: 900;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.22em;
   font-size: 0.8rem;
-  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+  color: rgba(235, 220, 175, 0.92);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .setting-desc {
@@ -208,7 +218,7 @@ body,
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.05em;
-  color: rgba(255, 255, 255, 0.62);
+  color: rgba(235, 220, 175, 0.55);
 }
 
 .setting-value {
@@ -216,7 +226,8 @@ body,
   font-size: 0.78rem;
   min-width: 2.4rem;
   text-align: right;
-  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+  color: #ffe66d;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .toggle-track {
@@ -224,8 +235,8 @@ body,
   width: 52px;
   height: 28px;
   border-radius: 999px;
-  border: 2px solid rgba(255, 255, 255, 0.55);
-  background: rgba(0, 0, 0, 0.38);
+  border: 2px solid rgba(232, 214, 160, 0.55);
+  background: rgba(0, 0, 0, 0.45);
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
   transition: background 0.2s;
   cursor: pointer;
@@ -239,18 +250,18 @@ body,
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  background: #d9e4ff;
+  background: #cbb98a;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
   transition: transform 0.18s;
 }
 
 .toggle-track.toggle-on {
-  background: #ff3344;
+  background: #b8860b;
 }
 
 .toggle-track.toggle-on .toggle-knob {
   transform: translateX(24px);
-  background: #fff;
+  background: #ffe66d;
 }
 
 .slider-arcade {
@@ -258,8 +269,8 @@ body,
   -webkit-appearance: none;
   height: 8px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(232, 214, 160, 0.4);
   cursor: pointer;
 }
 
@@ -269,8 +280,8 @@ body,
   width: 18px;
   height: 18px;
   border-radius: 4px;
-  background: #ff3344;
-  border: 2px solid #fff;
+  background: #b8860b;
+  border: 2px solid #ffe66d;
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
 }
 
@@ -278,31 +289,31 @@ body,
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  background: #ff3344;
-  border: 2px solid #fff;
+  background: #b8860b;
+  border: 2px solid #ffe66d;
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
 }
 
 .seg-btn {
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(232, 214, 160, 0.42);
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.38);
   padding: 7px 14px;
   font-weight: 900;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: rgba(255, 255, 255, 0.8);
+  color: rgba(235, 220, 175, 0.85);
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
   transition: all 0.15s;
   cursor: pointer;
 }
 
 .seg-btn.seg-on {
-  background: #ff3344;
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 3px 0 #931521;
+  background: #b8860b;
+  color: #1a1300;
+  border-color: #ffe66d;
+  box-shadow: 0 3px 0 #5c4305;
 }
 
 .joystick-base {
@@ -385,10 +396,11 @@ body,
 }
 
 /* ------------------------------------------------------------------------
- * Military-arcade HUD design system (Final Phase U): corner-clipped panels
- * with a consistent border/background treatment, tiny uppercase tick labels,
- * and a low-contrast base so Tier-1 readouts (health/weapon/boss) dominate
- * while Tier-2/3 (score, statuses) stay subordinate.
+ * Military-tactical HUD design system: near-black panels with khaki borders
+ * (matches the classic battlefield-UX look — black panels, amber/yellow
+ * accents, checklist objectives, ability cards). Panels use `filter:
+ * drop-shadow` (not box-shadow) because clip-path clips box-shadows outside
+ * the clipped shape.
  * ------------------------------------------------------------------------ */
 .hud-panel {
   /* NOTE: no `position` here on purpose — unlayered CSS beats Tailwind's
@@ -396,11 +408,8 @@ body,
      `position: relative` was silently converting every `absolute` HUD panel
      into a flow element (panels stacked vertically instead of in the
      designed three-column layout). Let the utility class win. */
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  /* Readability pass: more opaque so panels stay legible over the bright
-     sky; `filter: drop-shadow` (not box-shadow) because clip-path clips
-     box-shadows outside the clipped shape. */
-  background: linear-gradient(180deg, rgba(9, 22, 50, 0.95), rgba(4, 11, 30, 0.93));
+  border: 1px solid rgba(232, 214, 160, 0.42);
+  background: linear-gradient(180deg, rgba(14, 16, 11, 0.95), rgba(8, 9, 6, 0.94));
   clip-path: polygon(
     0 0,
     calc(100% - 10px) 0,
@@ -410,18 +419,18 @@ body,
     0 calc(100% - 10px)
   );
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    0 3px 0 rgba(0, 0, 0, 0.3),
-    inset 0 0 16px rgba(126, 224, 255, 0.05);
-  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.28));
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 3px 0 rgba(0, 0, 0, 0.4),
+    inset 0 0 18px rgba(255, 208, 120, 0.05);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32));
 }
 
 .hud-panel.hud-danger {
-  border-color: rgba(255, 51, 68, 0.55);
+  border-color: rgba(255, 51, 68, 0.7);
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    0 3px 0 rgba(0, 0, 0, 0.3),
-    inset 0 0 16px rgba(239, 35, 60, 0.1);
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 3px 0 rgba(0, 0, 0, 0.4),
+    inset 0 0 18px rgba(239, 35, 60, 0.12);
 }
 
 .hud-label {
@@ -429,8 +438,94 @@ body,
   font-weight: 900;
   letter-spacing: 0.24em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.66);
+  color: rgba(235, 220, 175, 0.78);
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+/* Checklist objectives (top-left tactical panel) */
+.hud-objective-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.6rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+}
+
+.hud-obj-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1.5px solid rgba(255, 255, 255, 0.65);
+  background: rgba(0, 0, 0, 0.45);
+  font-size: 10px;
+  line-height: 1;
+  color: #3ae06b;
+}
+
+.hud-obj-count {
+  margin-left: auto;
+  color: rgba(255, 218, 120, 0.9);
+}
+
+.hud-obj-check.is-done {
+  border-color: rgba(85, 242, 162, 0.85);
+  color: #3ae06b;
+  background: rgba(16, 60, 36, 0.6);
+  text-shadow: 0 0 6px rgba(58, 224, 107, 0.55);
+}
+
+/* Wave banner (top-center) */
+.hud-wave-banner {
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  background: linear-gradient(180deg, rgba(38, 48, 66, 0.92), rgba(20, 26, 38, 0.94));
+  clip-path: polygon(
+    10px 0,
+    calc(100% - 10px) 0,
+    100% 100%,
+    0 100%
+  );
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4), 0 8px 18px rgba(0, 0, 0, 0.3);
+}
+
+/* Ability cards (bottom-center) */
+.hud-ability-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 76px;
+  padding: 7px 2px 5px;
+  background: linear-gradient(180deg, rgba(18, 20, 14, 0.95), rgba(8, 9, 6, 0.95));
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.45), 0 8px 16px rgba(0, 0, 0, 0.3);
+  position: relative;
+}
+
+.hud-card-num {
+  position: absolute;
+  top: 3px;
+  left: 5px;
+  font-size: 0.55rem;
+  font-weight: 900;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.hud-card-name {
+  font-size: 0.5rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
 }
 
 .hud-status {

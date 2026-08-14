@@ -37,22 +37,22 @@ export function createLowPolyMaterial(colorHex: number) {
 // stays subdued so gameplay (tracers, explosions, pickups, enemy glows) keeps
 // the saturated color budget.
 export const ENV_PALETTE = {
-  /** Sidewalk / plaza concrete (light warm gray). */
-  concrete: 0x9aa0a3,
-  /** Dark concrete pads and plazas. */
-  darkConcrete: 0x4f525a,
-  /** Warm asphalt — grand avenue (brightened for ground readability). */
-  asphalt: 0x49454a,
-  /** Darker asphalt — side streets (brightened for ground readability). */
-  asphaltDark: 0x3d3a3f,
-  /** Industrial metal / sheds. */
-  industrialMetal: 0x5e6977,
-  /** Generic rooftop tone. */
-  rooftop: 0x636a74,
-  /** Soft glass accent for windows. */
-  glassAccent: 0xbcd6de,
+  /** Sidewalk / plaza concrete — sun-bleached sand. */
+  concrete: 0xc9ba8d,
+  /** Dark concrete pads and plazas — packed dirt. */
+  darkConcrete: 0xa29468,
+  /** Dirt service roads — grand avenue. */
+  asphalt: 0xb3a070,
+  /** Darker dirt roads — side streets. */
+  asphaltDark: 0x9c8a62,
+  /** Industrial metal / sheds — weathered olive-drab. */
+  industrialMetal: 0x84795b,
+  /** Generic rooftop tone — sun-baked tan. */
+  rooftop: 0x8f7d58,
+  /** Soft glass accent for windows (cool contrast on warm facades). */
+  glassAccent: 0xa8d0da,
   /** Muted military olive. */
-  military: 0x4d5c3a,
+  military: 0x5f6b3c,
 } as const;
 
 // --- SHARED POOLS -----------------------------------------------------------
@@ -191,12 +191,11 @@ export function createSkyDome() {
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
-      // Pass 8: deep slate top + warm haze horizon so the dome melts into the
-      // warm fog — distant buildings fade to haze, never to cyan. Brightened
-      // from 0x26395e so the scene reads daytime, not night.
-      topColor: { value: new THREE.Color(0x3d5c8f) },
-      horizonColor: { value: new THREE.Color(0xc6b398) },
-      sunColor: { value: new THREE.Color(0xffc36b) },
+      // Desert dome: pale dry blue zenith fading to a dust haze horizon so the
+      // scene reads as a bright desert day.
+      topColor: { value: new THREE.Color(0x7fa3c0) },
+      horizonColor: { value: new THREE.Color(0xe6d3a2) },
+      sunColor: { value: new THREE.Color(0xffd98f) },
     },
     vertexShader: `
       varying vec3 vWorldPosition;

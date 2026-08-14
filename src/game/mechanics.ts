@@ -1,6 +1,7 @@
 export const THREAT_THRESHOLDS = [0, 30, 80, 150, 240] as const;
 export const THREAT_NAMES = ["LOW", "ELEVATED", "HIGH", "CRITICAL", "EXTREME"] as const;
 export const THREAT_REWARD_MULTIPLIERS = [1, 1.1, 1.25, 1.45, 1.7] as const;
+export const SALVAGE_CREDIT_VALUE = 5;
 
 export type ThreatLevel = 1 | 2 | 3 | 4 | 5;
 
@@ -18,6 +19,55 @@ export function threatRewardMultiplier(level: ThreatLevel): number {
 
 export function threatBonusFor(baseReward: number, level: ThreatLevel): number {
   return Math.max(0, Math.round(Math.max(0, baseReward) * (threatRewardMultiplier(level) - 1)));
+}
+
+export function salvageCreditsFor(amount: number): number {
+  const salvage = Number.isFinite(amount) ? Math.max(0, Math.floor(amount)) : 0;
+  return salvage * SALVAGE_CREDIT_VALUE;
+}
+
+export function securedObjectiveReward(type: number): number {
+  if (type === 0) return 55; // SAM
+  if (type === 1) return 45; // Radar
+  return 35; // Ammo depot
+}
+
+export function securedEnemyBounty(type: number, elite: boolean): number {
+  if (type === 4) return 320; // Boss
+  if (elite) return 70;
+  return 0;
+}
+
+export function salvageForEnemy(type: number, elite: boolean): number {
+  if (type === 4) return 16;
+  if (elite) return 6;
+  if (type === 2) return 2;
+  return 0;
+}
+
+export function salvageForObjective(type: number): number {
+  if (type === 0) return 5;
+  if (type === 1) return 4;
+  return 3;
+}
+
+export interface ThreatDirectorConfig {
+  directorWaveBonus: number;
+  squadChanceBonus: number;
+  eliteChanceBonus: number;
+  activeEnemyCapBonus: number;
+  spawnIntervalMult: number;
+}
+
+export function threatDirectorConfig(level: ThreatLevel): ThreatDirectorConfig {
+  const idx = level - 1;
+  return {
+    directorWaveBonus: idx * 2,
+    squadChanceBonus: idx * 0.055,
+    eliteChanceBonus: idx * 0.018,
+    activeEnemyCapBonus: idx * 2,
+    spawnIntervalMult: Math.max(0.78, 1 - idx * 0.045),
+  };
 }
 
 export interface CountermeasureConfig {
@@ -73,7 +123,8 @@ export class CountermeasureState {
   }
 }
 
-export function settleExtraction(wallet: number, unsecured: number) {
-  const securedBonus = Math.max(0, Math.round(unsecured));
+export function settleExtraction(wallet: number, unsecured: number, salvage = 0) {
+  const salvageCredits = salvageCreditsFor(salvage);
+  const securedBonus = Math.max(0, Math.round(unsecured)) + salvageCredits;
   return { wallet: Math.max(0, Math.round(wallet)) + securedBonus, securedBonus, unsecured: 0 };
 }

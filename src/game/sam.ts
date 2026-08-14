@@ -27,6 +27,8 @@ export interface SamStateInput {
   aligned: boolean;
   active: boolean;
   wave: number;
+  detectionMultiplier?: number;
+  lockSpeedMultiplier?: number;
 }
 
 export interface SamStateResult {
@@ -72,9 +74,9 @@ export class SamStateMachine {
     }
 
     const difficulty = Math.min(0.22, Math.max(0, input.wave - 1) * 0.018);
-    const lockDuration = SAM_LOCK_DURATION * (1 - difficulty);
+    const lockDuration = SAM_LOCK_DURATION * (1 - difficulty) / Math.max(1, input.lockSpeedMultiplier ?? 1);
     const reloadDuration = SAM_RELOAD_SECONDS * (1 - difficulty * 0.7);
-    const inDetection = input.distance <= SAM_DETECTION_RANGE * (1 + difficulty * 0.25);
+    const inDetection = input.distance <= SAM_DETECTION_RANGE * (1 + difficulty * 0.25) * Math.max(1, input.detectionMultiplier ?? 1);
     const inFireEnvelope = input.distance <= SAM_FIRE_RANGE && input.distance >= SAM_MIN_FIRE_RANGE;
 
     if (this.state === SamState.DESTROYED || this.state === SamState.DISABLED) return result;

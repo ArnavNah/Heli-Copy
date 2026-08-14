@@ -1293,6 +1293,7 @@ export class Enemy extends Entity {
   modifier: EnemyModifier = EnemyModifier.NONE;
   pattern: AttackPattern = AttackPattern.CHASE;
   isElite: boolean = false;
+  missionTargetId?: string;
 
   // Variant system: role-driven behavior + telegraphs + support effects.
   /** Multiplied into incoming damage; shield drones set this on their allies. */
@@ -1324,6 +1325,7 @@ export class Enemy extends Entity {
   // Regeneration (REGENERATING modifier)
   lastDamageTime: number = -999;
   regenPerSecond: number = 0;
+  regenMesh: THREE.Mesh | null = null;
 
   // Hit feedback: a brief emissive/color flash after taking damage. Shared
   // cached materials are cloned lazily on the first hit (clone-on-write), so
@@ -1420,9 +1422,9 @@ export class Enemy extends Entity {
 
     // Elite miniboss scaling (minibosses every 5th wave)
     if (this.isElite && type !== EnemyType.BOSS) {
-      this.maxHp = Math.round(this.maxHp * 3.2);
-      this.basePoints = Math.round(this.basePoints * 2.5);
-      radius *= 1.45;
+      this.maxHp = Math.round(this.maxHp * 1.7);
+      this.basePoints = Math.round(this.basePoints * 2.2);
+      radius *= 1.25;
       coreHex = 0xffdd55;
       accentHex = 0xff7722;
     }
@@ -1764,6 +1766,22 @@ export class Enemy extends Entity {
       });
       this.shieldMesh = new THREE.Mesh(shieldGeo, shieldMat);
       this.mesh.add(this.shieldMesh);
+    }
+
+    // Regeneration is never a hidden stat: a green energy cage breathes around
+    // the hull and brightens while repair is actually ticking.
+    if ((this.modifier & EnemyModifier.REGENERATING) !== 0) {
+      const regenGeo = new THREE.IcosahedronGeometry(radius * 1.42, 1);
+      const regenMat = new THREE.MeshBasicMaterial({
+        color: 0x55ff88,
+        transparent: true,
+        opacity: 0.12,
+        wireframe: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      this.regenMesh = new THREE.Mesh(regenGeo, regenMat);
+      this.mesh.add(this.regenMesh);
     }
 
     // Telegraph beam visual (boss phase 3 telegraphed attacks)
@@ -2625,8 +2643,15 @@ export class Enemy extends Entity {
     const dirZ = dz / dist;
 
     // --- Regeneration (REGENERATING modifier) ---
-    if (this.regenPerSecond > 0 && this.hp > 0 && time - this.lastDamageTime > 3.0) {
-      this.hp = Math.min(this.maxHp, this.hp + this.regenPerSecond * 0.05); // regen at 20fps rate
+    const regenerating = this.regenPerSecond > 0 && this.hp > 0 && this.hp < this.maxHp && time - this.lastDamageTime > 3.0;
+    if (regenerating) {
+      this.hp = Math.min(this.maxHp, this.hp + this.regenPerSecond * Math.max(0, delta));
+    }
+    if (this.regenMesh) {
+      const pulse = 1 + Math.sin(time * 4.5) * 0.08;
+      this.regenMesh.scale.setScalar(pulse);
+      this.regenMesh.rotation.y = time * 0.9;
+      (this.regenMesh.material as THREE.MeshBasicMaterial).opacity = regenerating ? 0.32 : 0.12;
     }
 
     let fired = false;
@@ -3299,6 +3324,8 @@ export class PowerUp {
       [PowerUpType.BOMB]: 0xff6600,
       [PowerUpType.FUEL]: 0x37ffb8,
       [PowerUpType.XP_GEM]: 0x56e6ff,
+      [PowerUpType.SALVAGE]: 0xffa632,
+      [PowerUpType.COUNTERMEASURE]: 0xffdc62,
     };
 
     const color = colors[type];
@@ -3370,6 +3397,21 @@ export class PowerUp {
       );
       this.mesh.add(halo);
 
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      return;
+    }
+
+    if (type === PowerUpType.SALVAGE) {
+      for (let i = 0; i < 3; i++) {
+        const scrap = createBox(0.35 + i * 0.12, 0.22, 1.1 - i * 0.16, i === 1 ? 0xffc257 : 0xc56a24);
+        scrap.rotation.set(i * 0.7, i * 1.1, i * 0.45);
+        scrap.position.set((i - 1) * 0.45, (i % 2) * 0.3, (1 - i) * 0.2);
+        this.mesh.add(scrap);
+      }
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.12, 6, 12), createGlowMaterial(0xffa632, 0.45));
+      halo.rotation.x = Math.PI / 2;
+      this.mesh.add(halo);
       this.mesh.position.copy(this.position);
       scene.add(this.mesh);
       return;
@@ -3618,6 +3660,7 @@ export class ProjectilePool {
 // ---------------------------------------------------------------------------
 
 export class Objective {
+  missionTargetId?: string;
   type: ObjectiveType;
   active: boolean = true;
   hp: number;
@@ -3938,7 +3981,13 @@ export class Objective {
   }
 
   /** Track the player with radar/launcher pivots and advance the deterministic lock state. */
-  updateSam(target: CANNON.Vec3, time: number, delta: number, wave: number): SamStateResult | null {
+  updateSam(
+    target: CANNON.Vec3,
+    time: number,
+    delta: number,
+    wave: number,
+    options: boolean | { radarSupported?: boolean; lockSpeedMultiplier?: number } = false,
+  ): SamStateResult | null {
     if (!this.samStateMachine || !this.radarYawPivot || !this.turretYawPivot || !this.launcherPitchPivot) return null;
     const dx = target.x - this.position.x;
     const dz = target.z - this.position.z;
@@ -3971,12 +4020,16 @@ export class Objective {
       this.launcherPitchPivot.rotation.x = THREE.MathUtils.lerp(this.launcherPitchPivot.rotation.x, -0.25, delta * 0.6);
     }
 
+    const radarSupported = typeof options === "boolean" ? options : Boolean(options.radarSupported);
+    const lockSpeedMultiplier = typeof options === "boolean" ? 1 : Math.max(0.1, options.lockSpeedMultiplier ?? 1);
     const aligned = Math.abs(shortestAngleDelta(targetYaw, this.turretYawPivot.rotation.y)) < 0.13;
     const result = this.samStateMachine.update(delta, {
       distance: horizontal,
       aligned,
       active: this.active,
       wave,
+      detectionMultiplier: radarSupported ? 1.08 : 1,
+      lockSpeedMultiplier: (radarSupported ? 1.1 : 1) * lockSpeedMultiplier,
     });
     const state = this.samStateMachine.state;
     const lockIntensity = state === SamState.LOCKING ? 0.55 + this.samStateMachine.lockProgress * 0.45 : 0.28;

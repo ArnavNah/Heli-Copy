@@ -8,6 +8,8 @@ import {
   clamp,
   coinsForScore,
   comboMultiplier,
+  compositionFitsBudget,
+  compositionThreatCost,
   DIFFICULTIES,
   DISTRICT_CONFIGS,
   DISTRICT_SCHEDULE,
@@ -28,6 +30,7 @@ import {
   runXpForLevel,
   rhythmDensity,
   sceneRhythmForChunk,
+  SPAWN_CONFIG,
   SQUAD_TEMPLATES,
   variantAtCap,
   xpForEnemyType,
@@ -35,6 +38,7 @@ import {
   waveEnemyDamage,
   waveEnemyFireRate,
   waveEnemyPower,
+  waveThreatBudget,
   waveDuration,
   weaponLevelBonus,
   weaponLevelForXp,
@@ -69,12 +73,12 @@ describe("waveEnemyCount", () => {
 });
 
 describe("procedural wave scaling", () => {
-  it("waveEnemyPower grows with wave and caps at 9x", () => {
+  it("waveEnemyPower grows steadily and caps at 4.5x", () => {
     expect(waveEnemyPower(1)).toBe(1);
-    expect(waveEnemyPower(2)).toBeCloseTo(1.18);
-    expect(waveEnemyPower(10)).toBeCloseTo(2.62);
-    expect(waveEnemyPower(20)).toBeCloseTo(4.42);
-    expect(waveEnemyPower(100)).toBe(9);
+    expect(waveEnemyPower(2)).toBeCloseTo(1.12);
+    expect(waveEnemyPower(10)).toBeCloseTo(2.08);
+    expect(waveEnemyPower(20)).toBeCloseTo(3.28);
+    expect(waveEnemyPower(100)).toBe(4.5);
   });
 
   it("waveEnemyDamage grows slower than HP and caps at 3.2x", () => {
@@ -224,10 +228,29 @@ describe("pickUpgrades", () => {
     expect(picks).toHaveLength(3);
     const ids = new Set(picks.map((p) => p.id));
     expect(ids.size).toBe(3);
+    expect(new Set(picks.map((p) => p.category)).size).toBe(3);
   });
   it("clamps to pool size", () => {
-    expect(pickUpgrades(999).length).toBeLessThanOrEqual(10);
+    expect(pickUpgrades(999).length).toBeLessThanOrEqual(14);
     expect(pickUpgrades(0)).toHaveLength(1);
+  });
+});
+
+describe("threat-budgeted spawning", () => {
+  it("grows by wave and threat without unbounded per-tick bursts", () => {
+    expect(waveThreatBudget(2, 1)).toBeGreaterThan(waveThreatBudget(1, 1));
+    expect(waveThreatBudget(5, 3)).toBeGreaterThan(waveThreatBudget(5, 1));
+    expect(SPAWN_CONFIG.maxPerTick).toBe(1);
+    expect(SPAWN_CONFIG.maxQueue).toBeLessThanOrEqual(24);
+    expect(SPAWN_CONFIG.minDistance).toBeGreaterThanOrEqual(70);
+  });
+
+  it("prices squad compositions before committing them", () => {
+    const members: EnemyVariant[] = [EnemyVariant.STANDARD, EnemyVariant.MISSILE_CARRIER];
+    const cost = compositionThreatCost(members);
+    expect(cost).toBe(ENEMY_VARIANTS[EnemyVariant.STANDARD].threat + ENEMY_VARIANTS[EnemyVariant.MISSILE_CARRIER].threat);
+    expect(compositionFitsBudget(members, cost)).toBe(true);
+    expect(compositionFitsBudget(members, cost - 1)).toBe(false);
   });
 });
 

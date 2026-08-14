@@ -89,7 +89,7 @@ describe("delivery contract generation", () => {
   });
 
   it("rejects identical endpoints", () => {
-    const depot = depotHubForChunk(-2)!;
+    const depot = depotHubForChunk(-3)!;
     expect(createDeliveryContract(depot, depot, 1, 0)).toBeNull();
   });
 
@@ -224,7 +224,16 @@ describe("delivery lifecycle", () => {
   });
 
   it("spends delivery credits on bounded permanent hangar ranks", () => {
-    const upgrades = { armor: 0, fuelSystems: 0, cargoRig: 0, countermeasures: 0 };
+    const upgrades = {
+      engine: 0,
+      rotor: 0,
+      armor: 0,
+      airframe: 0,
+      fuel: 0,
+      targeting: 0,
+      weaponSystem: 0,
+      countermeasures: 0,
+    };
     const cost = HANGAR_UPGRADE_INFO.armor.costs[0];
     const purchased = buyHangarUpgrade(cost, upgrades, "armor");
     expect(purchased.purchased).toBe(true);

@@ -28,6 +28,7 @@ export type {
   MinimapDelivery,
   MinimapEnemy,
   MinimapObjective,
+  MinimapMission,
   MinimapSnapshot,
   MinimapThreat,
   QualityPreset,
@@ -47,6 +48,9 @@ export {
   readDeliveryCredits,
   readHangarUpgrades,
 } from "./game/delivery";
+export { MissionManager, MissionState, MissionType, BonusObjectiveType } from "./game/mission";
+export type { Mission, MissionBonus, MissionHudSnapshot, MissionReward } from "./game/mission";
+export { rollLoot, salvageCreditValue, collectSalvage, canUseDepotService } from "./game/loot";
 export {
   CountermeasureState,
   countermeasureConfig,

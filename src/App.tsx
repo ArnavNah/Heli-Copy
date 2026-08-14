@@ -15,6 +15,7 @@ import type {
   HangarUpgradeId,
   HangarUpgrades,
   MinimapSnapshot,
+  MissionHudSnapshot,
   UpgradeId,
   UpgradeOption,
 } from './game';
@@ -33,6 +34,11 @@ type RunStats = {
   threatLevel?: number;
   deliveries?: number;
   samSitesDestroyed?: number;
+  radarSitesDestroyed?: number;
+  bossesDestroyed?: number;
+  missionsCompleted?: number;
+  missionBonusesCompleted?: number;
+  salvage?: number;
   lostUnsecured?: number;
   securedThreatBonus?: number;
 };
@@ -199,7 +205,7 @@ function ControlHints({ runId }: { runId: number }) {
   const hint = CONTROL_HINTS[idx];
   return (
     <div
-      className={`pointer-events-none absolute bottom-6 left-1/2 z-30 -translate-x-1/2 transition-opacity duration-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
+      className={`pointer-events-none absolute bottom-[7.5rem] left-1/2 z-30 -translate-x-1/2 transition-opacity duration-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
     >
       <div className="hud-panel flex items-center gap-3 px-4 py-2">
         <KeyCap>{hint.keys}</KeyCap>
@@ -237,19 +243,11 @@ function drawMinimap(
 
   ctx.clearRect(0, 0, W, H);
 
-  // Panel
+  // Circular radar disc (military round-screen look, khaki ring + N marker)
   ctx.beginPath();
-  ctx.moveTo(6 + 20, 6);
-  ctx.arcTo(W - 6, 6, W - 6, H - 6, 20);
-  ctx.arcTo(W - 6, H - 6, 6, H - 6, 20);
-  ctx.arcTo(6, H - 6, 6, 6, 20);
-  ctx.arcTo(6, 6, W - 6, 6, 20);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(6, 13, 28, 0.74)';
+  ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(6, 13, 24, 0.82)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(120, 190, 255, 0.3)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
 
   // Grid rings + cross
   ctx.strokeStyle = 'rgba(120, 190, 255, 0.11)';
@@ -267,12 +265,20 @@ function drawMinimap(
   ctx.lineTo(cx, cy + R);
   ctx.stroke();
 
+  // Everything inside the disc is clipped so edge-clamped markers never
+  // paint outside the round screen.
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.clip();
+
   if (!snap) {
     ctx.fillStyle = 'rgba(160, 210, 255, 0.5)';
     ctx.font = '700 15px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('NO SIGNAL', cx, cy);
+    ctx.restore();
     return;
   }
 
@@ -568,6 +574,32 @@ function drawMinimap(
     ctx.restore();
   }
 
+  // The active mission target is repainted over ordinary contacts. A pulsing
+  // cyan diamond is readable at a glance and remains clamped when off-screen.
+  if (snap.mission) {
+    const dx = snap.mission.x - snap.player.x;
+    const dz = snap.mission.z - snap.player.z;
+    const dist = Math.hypot(dx, dz);
+    const mp = dist > range ? edgeX(dx, dz) : { x: toX(snap.mission.x), y: toY(snap.mission.z) };
+    const size = 9 + Math.sin(t * 4.5) * 1.5;
+    ctx.beginPath();
+    ctx.moveTo(mp.x, mp.y - size);
+    ctx.lineTo(mp.x + size, mp.y);
+    ctx.lineTo(mp.x, mp.y + size);
+    ctx.lineTo(mp.x - size, mp.y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(20, 40, 55, 0.8)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(80, 235, 255, 0.98)';
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255, 230, 109, 0.98)';
+    ctx.font = '900 9px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('M', mp.x, mp.y + 0.5);
+  }
+
   // Boss — large crimson ring, clamped to the edge if far away
   for (const e of snap.enemies) {
     if (!e.boss) continue;
@@ -611,6 +643,31 @@ function drawMinimap(
   ctx.beginPath();
   ctx.arc(cx, cy, 2.4, 0, Math.PI * 2);
   ctx.fill();
+
+  ctx.restore(); // end circular clip
+
+  // Khaki bezel ring + compass tick
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(226, 208, 150, 0.7)';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(226, 208, 150, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 14, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(235, 220, 175, 0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(cx - 4, cy - R - 4);
+  ctx.lineTo(cx + 4, cy - R - 4);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(235, 220, 175, 0.95)';
+  ctx.font = '900 13px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('N', cx, cy - R - 15);
 }
 
 function MinimapPanel() {
@@ -640,7 +697,7 @@ function MinimapPanel() {
   }, []);
 
   return (
-    <div className="pointer-events-none absolute right-4 top-28 z-20 sm:right-6">
+    <div className="pointer-events-none absolute right-4 top-4 z-20 sm:right-6">
       <canvas
         ref={canvasRef}
         width={360}
@@ -670,10 +727,10 @@ function MenuButton({
       : 'h-12 min-w-44 px-6 text-lg tracking-[0.16em]';
   return (
     <button
-      className={`pointer-events-auto rounded-[7px] border-2 font-black uppercase transition hover:-translate-y-0.5 active:translate-y-1 ${sizing} ${
+      className={`pointer-events-auto rounded-none border font-black uppercase transition hover:-translate-y-0.5 active:translate-y-1 ${sizing} ${
         secondary
-          ? 'border-white/60 bg-[#264fb1]/85 text-white shadow-[0_6px_0_#16265f,0_12px_22px_rgba(0,0,0,0.28)] hover:bg-[#315fd0] active:shadow-[0_3px_0_#16265f,0_8px_16px_rgba(0,0,0,0.22)]'
-          : 'border-white/75 bg-[#ff3344] text-white shadow-[0_6px_0_#931521,0_12px_22px_rgba(0,0,0,0.28)] hover:bg-[#ff4b59] active:shadow-[0_3px_0_#931521,0_8px_16px_rgba(0,0,0,0.22)]'
+          ? 'border-[#e8d6a0]/45 bg-[#14160f]/95 text-[#e8d6a0]/90 shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35)] hover:bg-[#1d2017] active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
+          : 'border-[#ffe66d]/80 bg-[#b8860b]/25 text-[#ffe66d] shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35)] hover:bg-[#b8860b]/40 active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
       }`}
       onClick={onClick}
       type="button"
@@ -707,7 +764,7 @@ function ThreeDMenu({
   const isGameOver = mode === 'gameover';
 
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-gradient-to-b from-[#9fdce8]/30 via-[#7fd9e6]/20 to-[#20417f]/35 px-4">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/55 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card">
@@ -751,6 +808,11 @@ function ThreeDMenu({
                 <div className="run-stat"><span>Threat</span><strong>{stats.threatLevel ?? 1}</strong></div>
                 <div className="run-stat"><span>Deliveries</span><strong>{stats.deliveries ?? 0}</strong></div>
                 <div className="run-stat"><span>SAM Sites</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
+                <div className="run-stat"><span>Radar</span><strong>{stats.radarSitesDestroyed ?? 0}</strong></div>
+                <div className="run-stat"><span>Bosses</span><strong>{stats.bossesDestroyed ?? 0}</strong></div>
+                <div className="run-stat"><span>Missions</span><strong>{stats.missionsCompleted ?? 0}</strong></div>
+                <div className="run-stat"><span>Bonuses</span><strong>{stats.missionBonusesCompleted ?? 0}</strong></div>
+                <div className="run-stat"><span>Salvage</span><strong>{stats.salvage ?? 0}</strong></div>
                 <div className="run-stat">
                   <span>{stats.status === 'EXTRACTED' ? 'Bonus Secured' : 'Bonus Lost'}</span>
                   <strong>{stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR</strong>
@@ -759,7 +821,7 @@ function ThreeDMenu({
             )}
 
             {isNewBest && (
-              <div className="mt-3 rounded-[6px] border-2 border-[#ffe66d] bg-[#ffe66d]/25 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-white shadow-[0_3px_0_rgba(0,0,0,0.22)]">
+              <div className="mt-3 border border-[#ffe66d]/80 bg-[#b8860b]/25 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ffe66d] shadow-[0_3px_0_rgba(0,0,0,0.35)]">
                 New High Score
               </div>
             )}
@@ -785,9 +847,9 @@ function ThreeDMenu({
               <div className="menu-chip">Mouse Aim</div>
               <div className="menu-chip">Space Climb</div>
               <div className="menu-chip">Alt Descend</div>
-              <div className="menu-chip col-span-2 text-center text-[#ff3344] bg-[#ff3344]/10 border-[#ff3344]/30 py-1.5 rounded-[5px] border">Q / R-Click Lock Salvo</div>
+              <div className="menu-chip col-span-2 text-center border-[#ff3344]/50 py-1.5 text-[#ff8b96]">Q / R-Click Lock Salvo</div>
               <div className="menu-chip col-span-2 text-center text-[#ffbd3f]">C Deploy Flares</div>
-              <div className="menu-chip col-span-2 text-center border-white/20 py-1.5 rounded-[5px]">ESC / P Pause</div>
+              <div className="menu-chip col-span-2 text-center border-[#e8d6a0]/30 py-1.5">ESC / P Pause</div>
             </div>
           </div>
         </div>
@@ -879,14 +941,14 @@ function PauseOverlay({
   onQuit: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#081331]/45 px-4 backdrop-blur-[2px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/60 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(400px,calc(100vw-32px))] text-center">
-            <div className="text-4xl font-black uppercase tracking-[0.1em] text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.45)]">
+            <div className="text-4xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Paused
             </div>
-            <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-white/70">
+            <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-[#e8d6a0]/75">
               Esc to Resume
             </div>
             <div className="mt-6 flex flex-col items-center gap-3">
@@ -925,11 +987,11 @@ function SettingsPanel({
   onClose: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#081331]/55 px-4 backdrop-blur-[2px]">
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#0a0c07]/65 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(460px,calc(100vw-32px))]">
-            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.45)]">
+            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Settings
             </div>
 
@@ -1072,7 +1134,7 @@ function HelicopterCard({
       className={`group flex flex-col items-center gap-2 rounded-xl border-2 px-3 py-4 text-center transition hover:-translate-y-1 ${
         selected
           ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_8px_24px_rgba(255,230,109,0.2)]'
-          : 'border-white/20 bg-[#12294a]/85 hover:border-white/50'
+          : 'border-white/20 bg-[#12140e]/90 hover:border-[#ffe66d]/60'
       }`}
     >
       {/* Stylized top-down helicopter silhouette preview */}
@@ -1117,23 +1179,23 @@ function HangarScreen({
   onBack: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#081331]/60 px-4 backdrop-blur-[2px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/70 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig max-h-[88vh] overflow-y-auto">
           <div className="menu-card w-[min(620px,calc(100vw-32px))]">
-            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.45)]">
+            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Hangar
             </div>
-            <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-white/60">
+            <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-[#e8d6a0]/70">
               Aircraft, weapon mastery, and permanent systems
             </div>
 
-            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-lg border border-[#ffe66d]/55 bg-[#3d2b08]/65 px-3 py-1.5">
+            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-none border border-[#ffe66d]/70 bg-[#b8860b]/20 px-3 py-1.5">
               <CoinIcon />
               <span className="text-xl font-black text-[#ffe66d]">{credits.toLocaleString()} CREDITS</span>
             </div>
 
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#7ee0ff]">
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
               Permanent Systems
             </div>
             <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
@@ -1143,23 +1205,23 @@ function HangarScreen({
                 const maxed = cost === undefined;
                 const affordable = !maxed && credits >= cost;
                 return (
-                  <div key={id} className="flex flex-col rounded-xl border-2 border-white/18 bg-[#12294a]/85 px-3 py-3 text-center">
-                    <div className="text-xs font-black uppercase tracking-wide text-white">{info.name}</div>
-                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#7ee0ff]">Rank {rank} / {info.costs.length}</div>
+                  <div key={id} className="flex flex-col border border-[#e8d6a0]/30 bg-[#14160f]/95 px-3 py-3 text-center">
+                    <div className="text-xs font-black uppercase tracking-wide text-[#e8d6a0]">{info.name}</div>
+                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#e8d6a0]/70">Rank {rank} / {info.costs.length}</div>
                     <div className="mt-2 flex justify-center gap-1">
                       {info.costs.map((_, index) => index + 1).map((level) => (
-                        <span key={level} className={`h-1.5 w-8 rounded-full ${level <= rank ? 'bg-[#55f2c2]' : 'bg-white/12'}`} />
+                        <span key={level} className={`h-1.5 w-8 ${level <= rank ? 'bg-[#ffe66d]' : 'bg-[#e8d6a0]/15'}`} />
                       ))}
                     </div>
-                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-white/65">{info.description}</div>
+                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#e8d6a0]/65">{info.description}</div>
                     <button
                       type="button"
                       disabled={!affordable}
                       onClick={() => onBuyUpgrade(id)}
-                      className={`mt-3 rounded-md border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
+                      className={`mt-3 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
                         affordable
-                          ? 'border-[#ffe66d] bg-[#ffe66d]/18 text-[#ffe66d] hover:bg-[#ffe66d]/28'
-                          : 'cursor-not-allowed border-white/12 bg-black/15 text-white/35'
+                          ? 'border-[#ffe66d]/80 bg-[#b8860b]/25 text-[#ffe66d] hover:bg-[#b8860b]/40'
+                          : 'cursor-not-allowed border-[#e8d6a0]/15 bg-black/20 text-[#e8d6a0]/35'
                       }`}
                     >
                       {maxed ? 'Max Rank' : `${cost} Credits`}
@@ -1170,7 +1232,7 @@ function HangarScreen({
             </div>
 
             {/* Player aircraft selector */}
-            <div className="mt-4 text-center text-sm font-black uppercase tracking-[0.2em] text-[#7ee0ff]">
+            <div className="mt-4 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
               Aircraft
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2.5">
@@ -1189,10 +1251,10 @@ function HangarScreen({
             </div>
 
             {/* Weapon mastery */}
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#7ee0ff]">
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
               Weapons
             </div>
-            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-white/50">
+            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#e8d6a0]/50">
               Max rank unlocks a signature alt-fire
             </div>
 
@@ -1203,19 +1265,19 @@ function HangarScreen({
                 return (
                   <div
                     key={w.name}
-                    className="flex items-center gap-3 rounded-xl border-2 bg-[#12294a]/85 px-4 py-3"
-                    style={{ borderColor: maxed ? w.color : 'rgba(255,255,255,0.18)' }}
+                    className="flex items-center gap-3 border bg-[#14160f]/95 px-4 py-3"
+                    style={{ borderColor: maxed ? w.color : 'rgba(232,214,160,0.3)' }}
                   >
                     <div
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-lg font-black"
-                      style={{ background: `${w.color}26`, color: w.color, border: `2px solid ${w.color}66` }}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center text-lg font-black"
+                      style={{ background: `${w.color}26`, color: w.color, border: `1px solid ${w.color}66` }}
                     >
                       {i + 1}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-black uppercase tracking-wide text-white">{w.name}</span>
-                        <span className="text-xs font-black text-[#7ee0ff]">LV.{lvl}</span>
+                        <span className="text-sm font-black uppercase tracking-wide text-[#e8d6a0]">{w.name}</span>
+                        <span className="text-xs font-black text-[#ffe66d]">LV.{lvl}</span>
                       </div>
                       <div className="mt-1 flex gap-1">
                         {[1, 2, 3, 4, 5].map((n) => (
@@ -1272,6 +1334,7 @@ export default function App() {
   const [health, setHealth] = useState(100);
   const [fuel, setFuel] = useState(100);
   const [wave, setWave] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
   const [runLevel, setRunLevel] = useState(1);
   const [runXpProgress, setRunXpProgress] = useState(0);
   const [waveMessage, setWaveMessage] = useState<string | null>(null);
@@ -1314,6 +1377,8 @@ export default function App() {
     points: number; level: number; name: string; rewardMultiplier: number;
   } | null>(null);
   const [unsecuredCredits, setUnsecuredCredits] = useState(0);
+  const [salvage, setSalvage] = useState(0);
+  const [salvageCredits, setSalvageCredits] = useState(0);
   const [extraction, setExtraction] = useState<{
     distance: number; bearing: number; progress: number; active: boolean; carrying: boolean;
   } | null>(null);
@@ -1327,6 +1392,7 @@ export default function App() {
   const [objectives, setObjectives] = useState<{
     sam: boolean;
     radar: boolean;
+    depot: boolean;
     count: number;
   } | null>(null);
   const [samThreat, setSamThreat] = useState<{
@@ -1336,8 +1402,11 @@ export default function App() {
     bearing: number;
   } | null>(null);
   const [delivery, setDelivery] = useState<DeliveryHudSnapshot | null>(null);
+  const [mission, setMission] = useState<MissionHudSnapshot | null>(null);
+  const [radarLinked, setRadarLinked] = useState(false);
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
   const [showPerf, setShowPerf] = useState(true);
+  const [hitFlash, setHitFlash] = useState(0);
 
   const applySettings = (patch: Partial<GameSettings>) => {
     const next = { ...settings, ...patch };
@@ -1384,6 +1453,7 @@ export default function App() {
       const nextScore = e.detail.score;
       setScore(nextScore);
       setWave(e.detail.wave);
+      setElapsed(e.detail.elapsed ?? 0);
       setRunLevel(e.detail.runLevel ?? 1);
       setRunXpProgress(e.detail.runXpProgress ?? 0);
       setWaveMessage(e.detail.playing ? e.detail.message : null);
@@ -1394,11 +1464,15 @@ export default function App() {
       setCountermeasureInfo(e.detail.countermeasures || null);
       setThreatInfo(e.detail.threatSystem || null);
       setUnsecuredCredits(e.detail.unsecuredCredits ?? 0);
+      setSalvage(e.detail.salvage ?? 0);
+      setSalvageCredits(e.detail.salvageCredits ?? 0);
       setExtraction(e.detail.extraction || null);
       setBossInfo(e.detail.boss || null);
       setObjectives(e.detail.objectives || null);
       setSamThreat(e.detail.samThreat || null);
       setDelivery(e.detail.delivery || null);
+      setMission(e.detail.mission || null);
+      setRadarLinked(Boolean(e.detail.radarLinked));
       if (Number.isFinite(e.detail.credits)) setCredits(e.detail.credits);
 
       const storedHighScore = readHighScore();
@@ -1436,6 +1510,11 @@ export default function App() {
         threatLevel: e.detail.threatLevel ?? 1,
         deliveries: e.detail.deliveries ?? 0,
         samSitesDestroyed: e.detail.samSitesDestroyed ?? 0,
+        radarSitesDestroyed: e.detail.radarSitesDestroyed ?? 0,
+        bossesDestroyed: e.detail.bossesDestroyed ?? 0,
+        missionsCompleted: e.detail.missionsCompleted ?? 0,
+        missionBonusesCompleted: e.detail.missionBonusesCompleted ?? 0,
+        salvage: e.detail.salvage ?? 0,
         lostUnsecured: e.detail.lostUnsecured ?? 0,
         securedThreatBonus: e.detail.securedThreatBonus ?? 0,
       });
@@ -1460,12 +1539,18 @@ export default function App() {
       }
     };
 
+    const handlePlayerHit = () => {
+      setHitFlash(1);
+      window.setTimeout(() => setHitFlash(0), 140);
+    };
+
     window.addEventListener('helistrike:update', handleUpdate as EventListener);
     window.addEventListener('helistrike:stats', handleStats as EventListener);
     window.addEventListener('helistrike:gameover', handleGameOver as EventListener);
     window.addEventListener('helistrike:autopause', handleAutoPause as EventListener);
     window.addEventListener('helistrike:upgrade-offer', handleUpgradeOffer as EventListener);
     window.addEventListener('helistrike:announce', handleAnnounce as EventListener);
+    window.addEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
 
     return () => {
       window.removeEventListener('helistrike:update', handleUpdate as EventListener);
@@ -1474,6 +1559,7 @@ export default function App() {
       window.removeEventListener('helistrike:autopause', handleAutoPause as EventListener);
       window.removeEventListener('helistrike:upgrade-offer', handleUpgradeOffer as EventListener);
       window.removeEventListener('helistrike:announce', handleAnnounce as EventListener);
+      window.removeEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
       engine.dispose();
       engineRef.current = null;
     };
@@ -1595,36 +1681,69 @@ export default function App() {
           background: 'radial-gradient(circle at center, transparent 45%, rgba(239,35,60,0.72) 100%)',
         }}
       />
+      <div
+        className="pointer-events-none absolute inset-0 z-10 transition-opacity duration-100"
+        style={{
+          opacity: hitFlash,
+          background: 'radial-gradient(circle at center, transparent 52%, rgba(255,80,64,0.58) 100%)',
+          boxShadow: 'inset 0 0 26px rgba(255,220,190,0.65)',
+        }}
+      />
 
       <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
-        <div className="arcade-marquee absolute left-1/2 top-0 hidden -translate-x-1/2 px-7 py-1 text-[11px] font-black uppercase tracking-[0.22em] text-[#ffe66d] sm:block">
-          Heli-Strike Arcade Assault
-        </div>
-
-        <div className={`hud-panel absolute left-4 top-3 flex flex-col gap-1.5 px-3 py-2 sm:left-6 sm:top-5 ${health <= 30 ? 'hud-danger' : ''}`}>
-          <div className="hud-label">Systems</div>
-          <div className="flex items-center gap-2">
-            <HeartIcon />
-            <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
-            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(health)}</span>
+        {/* ══ TOP-LEFT: tactical objectives checklist ══ */}
+        {mode === 'playing' && (
+          <div className="hud-panel absolute left-4 top-3 flex flex-col gap-1.5 px-3 py-2 sm:left-6 sm:top-5">
+            <div className="hud-label text-[#ffd35c]">◆ Objectives</div>
+            {objectives && objectives.count > 0 ? (
+              <>
+                <div className="hud-objective-row">
+                  <span className={`hud-obj-check ${!objectives.sam ? 'is-done' : ''}`}>{!objectives.sam ? '✓' : ''}</span>
+                  <span className={objectives.sam ? '' : 'text-white/40'}>Destroy SAMs</span>
+                  <span className="hud-obj-count">{objectives.sam ? 'ACTIVE' : 'DONE'}</span>
+                </div>
+                <div className="hud-objective-row">
+                  <span className={`hud-obj-check ${!objectives.radar ? 'is-done' : ''}`}>{!objectives.radar ? '✓' : ''}</span>
+                  <span className={objectives.radar ? '' : 'text-white/40'}>Destroy Radar</span>
+                  <span className="hud-obj-count">{objectives.radar ? 'ACTIVE' : 'DONE'}</span>
+                </div>
+                <div className="hud-objective-row">
+                  <span className={`hud-obj-check ${!objectives.depot ? 'is-done' : ''}`}>{!objectives.depot ? '✓' : ''}</span>
+                  <span className={objectives.depot ? '' : 'text-white/40'}>Destroy Depot</span>
+                  <span className="hud-obj-count">{objectives.depot ? 'ACTIVE' : 'DONE'}</span>
+                </div>
+              </>
+            ) : (
+              <div className="hud-objective-row">
+                <span className="hud-obj-check is-done">✓</span>
+                <span className="text-[#55f2a2]">Sector Secured</span>
+              </div>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <GasIcon />
-            <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
-            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(fuel)}%</span>
-          </div>
-        </div>
+        )}
 
-        <div className="hud-panel absolute left-1/2 top-3 -translate-x-1/2 px-6 py-1.5 text-center sm:top-5">
-          <div className="hud-label">Stage {wave === 0 ? '-' : wave}</div>
-          <div className="mt-0.5 text-3xl font-black leading-none sm:text-4xl" style={textShadow}>{score.toLocaleString()}</div>
-        </div>
-
-        <div className="hud-panel absolute right-4 top-4 flex items-center gap-2 px-3 py-1.5 sm:right-6 sm:top-6">
-          <CoinIcon />
-          <div className="text-right">
-            <div className="text-3xl font-black leading-none" style={textShadow}>{credits.toLocaleString()}</div>
-            {unsecuredCredits > 0 && <div className="mt-1 text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>Unsecured +{unsecuredCredits.toLocaleString()}</div>}
+        {/* ══ TOP-CENTER: wave banner + run timer ══ */}
+        <div className="pointer-events-none absolute left-1/2 top-3 flex -translate-x-1/2 flex-col items-center gap-1.5 sm:top-5">
+          <div className="hud-wave-banner flex items-center gap-2.5 px-4 py-1.5">
+            <span className="text-sm font-black uppercase tracking-[0.2em] text-white" style={textShadow}>
+              Wave {wave}
+            </span>
+            <span className="flex gap-0.5 text-[12px] leading-none">
+              {Array.from({ length: 5 }).map((_, i) =>
+                i < Math.min(wave, 5) ? (
+                  <span key={i} className="drop-shadow-[0_0_5px_rgba(239,35,60,0.95)]">
+                    💀
+                  </span>
+                ) : (
+                  <span key={i} className="opacity-30 grayscale">
+                    💀
+                  </span>
+                ),
+              )}
+            </span>
+            <span className="border-l border-white/25 pl-3 text-base font-black tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
+              {formatDuration(elapsed)}
+            </span>
           </div>
         </div>
 
@@ -1637,22 +1756,6 @@ export default function App() {
             <div className={`text-[11px] font-black uppercase ${threatInfo.level >= 4 ? 'text-[#ff5566]' : threatInfo.level >= 2 ? 'text-[#ffbd3f]' : 'text-[#bfeeff]'}`}>
               {threatInfo.name} · x{threatInfo.rewardMultiplier.toFixed(2)} reward
             </div>
-          </div>
-        )}
-
-        {/* Destroyable objective indicators */}
-        {objectives && objectives.count > 0 && mode === 'playing' && (
-          <div className="flex items-center gap-2">
-            {objectives.sam && (
-              <span className="rounded-[4px] border border-[#ff5566]/70 bg-[#3d0f14]/70 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#ff99aa]" style={textShadow}>
-                🎯 SAM
-              </span>
-            )}
-            {objectives.radar && (
-              <span className="rounded-[4px] border border-[#7ee0ff]/70 bg-[#0a2a3a]/70 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#bfeeff]" style={textShadow}>
-                📡 RADAR
-              </span>
-            )}
           </div>
         )}
 
@@ -1681,13 +1784,52 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {mission && mode === 'playing' && (
+          <div className="hud-panel w-[min(310px,74vw)] border-[#50ebff]/55 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="hud-label text-[#50ebff]">◆ Mission</span>
+              <span className="text-[10px] font-black uppercase tracking-wider text-[#ffe66d]">
+                {mission.rewardCredits} CR · {mission.rewardSalvage} salvage
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-xs font-black uppercase tracking-wide text-white" style={textShadow}>
+              {mission.title}
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
+              <div className="h-full bg-[#50ebff] transition-[width] duration-150" style={{ width: `${clampPercent((mission.progress / Math.max(1, mission.targetProgress)) * 100)}%` }} />
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 text-[9px] font-black uppercase tracking-wider">
+              <span className={mission.bonus?.state === 'FAILED' ? 'text-[#ff6f7e]' : mission.bonus?.state === 'COMPLETE' ? 'text-[#55f2a2]' : 'text-white/65'}>
+                {mission.bonus ? `Bonus: ${mission.bonus.label}${mission.bonus.state === 'FAILED' ? ' — missed' : ''}` : 'Primary objective'}
+              </span>
+              <span className="text-white/70">{Math.min(mission.progress, mission.targetProgress)}/{mission.targetProgress}</span>
+            </div>
+            {radarLinked && <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-[#ff9b3d]">Radar link · SAM tracking boosted</div>}
+          </div>
+        )}
         </div>
 
         {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
         {mode === 'playing' && <MinimapPanel />}
 
+        {/* ══ LEFT: hull + fuel ══ */}
+        <div className={`hud-panel pointer-events-none absolute left-4 top-[11rem] flex flex-col gap-1.5 px-3 py-2 sm:left-6 ${health <= 30 ? 'hud-danger' : ''}`}>
+          <div className="hud-label">Systems</div>
+          <div className="flex items-center gap-2">
+            <HeartIcon />
+            <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
+            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(health)}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <GasIcon />
+            <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
+            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(fuel)}%</span>
+          </div>
+        </div>
+
         {countermeasureInfo && mode === 'playing' && (
-          <div className="hud-panel pointer-events-none absolute left-4 top-[20.5rem] px-3 py-2 sm:left-6 sm:top-[21rem]">
+          <div className="hud-panel pointer-events-none absolute left-4 top-[28.5rem] px-3 py-2 sm:left-6 sm:top-[29rem]">
             <div className="hud-label text-[#ffbd3f]">Flares · C</div>
             <div className="mt-1 text-base tracking-[0.18em] text-[#ffbd3f]">
               {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
@@ -1700,7 +1842,7 @@ export default function App() {
           <div className="pointer-events-none absolute right-4 top-[32.5rem] w-[min(250px,44vw)] sm:right-6 sm:top-[33rem]">
             <div className="hud-panel border-[#55f2a2]/60 px-3 py-2">
               <div className="hud-label text-[#55f2a2]">Extraction Available</div>
-              <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{unsecuredCredits} CR</span></div>
+              <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{(unsecuredCredits + salvageCredits).toLocaleString()} CR</span></div>
               {extraction.active && (
                 <div className="mt-2"><div className="text-[10px] font-black uppercase">Extracting {Math.round(extraction.progress * 100)}%</div><div className="mt-1 h-1.5 bg-black/45"><div className="h-full bg-[#55f2a2]" style={{ width: `${clampPercent(extraction.progress * 100)}%` }} /></div></div>
               )}
@@ -1807,7 +1949,7 @@ export default function App() {
         {/* Boss health bar — below the combo display so it never collides
             with the Threat panel at top-[4.6rem]. */}
         {bossInfo && mode === 'playing' && (
-          <div className="absolute left-1/2 top-[18.5rem] w-[min(480px,70vw)] -translate-x-1/2">
+          <div className="absolute left-1/2 top-[21rem] w-[min(480px,70vw)] -translate-x-1/2">
             <div className="hud-panel px-3 py-2">
               <div className="hud-label text-[#e79bff]">Hostile Gunship — Archon</div>
               <div className="mt-1.5 h-3.5 overflow-hidden rounded-[2px] border border-black/60 bg-black/55 shadow-[0_2px_0_rgba(0,0,0,0.35)]">
@@ -1824,7 +1966,7 @@ export default function App() {
           <button
             type="button"
             onClick={pauseGame}
-            className="pointer-events-auto absolute right-4 top-[4.6rem] rounded-[6px] border-2 border-white/70 bg-[#264fb1]/85 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#16265f,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#315fd0] active:translate-y-1 active:shadow-[0_2px_0_#16265f,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[5.2rem]"
+            className="pointer-events-auto absolute right-4 top-[13.5rem] rounded-[6px] border-2 border-[#ffe66d]/80 bg-[#12140e]/90 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#1a1c12,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#1f2416] active:translate-y-1 active:shadow-[0_2px_0_#1a1c12,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[13.5rem]"
             style={textShadow}
           >
             Pause
@@ -1833,7 +1975,7 @@ export default function App() {
 
         {/* Weapon + XP + Salvo — one left stack with a fixed gap so the panels
             can never collide as content grows (LV badges, reloading, locks). */}
-        <div className="pointer-events-none absolute left-4 top-[8.25rem] flex flex-col items-start gap-2 sm:left-6 sm:top-[9rem]">
+        <div className="pointer-events-none absolute left-4 top-[18.25rem] flex flex-col items-start gap-2 sm:left-6 sm:top-[18.75rem]">
           {weaponInfo && mode === 'playing' && (
             <div className="hud-panel px-3 py-2">
               <div className="flex items-center gap-2">
@@ -1842,7 +1984,7 @@ export default function App() {
                   {weaponInfo.name}
                 </span>
                 {(weaponInfo.level ?? 1) > 1 && (
-                  <span className="rounded-[3px] border border-[#7ee0ff]/60 bg-[#0a2a3a]/80 px-1.5 py-0.5 text-[10px] font-black text-[#7ee0ff]">
+                  <span className="rounded-[3px] border border-[#ffe66d]/60 bg-[#1a1c12]/80 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d]">
                     LV.{weaponInfo.level}
                   </span>
                 )}
@@ -1857,20 +1999,6 @@ export default function App() {
                     {weaponInfo.ammo} / {weaponInfo.maxAmmo}
                   </span>
                 )}
-              </div>
-            </div>
-          )}
-
-          {mode === 'playing' && (
-            <div className="flex items-center gap-2">
-              <span className="rounded-[4px] border border-[#56e6ff]/80 bg-[#0a2a3a]/80 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-[#bfeeff]" style={textShadow}>
-                LV.{runLevel}
-              </span>
-              <div className="h-2 w-32 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
-                <div
-                  className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
-                  style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
-                />
               </div>
             </div>
           )}
@@ -1926,7 +2054,7 @@ export default function App() {
         {/* Combo Display with expiry timer bar — sits below the center stack
             so it never collides with Threat/objectives/SAM banner. */}
         {comboInfo && comboInfo.count > 1 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[14.5rem] -translate-x-1/2 text-center">
+          <div className="pointer-events-none absolute left-1/2 top-[16.5rem] -translate-x-1/2 text-center">
             <div className="text-2xl font-black text-yellow-300" style={textShadow}>
               {comboInfo.count}x COMBO
             </div>
@@ -1942,8 +2070,42 @@ export default function App() {
           </div>
         )}
 
+        {/* ══ BOTTOM-RIGHT: credits + score + XP ══ */}
+        <div className="hud-panel pointer-events-none absolute right-4 bottom-24 w-[min(250px,42vw)] px-3 py-2 sm:right-6">
+          <div className="flex items-center justify-between gap-2">
+            <span className="hud-label">Credits</span>
+            <span className="flex items-center gap-1.5 text-2xl font-black" style={textShadow}>
+              <CoinIcon />{credits.toLocaleString()}
+            </span>
+          </div>
+          {unsecuredCredits > 0 && (
+            <div className="text-right text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>
+              Unsecured +{unsecuredCredits.toLocaleString()}
+            </div>
+          )}
+          {salvage > 0 && (
+            <div className="text-right text-[10px] font-black uppercase tracking-wider text-[#55f2c2]" style={textShadow}>
+              Salvage {salvage.toLocaleString()} → {salvageCredits.toLocaleString()} CR
+            </div>
+          )}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span className="hud-label">Score</span>
+            <span className="text-xl font-black" style={textShadow}>{score.toLocaleString()}</span>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span className="hud-label">XP · LV{runLevel}</span>
+            <span className="text-xs font-black text-white/70">{Math.round(runXpProgress * 100)}%</span>
+          </div>
+          <div className="mt-1 h-2 w-full overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+            <div
+              className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
+              style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
+            />
+          </div>
+        </div>
+
         {statusInfo && mode === 'playing' && (
-          <div className={`pointer-events-none absolute right-4 flex flex-col items-end gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80 sm:right-6 top-[37.5rem] sm:top-[38rem]`}>
+          <div className={`pointer-events-none absolute left-1/2 bottom-40 flex -translate-x-1/2 flex-col items-center gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80`}>
             {statusInfo.threat > 0.68 && (
               <div className="hud-status border-[#ff3344]/60 text-[#ffd3d7]" style={textShadow}>
                 Threat High
@@ -1974,6 +2136,34 @@ export default function App() {
                 Boost {Math.ceil(statusInfo.speedBoost)}s
               </div>
             )}
+          </div>
+        )}
+
+        {/* ══ BOTTOM-CENTER: loadout ability cards ══ */}
+        {mode === 'playing' && (
+          <div className="pointer-events-none absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-2">
+            {[
+              { icon: '🚀', name: weaponInfo?.name ?? 'Gun', lv: weaponInfo?.level ?? 1, accent: '#3ae06b' },
+              { icon: '⚙️', name: 'Engine', lv: hangarUpgrades.engine, accent: '#ffbd3f' },
+              { icon: '🛡️', name: 'Armor', lv: hangarUpgrades.armor, accent: '#4aa8ff' },
+              { icon: '⛽', name: 'Fuel', lv: hangarUpgrades.fuel, accent: '#ffd35c' },
+              {
+                icon: '💣',
+                name: 'Salvo',
+                lv: salvoInfo ? (salvoInfo.isPainting ? 'LOCK' : salvoInfo.cooldown > 0 ? 'CD' : 'RDY') : 0,
+                accent: '#ff5566',
+              },
+              { icon: '✨', name: 'Flares', lv: countermeasureInfo?.charges ?? 0, accent: '#c07bff' },
+            ].map((c, i) => (
+              <div key={c.name} className="hud-ability-card" style={{ borderColor: c.accent }}>
+                <span className="hud-card-num">{i + 1}</span>
+                <span className="text-lg leading-none">{c.icon}</span>
+                <span className="hud-card-name" style={{ color: c.accent }}>{c.name}</span>
+                <span className="text-[0.55rem] font-black tracking-wide text-white/70">
+                  {typeof c.lv === 'number' ? `LV ${c.lv}` : c.lv}
+                </span>
+              </div>
+            ))}
           </div>
         )}
 
@@ -2016,8 +2206,8 @@ export default function App() {
       {/* Weapon upgrade roulette */}
       {upgradeOffer && mode === 'playing' && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/45">
-          <div className="w-[min(640px,92vw)] rounded-2xl border-2 border-[#7ee0ff]/60 bg-[#0b1c33]/95 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)] sm:p-7">
-            <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7ee0ff]">
+          <div className="w-[min(640px,92vw)] border-2 border-[#ffe66d]/60 bg-[#0c0e0a]/95 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)] sm:p-7" style={{ clipPath: 'polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px))' }}>
+            <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#ffe66d]">
               Level Up
             </div>
             <h2 className="mb-5 text-center text-2xl font-black uppercase tracking-widest text-white" style={textShadow}>
@@ -2029,10 +2219,11 @@ export default function App() {
                   key={opt.id}
                   type="button"
                   onClick={() => chooseUpgrade(opt.id)}
-                  className="group flex flex-col items-center gap-2 rounded-xl border-2 border-white/25 bg-[#12294a]/90 px-4 py-5 text-center transition hover:-translate-y-1 hover:border-[#7ee0ff] hover:bg-[#17345c] hover:shadow-[0_10px_28px_rgba(126,224,255,0.25)] active:translate-y-0"
+                  className="group flex flex-col items-center gap-2 rounded-xl border-2 border-white/25 bg-[#12140e]/90 px-4 py-5 text-center transition hover:-translate-y-1 hover:border-[#ffe66d] hover:bg-[#1a1d12] hover:shadow-[0_10px_28px_rgba(255,230,109,0.2)] active:translate-y-0"
                 >
                   <span className="text-4xl transition-transform group-hover:scale-125">{opt.icon}</span>
-                  <span className="text-sm font-black uppercase tracking-wide text-[#7ee0ff]">{opt.title}</span>
+                  <span className="text-[9px] font-black uppercase tracking-[0.22em] text-white/45">{opt.category}</span>
+                  <span className="text-sm font-black uppercase tracking-wide text-[#ffe66d]">{opt.title}</span>
                   <span className="text-xs font-semibold leading-snug text-white/80">{opt.desc}</span>
                 </button>
               ))}
@@ -2074,7 +2265,7 @@ export default function App() {
 
       {/* On-screen perf overlay (dev aid) — F2 toggles, hidden on touch devices */}
       {showPerf && !touchDevice && perfStats && (
-        <div className="pointer-events-none absolute bottom-2 left-2 z-30 select-none rounded-[5px] border border-white/20 bg-black/55 px-2 py-1 font-mono text-[10px] font-bold leading-tight text-[#7ee0ff] shadow-[0_2px_8px_rgba(0,0,0,0.35)]" style={textShadow}>
+        <div className="pointer-events-none absolute bottom-2 left-2 z-30 select-none rounded-[5px] border border-white/20 bg-black/55 px-2 py-1 font-mono text-[10px] font-bold leading-tight text-[#ffe66d] shadow-[0_2px_8px_rgba(0,0,0,0.35)]" style={textShadow}>
           <div>{perfStats.fps} FPS · {perfStats.drawCalls} DC · {(perfStats.triangles / 1000).toFixed(1)}k TRI</div>
           <div className="text-white/75">
             {perfStats.geometries} GEO · {perfStats.textures} TEX · {perfStats.programs} PROG
