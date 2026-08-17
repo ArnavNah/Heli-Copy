@@ -104,6 +104,18 @@ export class CityEnvironment {
   serviceRoadHalf = 3; // 6 wide
   activeBehind = 1;
   activeAhead = 2;
+
+  // Staggered chunk generation (smoothness pass): missing chunks are queued
+  // and drained a bounded number per frame instead of being constructed
+  // synchronously in one frame. Each chunk is ~400 meshes + ~50 physics
+  // bodies (measured 25–80ms of build), so a naive loop froze the frame at
+  // every 132-unit boundary crossing and at game start. The one-chunk
+  // lookahead pre-builds the chunk the player is about to enter, so normal
+  // flight never stalls on a boundary.
+  private pendingChunks: number[] = [];
+  private pendingChunkSet: Set<number> = new Set();
+  private maxChunksPerFrame = 1;
+  private chunkQueueCap = 8;
   onBuildingDestroyed: ((x: number, y: number, z: number) => void) | null = null;
 
   // Drifting cloud layer — a global sky feature, not chunked
@@ -224,6 +236,8 @@ export class CityEnvironment {
     this.chunkBeacons.clear();
     this.disposeBillboardTextures(this.chunkBillboards);
     this.depotHubs.clear();
+    this.pendingChunks.length = 0;
+    this.pendingChunkSet.clear();
     this.update({ x: 0, y: 20, z: 0 }, world);
   }
 
@@ -270,11 +284,45 @@ export class CityEnvironment {
     const playerZ = player.z;
     const center = Math.floor(playerZ / this.chunkDepth);
     let cacheDirty = false;
+
+    // Queue every missing chunk in the active window, plus ONE lookahead
+    // chunk beyond the forward edge (the player flies toward -z, so forward
+    // = lower chunk ids) so the next boundary crossing finds its chunk
+    // already built. The queue is drained below at a bounded rate per frame
+    // — a boundary crossing no longer constructs ~400 meshes synchronously.
+    // Priority: nearest to the player first, so the current chunk and the
+    // immediate neighbors surface before far lookahead.
+    const needed: number[] = [];
     for (let id = center - this.activeAhead; id <= center + this.activeBehind; id++) {
-      if (!this.chunks.has(id)) {
-        this.generateChunk(id, world);
-        cacheDirty = true;
-      }
+      if (this.chunks.has(id) || this.pendingChunkSet.has(id)) continue;
+      needed.push(id);
+    }
+    const lookaheadId = center - this.activeAhead - 1; // forward edge (-z)
+    if (!this.chunks.has(lookaheadId) && !this.pendingChunkSet.has(lookaheadId)) {
+      needed.push(lookaheadId);
+    }
+    const rearLookaheadId = center + this.activeBehind + 1; // rear edge (+z)
+    if (!this.chunks.has(rearLookaheadId) && !this.pendingChunkSet.has(rearLookaheadId)) {
+      needed.push(rearLookaheadId);
+    }
+    needed.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+    for (const id of needed) {
+      if (this.pendingChunks.length >= this.chunkQueueCap) break;
+      this.pendingChunkSet.add(id);
+      this.pendingChunks.push(id);
+    }
+
+    // Drain the queue at most maxChunksPerFrame per call. Generation is
+    // expensive (25–80ms per chunk), so a budget of 1 keeps every frame
+    // under budget while the lookahead guarantees readiness in advance.
+    let generatedThisFrame = 0;
+    while (this.pendingChunks.length > 0 && generatedThisFrame < this.maxChunksPerFrame) {
+      const id = this.pendingChunks.shift()!;
+      this.pendingChunkSet.delete(id);
+      if (this.chunks.has(id)) continue; // built meanwhile (e.g. teleport)
+      this.generateChunk(id, world);
+      cacheDirty = true;
+      generatedThisFrame++;
     }
 
     for (const [id, chunk] of this.chunks) {

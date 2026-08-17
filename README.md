@@ -2,7 +2,7 @@
 
 ![Gameplay](screenshots/combat.jpg)
 
-> **A fast-paced 3D low-poly arcade helicopter shooter.** Fly a gunship over a living, procedural city — dodge rooftop turrets, raze enemy waves, tear down SAM sites, and topple a three-phase boss. Built with React, Vite, Three.js, and Cannon-es.
+> **A fast-paced 3D low-poly arcade helicopter shooter.** Fly a gunship over a living, procedural desert battlefield — dodge rooftop turrets, raze enemy waves, tear down SAM sites, and topple a three-phase boss. Built with React, Vite, Three.js, and Cannon-es.
 
 ## 🖼️ Screenshots
 
