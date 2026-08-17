@@ -389,6 +389,86 @@ export class AudioManager {
     g2.connect(this.masterGain);
     osc.start();
     osc.stop(now + 0.3);
+
+    // Debris crackle — a few short bright ticks after the boom
+    this.playCrackle(now + 0.08, Math.min(1.6, 0.5 + intensity * 0.7), 0.06 * intensity);
+  }
+
+  /** Short random crackle of bright ticks — debris hitting ground/metal. */
+  private playCrackle(start: number, count: number, volume: number) {
+    if (!this.ctx || !this.masterGain) return;
+    for (let i = 0; i < count; i++) {
+      const t = start + Math.random() * 0.4;
+      const osc = this.ctx.createOscillator();
+      const cg = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(180 + Math.random() * 900, t);
+      cg.gain.setValueAtTime(0.0001, t);
+      cg.gain.exponentialRampToValueAtTime(Math.max(0.005, volume), t + 0.006);
+      cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.05 + Math.random() * 0.05);
+      osc.connect(cg);
+      cg.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.12);
+    }
+  }
+
+  /** Big layered explosion for player death / major building collapse —
+   *  longer sub thump, wider noise, and a heavier debris crackle. */
+  public playBigExplosion(intensity: number = 1.5) {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    // Wide noise burst (longer than the regular boom)
+    const bufferSize = this.ctx.sampleRate * 0.9;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1500 * intensity, now);
+    filter.frequency.exponentialRampToValueAtTime(50, now + 0.7);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.6 * intensity, now);
+    g.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(this.masterGain);
+    noise.start();
+
+    // Deep sub thump — the big body of the boom
+    const osc = this.ctx.createOscillator();
+    const g2 = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(70 * intensity, now);
+    osc.frequency.exponentialRampToValueAtTime(12, now + 0.5);
+    g2.gain.setValueAtTime(0.8 * intensity, now);
+    g2.gain.exponentialRampToValueAtTime(0.01, now + 0.55);
+    osc.connect(g2);
+    g2.connect(this.masterGain);
+    osc.start();
+    osc.stop(now + 0.55);
+
+    // Second delayed mid punch for a layered feel
+    const osc2 = this.ctx.createOscillator();
+    const g3 = this.ctx.createGain();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(110 * intensity, now + 0.05);
+    osc2.frequency.exponentialRampToValueAtTime(30, now + 0.35);
+    g3.gain.setValueAtTime(0.001, now + 0.05);
+    g3.gain.exponentialRampToValueAtTime(0.4 * intensity, now + 0.09);
+    g3.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+    osc2.connect(g3);
+    g3.connect(this.masterGain);
+    osc2.start(now + 0.05);
+    osc2.stop(now + 0.4);
+
+    // Heavy debris rain
+    this.playCrackle(now + 0.12, 2.2, 0.1 * intensity);
   }
 
   public playHonk() {

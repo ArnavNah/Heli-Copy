@@ -519,14 +519,26 @@ export class GameEngine {
       if (this.audio) this.audio.playHonk();
     };
     this.city.onBuildingDestroyed = (x, y, z) => {
+      const now = performance.now() / 1000;
+      // Building collapse — dust cloud + debris chunks + fireball at the base
+      // (the collapsed block sits at ground level, so the burst hugs the ground).
       if (this.volumetricExplosions) {
-        this.volumetricExplosions.spawn(x, y, z, 20, 6.0);
+        this.volumetricExplosions.spawn(x, y, z, 28, 8.0);
+      }
+      if (this.particles) {
+        this.particles.spawnExplosion(x, y, z, 70, now, 26);
+        this.particles.spawnDebris(x, y, z, now, 30, 36);
+        this.particles.spawnSmoke(x, y + 1, z, now);
+        this.particles.spawnSmoke(x + 2, y + 3, z - 1, now);
+        this.particles.spawnSmoke(x - 2, y + 5, z + 1, now);
+        this.particles.spawnSparks(x, y, z, now, 12, 30);
       }
       if (this.audio) {
-        this.audio.playExplosion(1.0);
+        this.audio.playBigExplosion(1.2);
       }
       // Major building collapse — allowed heavy impulse.
       this.addCameraImpulse(3.5);
+      this.addExplosionImpulse(x, y, z, 3.5, 110);
       this.score += Math.floor(50 * this.comboMultiplier);
       this.triggerHitStop(0.12, 0.04); // Crunchy freeze on building collapse
     };
@@ -2363,6 +2375,25 @@ export class GameEngine {
       time,
       explosionSize * 0.4,
     );
+    // Debris chunks + smoke + sparks make each kill read as a real detonation
+    // (boss/elites throw more debris, tanks kick up extra sparks).
+    this.particles.spawnDebris(
+      enemy.body.position.x,
+      enemy.body.position.y,
+      enemy.body.position.z,
+      time,
+      enemy.type === EnemyType.BOSS ? 30 : enemy.isElite ? 22 : enemy.type === EnemyType.TANK ? 16 : 8,
+      enemy.type === EnemyType.BOSS ? 40 : 28,
+    );
+    this.particles.spawnSmoke(enemy.body.position.x, enemy.body.position.y + 1, enemy.body.position.z, time);
+    this.particles.spawnSparks(
+      enemy.body.position.x,
+      enemy.body.position.y,
+      enemy.body.position.z,
+      time,
+      enemy.type === EnemyType.TANK ? 6 : 3,
+      enemy.type === EnemyType.BOSS ? 40 : 24,
+    );
     this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, volumetricScale, volumetricScale * 0.6);
     this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, enemy.type === EnemyType.BOSS ? 40 : 22, 95);
     this.audio.playExplosion(enemy.type === EnemyType.BOSS ? 2.5 : 1.5);
@@ -2935,6 +2966,7 @@ export class GameEngine {
       this.delivery.fail("PLAYER DOWN");
       this.unsecuredCredits = 0;
       this.runSalvage = 0;
+      this.spawnPlayerExplosion();
     }
     this.clearExtraction();
     this.isPlaying = false;
@@ -2970,6 +3002,24 @@ export class GameEngine {
       }),
     );
     this.updateUI(time);
+  }
+
+  /** Player destruction — big layered explosion at the wreck: fireball
+   *  particles, debris chunks, smoke, sparks, volumetric fire, camera impulse
+   *  and the big boom sound. The helicopter mesh is hidden so the wreck doesn't
+   *  linger, and `Helicopter.reset()` restores visibility on restart. */
+  private spawnPlayerExplosion() {
+    const p = this.helicopter.body.position;
+    const now = performance.now() / 1000;
+    this.particles.spawnExplosion(p.x, p.y, p.z, 220, now, 46);
+    this.particles.spawnDebris(p.x, p.y, p.z, now, 26, 34);
+    this.particles.spawnSmoke(p.x, p.y + 2, p.z, now);
+    this.particles.spawnSparks(p.x, p.y, p.z, now, 10, 26);
+    this.volumetricExplosions.spawn(p.x, p.y, p.z, 36, 22);
+    this.city.damageNearby(p.x, p.z, 30, 120);
+    this.addCameraImpulse(6.0);
+    if (this.audio) this.audio.playBigExplosion(1.6);
+    this.helicopter.mesh.visible = false;
   }
 
   startNextWave() {

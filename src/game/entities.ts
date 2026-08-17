@@ -864,6 +864,7 @@ export class Helicopter extends Entity {
     this.body.torque.set(0, 0, 0);
     this.mesh.position.set(0, 26, 0);
     this.mesh.rotation.set(0, 0, 0);
+    this.mesh.visible = true; // the death explosion hides the wreck — restore on restart
   }
 
   update(

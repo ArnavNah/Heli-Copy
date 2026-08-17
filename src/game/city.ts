@@ -2919,14 +2919,27 @@ export class CityEnvironment {
       block.body.collisionResponse = false;
     }
     if (this.particles) {
+      const now = performance.now() / 1000;
       this.particles.spawnExplosion(
         block.x,
         block.height * 0.5,
         block.z,
         40,
-        performance.now() / 1000,
+        now,
         block.width * 1.2,
       );
+      // Debris + dust as the structure goes down
+      this.particles.spawnDebris(
+        block.x,
+        block.height * 0.5,
+        block.z,
+        now,
+        20,
+        30,
+      );
+      this.particles.spawnSmoke(block.x, block.height * 0.5, block.z, now);
+      this.particles.spawnSmoke(block.x + 3, block.height * 0.3, block.z - 2, now);
+      this.particles.spawnSmoke(block.x - 3, block.height * 0.2, block.z + 2, now);
     }
   }
 

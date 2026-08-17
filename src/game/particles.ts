@@ -11,19 +11,19 @@ const ParticleVert = `
 
   void main() {
       float lifeTime = max(0.0, uTime - startTime);
-      float duration = pType == 1.0 ? 2.0 : (pType == 2.0 ? 0.4 : 1.0); // Smoke lives longer, sparks die fast
+      float duration = pType == 1.0 ? 2.2 : (pType == 2.0 ? 0.4 : (pType == 3.0 ? 1.6 : 1.0)); // Smoke longest, sparks fastest, debris in between
       vLife = max(0.0, 1.0 - (lifeTime / duration)); 
       vType = pType;
       
       vec3 currentPos = position + velocity * lifeTime;
-      // Gravity affects sparks (type 2) and explosions (type 0), but smoke (type 1) rises
-      float gravMult = pType == 1.0 ? -2.0 : 9.8; 
+      // Gravity affects sparks (type 2), explosions (type 0) and debris (type 3); smoke (type 1) rises
+      float gravMult = pType == 1.0 ? -2.0 : (pType == 3.0 ? 16.0 : 9.8);
       currentPos.y -= gravMult * lifeTime * lifeTime;
 
       vec4 mvPosition = modelViewMatrix * vec4(currentPos, 1.0);
       
       // Sizes based on type
-      float sizeMult = pType == 1.0 ? 38.0 : (pType == 2.0 ? 6.5 : 24.0);
+      float sizeMult = pType == 1.0 ? 38.0 : (pType == 2.0 ? 6.5 : (pType == 3.0 ? 7.0 : 24.0));
       gl_PointSize = (sizeMult * vLife) * (100.0 / length(mvPosition.xyz));
       gl_Position = projectionMatrix * mvPosition;
   }
@@ -52,6 +52,13 @@ const ParticleFrag = `
           vec3 sparkEnd = vec3(1.0, 0.3, 0.0);
           color = mix(sparkEnd, sparkStart, vLife);
           alpha = vLife * softDisc;
+      } else if (vType == 3.0) {
+          // Debris chunks (dark, fall fast, catch fire at the start)
+          vec3 debrisStart = vec3(0.05, 0.05, 0.06);
+          vec3 debrisEnd = vec3(0.34, 0.3, 0.28);
+          color = mix(debrisEnd, debrisStart, vLife);
+          color += vec3(1.0, 0.45, 0.05) * pow(1.0 - dist * 2.0, 2.0) * max(0.0, vLife - 0.75);
+          alpha = vLife * 0.95 * softDisc;
       } else {
           // Default Explosion
           vec3 startColor = vec3(1.0, 0.96, 0.72); // White-Hot
@@ -310,18 +317,38 @@ export class GPUParticleSystem {
     this.updateAttrs();
   }
 
-  spawnSparks(x: number, y: number, z: number, now: number) {
-    for (let i = 0; i < 3; i++) {
+  spawnSparks(x: number, y: number, z: number, now: number, count = 3, speed = 15) {
+    for (let i = 0; i < count; i++) {
       const idx = this.currentIndex;
       this.positionAttr.setXYZ(idx, x, y, z);
       this.velocityAttr.setXYZ(
         idx,
-        (Math.random() - 0.5) * 15,
-        Math.random() * 15 + 5,
-        (Math.random() - 0.5) * 15,
+        (Math.random() - 0.5) * speed,
+        Math.random() * speed + 5,
+        (Math.random() - 0.5) * speed,
       );
       this.startTimeAttr.setX(idx, now);
       this.pTypeAttr.setX(idx, 2.0); // Spark type
+      this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    }
+    this.updateAttrs();
+  }
+
+  /** Debris chunks — dark heavy fragments that fly out with strong gravity and
+   *  fade over ~1.6s. Reuses the type-3 shader branch. Cheap: N attribute
+   *  writes per call, no allocations. */
+  spawnDebris(x: number, y: number, z: number, now: number, count = 10, speed = 24) {
+    for (let i = 0; i < count; i++) {
+      const idx = this.currentIndex;
+      this.positionAttr.setXYZ(idx, x, y, z);
+      this.velocityAttr.setXYZ(
+        idx,
+        (Math.random() - 0.5) * speed,
+        Math.random() * speed * 0.8 + 4,
+        (Math.random() - 0.5) * speed,
+      );
+      this.startTimeAttr.setX(idx, now - Math.random() * 0.08);
+      this.pTypeAttr.setX(idx, 3.0); // Debris type
       this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
     }
     this.updateAttrs();

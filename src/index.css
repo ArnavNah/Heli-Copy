@@ -26,20 +26,21 @@ body,
 
 .arcade-vignette {
   background:
-    radial-gradient(circle at 50% 42%, transparent 36%, rgba(6, 13, 35, 0.14) 70%, rgba(2, 5, 16, 0.46) 100%),
-    linear-gradient(90deg, rgba(255, 44, 68, 0.1), transparent 16%, transparent 84%, rgba(255, 230, 109, 0.1)),
-    linear-gradient(to bottom, rgba(255, 247, 210, 0.14), transparent 18%, transparent 74%, rgba(4, 11, 28, 0.22));
+    radial-gradient(circle at 50% 42%, transparent 36%, rgba(8, 14, 44, 0.16) 70%, rgba(2, 4, 18, 0.5) 100%),
+    linear-gradient(90deg, rgba(80, 235, 255, 0.12), transparent 16%, transparent 84%, rgba(255, 77, 216, 0.12)),
+    linear-gradient(to bottom, rgba(190, 250, 255, 0.16), transparent 18%, transparent 74%, rgba(4, 8, 30, 0.24));
 }
 
 .arcade-marquee {
-  border: 2px solid rgba(255, 230, 109, 0.82);
+  border: 2px solid rgba(80, 235, 255, 0.85);
   border-top: 0;
   border-radius: 0 0 8px 8px;
-  background: rgba(16, 36, 71, 0.72);
+  background: linear-gradient(180deg, rgba(24, 34, 84, 0.78), rgba(12, 20, 56, 0.78));
   box-shadow:
     0 4px 0 rgba(0, 0, 0, 0.28),
-    0 0 18px rgba(255, 230, 109, 0.28),
-    inset 0 -10px 22px rgba(239, 35, 60, 0.16);
+    0 0 18px rgba(80, 235, 255, 0.35),
+    0 0 34px rgba(255, 77, 216, 0.22),
+    inset 0 -10px 22px rgba(64, 200, 255, 0.14);
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
 }
 
@@ -55,9 +56,9 @@ body,
 
 .menu-card {
   width: min(520px, calc(100vw - 32px));
-  border: 1px solid rgba(232, 214, 160, 0.5);
+  border: 1px solid rgba(80, 235, 255, 0.55);
   border-radius: 0;
-  background: linear-gradient(180deg, rgba(16, 18, 12, 0.96), rgba(8, 9, 6, 0.97));
+  background: linear-gradient(180deg, rgba(13, 22, 58, 0.97), rgba(6, 10, 32, 0.98));
   clip-path: polygon(
     0 0,
     calc(100% - 12px) 0,
@@ -70,10 +71,11 @@ body,
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.55),
     0 6px 0 rgba(0, 0, 0, 0.45),
-    inset 0 0 22px rgba(255, 208, 120, 0.06);
-  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5)) drop-shadow(0 18px 34px rgba(0, 0, 0, 0.4));
+    inset 0 0 26px rgba(80, 235, 255, 0.1),
+    inset 0 0 60px rgba(255, 77, 216, 0.06);
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5)) drop-shadow(0 18px 34px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 20px rgba(80, 235, 255, 0.14));
   transform-style: preserve-3d;
-  backdrop-filter: blur(8px) saturate(1.05);
+  backdrop-filter: blur(8px) saturate(1.15);
 }
 
 .menu-title-slab {
@@ -81,37 +83,41 @@ body,
   align-items: center;
   justify-content: center;
   min-height: 70px;
-  border: 1.5px solid rgba(232, 214, 160, 0.75);
+  border: 1.5px solid rgba(80, 235, 255, 0.8);
   border-radius: 0;
-  background: linear-gradient(180deg, rgba(26, 30, 20, 0.97), rgba(12, 14, 9, 0.98));
+  background: linear-gradient(180deg, rgba(30, 42, 110, 0.97), rgba(12, 20, 60, 0.98));
   clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 100%, 0 100%);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.55),
     0 5px 0 rgba(0, 0, 0, 0.45),
-    inset 0 0 22px rgba(255, 208, 120, 0.08);
-  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5));
+    inset 0 0 26px rgba(80, 235, 255, 0.14),
+    inset 0 0 60px rgba(255, 77, 216, 0.1);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5)) drop-shadow(0 0 18px rgba(80, 235, 255, 0.25));
   transform: translateZ(34px);
 }
 
 .menu-title-slab span {
-  color: #ffe66d;
+  background: linear-gradient(180deg, #7df9ff 0%, #50ebff 30%, #ff4fd8 70%, #ffe66d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
   font-size: clamp(2rem, 7vw, 4.4rem);
   font-weight: 1000;
   line-height: 1;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  text-shadow: 0 3px 0 rgba(0, 0, 0, 0.6), 0 0 18px rgba(255, 230, 109, 0.3);
+  filter: drop-shadow(0 3px 0 rgba(0, 0, 0, 0.6)) drop-shadow(0 0 18px rgba(80, 235, 255, 0.5)) drop-shadow(0 0 36px rgba(255, 77, 216, 0.3));
   text-align: center;
 }
 
 .menu-stat {
-  border: 1px solid rgba(232, 214, 160, 0.42);
+  border: 1px solid rgba(80, 235, 255, 0.4);
   border-radius: 0;
-  background: linear-gradient(180deg, rgba(22, 24, 16, 0.92), rgba(10, 11, 8, 0.94));
+  background: linear-gradient(180deg, rgba(22, 32, 82, 0.94), rgba(9, 14, 40, 0.95));
   padding: 10px 8px;
   box-shadow:
     0 4px 0 rgba(0, 0, 0, 0.42),
-    inset 0 0 14px rgba(255, 208, 120, 0.05);
+    inset 0 0 14px rgba(80, 235, 255, 0.07);
   transform: translateZ(18px);
 }
 
@@ -139,14 +145,14 @@ body,
 }
 
 .menu-chip {
-  border: 1px solid rgba(232, 214, 160, 0.32);
+  border: 1px solid rgba(80, 235, 255, 0.3);
   border-radius: 0;
-  background: rgba(12, 13, 9, 0.78);
+  background: rgba(11, 17, 48, 0.82);
   padding: 8px 10px;
   text-align: center;
   box-shadow:
     0 3px 0 rgba(0, 0, 0, 0.4),
-    inset 0 0 14px rgba(255, 208, 120, 0.04);
+    inset 0 0 14px rgba(80, 235, 255, 0.05);
 }
 
 @keyframes menu-float {
@@ -160,13 +166,13 @@ body,
 }
 
 .run-stat {
-  border: 1px solid rgba(232, 214, 160, 0.35);
+  border: 1px solid rgba(80, 235, 255, 0.32);
   border-radius: 0;
-  background: linear-gradient(180deg, rgba(20, 22, 15, 0.9), rgba(9, 10, 7, 0.92));
+  background: linear-gradient(180deg, rgba(20, 30, 78, 0.92), rgba(8, 13, 38, 0.94));
   padding: 8px 4px;
   box-shadow:
     0 3px 0 rgba(0, 0, 0, 0.38),
-    inset 0 0 12px rgba(255, 208, 120, 0.04);
+    inset 0 0 12px rgba(80, 235, 255, 0.05);
 }
 
 .run-stat span,
@@ -187,7 +193,7 @@ body,
   margin-top: 3px;
   font-size: 0.95rem;
   line-height: 1;
-  color: #ffe66d;
+  color: #7df9ff;
 }
 
 .setting-row {
@@ -195,13 +201,13 @@ body,
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid rgba(232, 214, 160, 0.32);
+  border: 1px solid rgba(80, 235, 255, 0.3);
   border-radius: 0;
-  background: rgba(12, 13, 9, 0.78);
+  background: rgba(11, 17, 48, 0.82);
   padding: 12px 14px;
   box-shadow:
     0 3px 0 rgba(0, 0, 0, 0.35),
-    inset 0 0 14px rgba(255, 208, 120, 0.04);
+    inset 0 0 14px rgba(80, 235, 255, 0.05);
 }
 
 .setting-label {
@@ -209,8 +215,8 @@ body,
   text-transform: uppercase;
   letter-spacing: 0.22em;
   font-size: 0.8rem;
-  color: rgba(235, 220, 175, 0.92);
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color: #9bf1ff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 10px rgba(80, 235, 255, 0.25);
 }
 
 .setting-desc {
@@ -218,7 +224,7 @@ body,
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.05em;
-  color: rgba(235, 220, 175, 0.55);
+  color: rgba(190, 240, 255, 0.6);
 }
 
 .setting-value {
@@ -227,7 +233,7 @@ body,
   min-width: 2.4rem;
   text-align: right;
   color: #ffe66d;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 10px rgba(255, 230, 109, 0.3);
 }
 
 .toggle-track {
@@ -235,8 +241,8 @@ body,
   width: 52px;
   height: 28px;
   border-radius: 999px;
-  border: 2px solid rgba(232, 214, 160, 0.55);
-  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(80, 235, 255, 0.6);
+  background: rgba(2, 6, 22, 0.6);
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
   transition: background 0.2s;
   cursor: pointer;
@@ -250,18 +256,20 @@ body,
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  background: #cbb98a;
+  background: #6ec6d8;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
   transition: transform 0.18s;
 }
 
 .toggle-track.toggle-on {
-  background: #b8860b;
+  background: linear-gradient(90deg, #0f7f9e, #18a8c8);
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35), 0 0 12px rgba(80, 235, 255, 0.4);
 }
 
 .toggle-track.toggle-on .toggle-knob {
   transform: translateX(24px);
-  background: #ffe66d;
+  background: #baf8ff;
+  box-shadow: 0 0 8px rgba(125, 249, 255, 0.9);
 }
 
 .slider-arcade {
@@ -269,8 +277,8 @@ body,
   -webkit-appearance: none;
   height: 8px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.45);
-  border: 1px solid rgba(232, 214, 160, 0.4);
+  background: rgba(2, 6, 22, 0.6);
+  border: 1px solid rgba(80, 235, 255, 0.45);
   cursor: pointer;
 }
 
@@ -280,40 +288,41 @@ body,
   width: 18px;
   height: 18px;
   border-radius: 4px;
-  background: #b8860b;
-  border: 2px solid #ffe66d;
-  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
+  background: linear-gradient(180deg, #7df9ff, #18a8c8);
+  border: 2px solid #d8fbff;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4), 0 0 10px rgba(80, 235, 255, 0.6);
 }
 
 .slider-arcade::-moz-range-thumb {
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  background: #b8860b;
-  border: 2px solid #ffe66d;
-  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
+  background: linear-gradient(180deg, #7df9ff, #18a8c8);
+  border: 2px solid #d8fbff;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4), 0 0 10px rgba(80, 235, 255, 0.6);
 }
 
 .seg-btn {
-  border: 1px solid rgba(232, 214, 160, 0.42);
+  border: 1px solid rgba(80, 235, 255, 0.42);
   border-radius: 0;
-  background: rgba(0, 0, 0, 0.38);
+  background: rgba(2, 6, 22, 0.5);
   padding: 7px 14px;
   font-weight: 900;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: rgba(235, 220, 175, 0.85);
+  color: rgba(190, 240, 255, 0.9);
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
   transition: all 0.15s;
   cursor: pointer;
 }
 
 .seg-btn.seg-on {
-  background: #b8860b;
-  color: #1a1300;
-  border-color: #ffe66d;
-  box-shadow: 0 3px 0 #5c4305;
+  background: linear-gradient(180deg, #21b8d8, #0e7f9e);
+  color: #ffffff;
+  border-color: #8ef6ff;
+  box-shadow: 0 3px 0 #06505f, 0 0 12px rgba(80, 235, 255, 0.45);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
 }
 
 .joystick-base {
@@ -396,11 +405,10 @@ body,
 }
 
 /* ------------------------------------------------------------------------
- * Military-tactical HUD design system: near-black panels with khaki borders
- * (matches the classic battlefield-UX look — black panels, amber/yellow
- * accents, checklist objectives, ability cards). Panels use `filter:
- * drop-shadow` (not box-shadow) because clip-path clips box-shadows outside
- * the clipped shape.
+ * Neon-arcade HUD design system: deep navy panels with glowing cyan borders
+ * and magenta/yellow accent pops (classic arcade-shooter look). Panels use
+ * `filter: drop-shadow` (not box-shadow) because clip-path clips box-shadows
+ * outside the clipped shape.
  * ------------------------------------------------------------------------ */
 .hud-panel {
   /* NOTE: no `position` here on purpose — unlayered CSS beats Tailwind's
@@ -408,8 +416,8 @@ body,
      `position: relative` was silently converting every `absolute` HUD panel
      into a flow element (panels stacked vertically instead of in the
      designed three-column layout). Let the utility class win. */
-  border: 1px solid rgba(232, 214, 160, 0.42);
-  background: linear-gradient(180deg, rgba(14, 16, 11, 0.95), rgba(8, 9, 6, 0.94));
+  border: 1px solid rgba(80, 235, 255, 0.5);
+  background: linear-gradient(180deg, rgba(13, 22, 58, 0.95), rgba(6, 10, 32, 0.94));
   clip-path: polygon(
     0 0,
     calc(100% - 10px) 0,
@@ -421,8 +429,9 @@ body,
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.55),
     0 3px 0 rgba(0, 0, 0, 0.4),
-    inset 0 0 18px rgba(255, 208, 120, 0.05);
-  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32));
+    inset 0 0 18px rgba(80, 235, 255, 0.08),
+    inset 0 0 40px rgba(255, 77, 216, 0.04);
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32)) drop-shadow(0 0 14px rgba(80, 235, 255, 0.12));
 }
 
 .hud-panel.hud-danger {
@@ -438,8 +447,8 @@ body,
   font-weight: 900;
   letter-spacing: 0.24em;
   text-transform: uppercase;
-  color: rgba(235, 220, 175, 0.78);
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color: rgba(155, 241, 255, 0.92);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 10px rgba(80, 235, 255, 0.25);
 }
 
 /* Checklist objectives (top-left tactical panel) */
@@ -484,15 +493,19 @@ body,
 
 /* Wave banner (top-center) */
 .hud-wave-banner {
-  border: 1px solid rgba(255, 255, 255, 0.65);
-  background: linear-gradient(180deg, rgba(38, 48, 66, 0.92), rgba(20, 26, 38, 0.94));
+  border: 1px solid rgba(125, 249, 255, 0.85);
+  background: linear-gradient(180deg, rgba(40, 52, 128, 0.95), rgba(22, 30, 86, 0.96));
   clip-path: polygon(
     10px 0,
     calc(100% - 10px) 0,
     100% 100%,
     0 100%
   );
-  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.4), 0 8px 18px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 3px 0 rgba(0, 0, 0, 0.4),
+    0 8px 18px rgba(0, 0, 0, 0.3),
+    0 0 16px rgba(80, 235, 255, 0.35),
+    0 0 34px rgba(255, 77, 216, 0.14);
 }
 
 /* Ability cards (bottom-center) */
@@ -504,9 +517,12 @@ body,
   gap: 2px;
   width: 76px;
   padding: 7px 2px 5px;
-  background: linear-gradient(180deg, rgba(18, 20, 14, 0.95), rgba(8, 9, 6, 0.95));
-  border: 1.5px solid rgba(255, 255, 255, 0.35);
-  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.45), 0 8px 16px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(180deg, rgba(16, 26, 66, 0.97), rgba(6, 10, 32, 0.97));
+  border: 1.5px solid rgba(80, 235, 255, 0.5);
+  box-shadow:
+    0 3px 0 rgba(0, 0, 0, 0.45),
+    0 8px 16px rgba(0, 0, 0, 0.3),
+    inset 0 0 12px rgba(80, 235, 255, 0.08);
   position: relative;
 }
 
@@ -529,15 +545,15 @@ body,
 }
 
 .hud-status {
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(4, 11, 30, 0.82);
+  border: 1px solid rgba(80, 235, 255, 0.25);
+  background: rgba(6, 12, 40, 0.85);
   padding: 3px 9px;
   font-size: 0.62rem;
   font-weight: 900;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3), 0 0 10px rgba(80, 235, 255, 0.1);
 }
 
 /* Arcade announcement toast (kill streaks, objectives, phases) */

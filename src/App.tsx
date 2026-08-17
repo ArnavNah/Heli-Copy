@@ -646,24 +646,24 @@ function drawMinimap(
 
   ctx.restore(); // end circular clip
 
-  // Khaki bezel ring + compass tick
+  // Neon cyan bezel ring + compass tick
   ctx.beginPath();
   ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(226, 208, 150, 0.7)';
+  ctx.strokeStyle = 'rgba(80, 235, 255, 0.75)';
   ctx.lineWidth = 2.5;
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(226, 208, 150, 0.5)';
+  ctx.strokeStyle = 'rgba(80, 235, 255, 0.5)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.arc(cx, cy, R + 14, 0, Math.PI * 2);
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(235, 220, 175, 0.85)';
+  ctx.strokeStyle = 'rgba(125, 249, 255, 0.9)';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(cx - 4, cy - R - 4);
   ctx.lineTo(cx + 4, cy - R - 4);
   ctx.stroke();
-  ctx.fillStyle = 'rgba(235, 220, 175, 0.95)';
+  ctx.fillStyle = 'rgba(125, 249, 255, 0.95)';
   ctx.font = '900 13px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -729,8 +729,8 @@ function MenuButton({
     <button
       className={`pointer-events-auto rounded-none border font-black uppercase transition hover:-translate-y-0.5 active:translate-y-1 ${sizing} ${
         secondary
-          ? 'border-[#e8d6a0]/45 bg-[#14160f]/95 text-[#e8d6a0]/90 shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35)] hover:bg-[#1d2017] active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
-          : 'border-[#ffe66d]/80 bg-[#b8860b]/25 text-[#ffe66d] shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35)] hover:bg-[#b8860b]/40 active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
+          ? 'border-[#50ebff]/50 bg-[#101a4a]/95 text-[#9bf1ff]/95 shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35),inset_0_0_16px_rgba(80,235,255,0.08)] hover:bg-[#16205c] active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
+          : 'border-[#7df9ff]/90 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_4px_0_#06505f,0_10px_18px_rgba(0,0,0,0.35),0_0_16px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4] hover:shadow-[0_4px_0_#06505f,0_10px_18px_rgba(0,0,0,0.35),0_0_24px_rgba(80,235,255,0.6)] active:shadow-[0_2px_0_#06505f,0_6px_12px_rgba(0,0,0,0.3)]'
       }`}
       onClick={onClick}
       type="button"
@@ -764,7 +764,7 @@ function ThreeDMenu({
   const isGameOver = mode === 'gameover';
 
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/55 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/60 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card">
@@ -821,7 +821,7 @@ function ThreeDMenu({
             )}
 
             {isNewBest && (
-              <div className="mt-3 border border-[#ffe66d]/80 bg-[#b8860b]/25 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ffe66d] shadow-[0_3px_0_rgba(0,0,0,0.35)]">
+              <div className="mt-3 border border-[#ff4fd8]/80 bg-[#ff4fd8]/15 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ff9bf0] shadow-[0_3px_0_rgba(0,0,0,0.35),0_0_18px_rgba(255,77,216,0.35)]">
                 New High Score
               </div>
             )}
@@ -847,9 +847,9 @@ function ThreeDMenu({
               <div className="menu-chip">Mouse Aim</div>
               <div className="menu-chip">Space Climb</div>
               <div className="menu-chip">Alt Descend</div>
-              <div className="menu-chip col-span-2 text-center border-[#ff3344]/50 py-1.5 text-[#ff8b96]">Q / R-Click Lock Salvo</div>
-              <div className="menu-chip col-span-2 text-center text-[#ffbd3f]">C Deploy Flares</div>
-              <div className="menu-chip col-span-2 text-center border-[#e8d6a0]/30 py-1.5">ESC / P Pause</div>
+              <div className="menu-chip col-span-2 text-center border-[#ff3344]/55 py-1.5 text-[#ff8b96]">Q / R-Click Lock Salvo</div>
+              <div className="menu-chip col-span-2 text-center text-[#ffd35c]">C Deploy Flares</div>
+              <div className="menu-chip col-span-2 text-center border-[#50ebff]/35 py-1.5">ESC / P Pause</div>
             </div>
           </div>
         </div>
@@ -941,14 +941,14 @@ function PauseOverlay({
   onQuit: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/60 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/65 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(400px,calc(100vw-32px))] text-center">
-            <div className="text-4xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-4xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Paused
             </div>
-            <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-[#e8d6a0]/75">
+            <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-[#9bf1ff]/80">
               Esc to Resume
             </div>
             <div className="mt-6 flex flex-col items-center gap-3">
@@ -987,11 +987,11 @@ function SettingsPanel({
   onClose: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#0a0c07]/65 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(460px,calc(100vw-32px))]">
-            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-3xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Settings
             </div>
 
@@ -1133,8 +1133,8 @@ function HelicopterCard({
       onClick={onSelect}
       className={`group flex flex-col items-center gap-2 rounded-xl border-2 px-3 py-4 text-center transition hover:-translate-y-1 ${
         selected
-          ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_8px_24px_rgba(255,230,109,0.2)]'
-          : 'border-white/20 bg-[#12140e]/90 hover:border-[#ffe66d]/60'
+          ? 'border-[#7df9ff] bg-[#50ebff]/15 shadow-[0_8px_24px_rgba(80,235,255,0.3),0_0_16px_rgba(80,235,255,0.2)]'
+          : 'border-white/25 bg-[#101a4a]/95 hover:border-[#50ebff]/70'
       }`}
     >
       {/* Stylized top-down helicopter silhouette preview */}
@@ -1146,13 +1146,13 @@ function HelicopterCard({
         />
         <div className="absolute left-1/2 top-1/2 h-2 w-7 -translate-x-1/2 -translate-y-1/2 rounded-[2px]" style={{ background: dark }} />
       </div>
-      <span className={`text-sm font-black uppercase tracking-wider ${selected ? 'text-[#ffe66d]' : 'text-white'}`}>
+      <span className={`text-sm font-black uppercase tracking-wider ${selected ? 'text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]' : 'text-white'}`}>
         {name}
       </span>
-      <span className="text-[11px] font-semibold leading-snug text-white/70">{desc}</span>
+      <span className="text-[11px] font-semibold leading-snug text-white/75">{desc}</span>
       <span
         className={`mt-1 rounded-[4px] px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-          selected ? 'bg-[#ffe66d] text-[#3d2b08]' : 'bg-white/10 text-white/60'
+          selected ? 'bg-[#22b8d8] text-[#04222b] shadow-[0_0_10px_rgba(80,235,255,0.5)]' : 'bg-white/10 text-white/60'
         }`}
       >
         {selected ? 'Selected' : 'Select'}
@@ -1179,23 +1179,23 @@ function HangarScreen({
   onBack: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0a0c07]/70 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/75 px-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig max-h-[88vh] overflow-y-auto">
           <div className="menu-card w-[min(620px,calc(100vw-32px))]">
-            <div className="text-center text-3xl font-black uppercase tracking-[0.1em] text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-3xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Hangar
             </div>
-            <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-[#e8d6a0]/70">
+            <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-[#9bf1ff]/75">
               Aircraft, weapon mastery, and permanent systems
             </div>
 
-            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-none border border-[#ffe66d]/70 bg-[#b8860b]/20 px-3 py-1.5">
+            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-none border border-[#ffe66d]/75 bg-[#ffe66d]/12 px-3 py-1.5 shadow-[0_0_16px_rgba(255,230,109,0.25)]">
               <CoinIcon />
               <span className="text-xl font-black text-[#ffe66d]">{credits.toLocaleString()} CREDITS</span>
             </div>
 
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
               Permanent Systems
             </div>
             <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
@@ -1205,23 +1205,23 @@ function HangarScreen({
                 const maxed = cost === undefined;
                 const affordable = !maxed && credits >= cost;
                 return (
-                  <div key={id} className="flex flex-col border border-[#e8d6a0]/30 bg-[#14160f]/95 px-3 py-3 text-center">
-                    <div className="text-xs font-black uppercase tracking-wide text-[#e8d6a0]">{info.name}</div>
-                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#e8d6a0]/70">Rank {rank} / {info.costs.length}</div>
+                  <div key={id} className="flex flex-col border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(80,235,255,0.05)]">
+                    <div className="text-xs font-black uppercase tracking-wide text-[#9bf1ff]">{info.name}</div>
+                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#9bf1ff]/70">Rank {rank} / {info.costs.length}</div>
                     <div className="mt-2 flex justify-center gap-1">
                       {info.costs.map((_, index) => index + 1).map((level) => (
-                        <span key={level} className={`h-1.5 w-8 ${level <= rank ? 'bg-[#ffe66d]' : 'bg-[#e8d6a0]/15'}`} />
+                        <span key={level} className={`h-1.5 w-8 ${level <= rank ? 'bg-[#ffe66d] shadow-[0_0_6px_rgba(255,230,109,0.6)]' : 'bg-[#50ebff]/15'}`} />
                       ))}
                     </div>
-                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#e8d6a0]/65">{info.description}</div>
+                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#9bf1ff]/65">{info.description}</div>
                     <button
                       type="button"
                       disabled={!affordable}
                       onClick={() => onBuyUpgrade(id)}
                       className={`mt-3 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
                         affordable
-                          ? 'border-[#ffe66d]/80 bg-[#b8860b]/25 text-[#ffe66d] hover:bg-[#b8860b]/40'
-                          : 'cursor-not-allowed border-[#e8d6a0]/15 bg-black/20 text-[#e8d6a0]/35'
+                          ? 'border-[#7df9ff]/85 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_3px_0_#06505f,0_0_12px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4]'
+                          : 'cursor-not-allowed border-[#50ebff]/15 bg-black/25 text-[#50ebff]/35'
                       }`}
                     >
                       {maxed ? 'Max Rank' : `${cost} Credits`}
@@ -1232,7 +1232,7 @@ function HangarScreen({
             </div>
 
             {/* Player aircraft selector */}
-            <div className="mt-4 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
+            <div className="mt-4 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
               Aircraft
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2.5">
@@ -1251,10 +1251,10 @@ function HangarScreen({
             </div>
 
             {/* Weapon mastery */}
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#e8d6a0]/85">
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
               Weapons
             </div>
-            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#e8d6a0]/50">
+            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
               Max rank unlocks a signature alt-fire
             </div>
 
@@ -1265,8 +1265,8 @@ function HangarScreen({
                 return (
                   <div
                     key={w.name}
-                    className="flex items-center gap-3 border bg-[#14160f]/95 px-4 py-3"
-                    style={{ borderColor: maxed ? w.color : 'rgba(232,214,160,0.3)' }}
+                    className="flex items-center gap-3 border bg-[#0e1644]/95 px-4 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]"
+                    style={{ borderColor: maxed ? w.color : 'rgba(80,235,255,0.3)' }}
                   >
                     <div
                       className="flex h-10 w-10 shrink-0 items-center justify-center text-lg font-black"
@@ -1276,7 +1276,7 @@ function HangarScreen({
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-black uppercase tracking-wide text-[#e8d6a0]">{w.name}</span>
+                        <span className="text-sm font-black uppercase tracking-wide text-[#9bf1ff]">{w.name}</span>
                         <span className="text-xs font-black text-[#ffe66d]">LV.{lvl}</span>
                       </div>
                       <div className="mt-1 flex gap-1">
@@ -1966,7 +1966,7 @@ export default function App() {
           <button
             type="button"
             onClick={pauseGame}
-            className="pointer-events-auto absolute right-4 top-[13.5rem] rounded-[6px] border-2 border-[#ffe66d]/80 bg-[#12140e]/90 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#1a1c12,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#1f2416] active:translate-y-1 active:shadow-[0_2px_0_#1a1c12,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[13.5rem]"
+            className="pointer-events-auto absolute right-4 top-[13.5rem] rounded-[6px] border-2 border-[#50ebff]/80 bg-[#101a4a]/95 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-[#d8fbff] shadow-[0_4px_0_#0a2f4d,0_8px_18px_rgba(0,0,0,0.24),0_0_12px_rgba(80,235,255,0.25)] transition hover:-translate-y-0.5 hover:bg-[#16205c] active:translate-y-1 active:shadow-[0_2px_0_#0a2f4d,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[13.5rem]"
             style={textShadow}
           >
             Pause
@@ -1984,7 +1984,7 @@ export default function App() {
                   {weaponInfo.name}
                 </span>
                 {(weaponInfo.level ?? 1) > 1 && (
-                  <span className="rounded-[3px] border border-[#ffe66d]/60 bg-[#1a1c12]/80 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d]">
+                  <span className="rounded-[3px] border border-[#ffe66d]/70 bg-[#3d2f05]/70 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d] shadow-[0_0_8px_rgba(255,230,109,0.3)]">
                     LV.{weaponInfo.level}
                   </span>
                 )}
@@ -2205,30 +2205,49 @@ export default function App() {
 
       {/* Weapon upgrade roulette */}
       {upgradeOffer && mode === 'playing' && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/45">
-          <div className="w-[min(640px,92vw)] border-2 border-[#ffe66d]/60 bg-[#0c0e0a]/95 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)] sm:p-7" style={{ clipPath: 'polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px))' }}>
-            <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#ffe66d]">
-              Level Up
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#04081f]/65 backdrop-blur-[1px]">
+          <div
+            className="w-[min(680px,92vw)] border-2 border-[#50ebff]/70 bg-[#0a1140]/97 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6),0_0_30px_rgba(80,235,255,0.15)] sm:p-7"
+            style={{ clipPath: 'polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px))' }}
+          >
+            <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]">
+              ⚡ Level Up
             </div>
-            <h2 className="mb-5 text-center text-2xl font-black uppercase tracking-widest text-white" style={textShadow}>
+            <h2 className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text mb-5 text-center text-2xl font-black uppercase tracking-widest text-transparent" style={textShadow}>
               Choose an Upgrade
             </h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              {upgradeOffer.map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => chooseUpgrade(opt.id)}
-                  className="group flex flex-col items-center gap-2 rounded-xl border-2 border-white/25 bg-[#12140e]/90 px-4 py-5 text-center transition hover:-translate-y-1 hover:border-[#ffe66d] hover:bg-[#1a1d12] hover:shadow-[0_10px_28px_rgba(255,230,109,0.2)] active:translate-y-0"
-                >
-                  <span className="text-4xl transition-transform group-hover:scale-125">{opt.icon}</span>
-                  <span className="text-[9px] font-black uppercase tracking-[0.22em] text-white/45">{opt.category}</span>
-                  <span className="text-sm font-black uppercase tracking-wide text-[#ffe66d]">{opt.title}</span>
-                  <span className="text-xs font-semibold leading-snug text-white/80">{opt.desc}</span>
-                </button>
-              ))}
+              {upgradeOffer.map((opt, idx) => {
+                const accent = ['#50ebff', '#ff4fd8', '#ffe66d', '#55f2a2', '#ff9b3d'][idx % 5];
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => chooseUpgrade(opt.id)}
+                    className="group flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-5 text-center transition hover:-translate-y-1 active:translate-y-0"
+                    style={{
+                      borderColor: `${accent}66`,
+                      background: 'linear-gradient(180deg, rgba(16,26,66,0.95), rgba(8,13,42,0.96))',
+                      boxShadow: `inset 0 0 18px ${accent}14`,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = accent;
+                      e.currentTarget.style.boxShadow = `0 10px 28px ${accent}40, inset 0 0 24px ${accent}1f`;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = `${accent}66`;
+                      e.currentTarget.style.boxShadow = `inset 0 0 18px ${accent}14`;
+                    }}
+                  >
+                    <span className="text-4xl transition-transform group-hover:scale-125" style={{ filter: `drop-shadow(0 0 12px ${accent}80)` }}>{opt.icon}</span>
+                    <span className="text-[9px] font-black uppercase tracking-[0.22em] text-white/50">{opt.category}</span>
+                    <span className="text-sm font-black uppercase tracking-wide" style={{ color: accent }}>{opt.title}</span>
+                    <span className="text-xs font-semibold leading-snug text-white/85">{opt.desc}</span>
+                  </button>
+                );
+              })}
             </div>
-            <div className="mt-4 text-center text-[11px] font-bold uppercase tracking-wider text-white/40">
+            <div className="mt-4 text-center text-[11px] font-bold uppercase tracking-wider text-[#9bf1ff]/60">
               Game paused — pick one
             </div>
           </div>
