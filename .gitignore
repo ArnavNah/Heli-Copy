@@ -10,3 +10,5 @@ coverage/
 
 # Headless smoke-test runtime data
 .phase1-*
+
+.qoder/
