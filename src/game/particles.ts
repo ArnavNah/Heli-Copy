@@ -108,7 +108,7 @@ const RainFrag = `
 
 export class RainSystem {
   mesh: THREE.Points;
-  uniforms: any;
+  uniforms: { uTime: { value: number }; uPlayerPos: { value: THREE.Vector3 } };
 
   constructor(count = 2000) {
     const geometry = new THREE.BufferGeometry();
@@ -235,7 +235,7 @@ export class GPUParticleSystem {
   startTimeAttr: THREE.BufferAttribute;
   pTypeAttr: THREE.BufferAttribute;
   currentIndex: number = 0;
-  uniforms: any;
+  uniforms: { uTime: { value: number } };
 
   constructor(maxParticles = 5000) {
     this.maxParticles = maxParticles;
@@ -367,6 +367,13 @@ export class GPUParticleSystem {
 }
 
 export class VolumetricExplosions {
+  // Shared color constants (were allocated per frame in update()).
+  private static readonly COLOR_WHITE = new THREE.Color(0xffffff);
+  private static readonly COLOR_YELLOW = new THREE.Color(0xffaa00);
+  private static readonly COLOR_ORANGE = new THREE.Color(0xff3300);
+  private static readonly COLOR_GRAY = new THREE.Color(0x222222);
+  private static readonly COLOR_TEMP = new THREE.Color();
+
   mesh: THREE.InstancedMesh;
   maxParticles: number;
   dummy = new THREE.Object3D();
@@ -428,11 +435,12 @@ export class VolumetricExplosions {
   
   update(delta: number) {
     let needsUpdate = false;
-    const colorWhite = new THREE.Color(0xffffff);
-    const colorYellow = new THREE.Color(0xffaa00);
-    const colorOrange = new THREE.Color(0xff3300);
-    const colorGray = new THREE.Color(0x222222);
-    const tempColor = new THREE.Color();
+    // Hoisted out of the per-frame path — these used to allocate every frame.
+    const colorWhite = VolumetricExplosions.COLOR_WHITE;
+    const colorYellow = VolumetricExplosions.COLOR_YELLOW;
+    const colorOrange = VolumetricExplosions.COLOR_ORANGE;
+    const colorGray = VolumetricExplosions.COLOR_GRAY;
+    const tempColor = VolumetricExplosions.COLOR_TEMP;
     
     for(let i=0; i<this.maxParticles; i++) {
       if (this.activeFlags[i] === 1) {
@@ -470,5 +478,82 @@ export class VolumetricExplosions {
       this.mesh.instanceMatrix.needsUpdate = true;
       if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
     }
+  }
+}
+
+/**
+ * Expanding dust shockwave rings — flat additive rings that scale outward and
+ * fade in under a second. Pooled; one mesh per live ring (max 8 concurrent),
+ * spawned by building collapses, bombs and the Devastation super.
+ */
+export class ShockwaveRings {
+  private static readonly MAX_RINGS = 8;
+  private rings: {
+    mesh: THREE.Mesh;
+    material: THREE.MeshBasicMaterial;
+    active: boolean;
+    bornAt: number;
+    maxRadius: number;
+    duration: number;
+  }[] = [];
+
+  constructor(private scene: THREE.Scene) {
+    const geometry = new THREE.RingGeometry(0.82, 1, 40);
+    geometry.rotateX(-Math.PI / 2); // lie flat on the ground plane
+    for (let i = 0; i < ShockwaveRings.MAX_RINGS; i++) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xd8c9a2,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.visible = false;
+      mesh.renderOrder = 5;
+      scene.add(mesh);
+      this.rings.push({ mesh, material, active: false, bornAt: 0, maxRadius: 30, duration: 0.8 });
+    }
+  }
+
+  /** Fire a ring. `now` in wall-clock seconds (matches the particle system). */
+  spawn(x: number, y: number, z: number, now: number, maxRadius = 30, color = 0xd8c9a2, duration = 0.8) {
+    const slot = this.rings.find((r) => !r.active);
+    if (!slot) return; // pool exhausted — rings are pure garnish, drop silently
+    slot.active = true;
+    slot.bornAt = now;
+    slot.maxRadius = maxRadius;
+    slot.duration = duration;
+    slot.material.color.setHex(color);
+    slot.mesh.position.set(x, Math.max(0.35, y), z);
+    slot.mesh.visible = true;
+  }
+
+  update(now: number) {
+    for (const ring of this.rings) {
+      if (!ring.active) continue;
+      const p = (now - ring.bornAt) / ring.duration;
+      if (p >= 1) {
+        ring.active = false;
+        ring.mesh.visible = false;
+        continue;
+      }
+      // Ease-out expansion: fast start, gentle settle — reads as a pressure wave.
+      const eased = 1 - (1 - p) * (1 - p);
+      const radius = Math.max(0.01, ring.maxRadius * eased);
+      ring.mesh.scale.set(radius, 1, radius);
+      ring.material.opacity = 0.55 * (1 - p);
+    }
+  }
+
+  dispose() {
+    for (const ring of this.rings) {
+      this.scene.remove(ring.mesh);
+      ring.material.dispose();
+    }
+    // Geometry is shared across rings — dispose once via the first mesh.
+    if (this.rings.length > 0) this.rings[0].mesh.geometry.dispose();
+    this.rings = [];
   }
 }

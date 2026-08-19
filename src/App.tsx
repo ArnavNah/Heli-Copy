@@ -19,8 +19,22 @@ import type {
   UpgradeId,
   UpgradeOption,
 } from './game';
-import { readMastery } from './game/logic';
-import { formatDuration } from './game/logic';
+import {
+  formatDuration,
+  formatScorecard,
+  MAX_PERK_RANK,
+  PERK_INFO,
+  readMastery,
+  readPerks,
+  readRunHistory,
+  readWeaponMods,
+  SUPER_MAX_CHARGE,
+  WEAPON_MODS,
+  writePerkRank,
+  writeWeaponMod,
+} from './game/logic';
+import type { PerkId, PerkRanks, RunRecord } from './game/logic';
+import { Bomb, Cog, Flame, Fuel, Rocket, Shield, Skull, Sparkles, Zap } from 'lucide-react';
 
 type GameMode = 'menu' | 'playing' | 'paused' | 'gameover';
 
@@ -50,7 +64,7 @@ type PerfStats = {
   geometries: number;
   textures: number;
   programs: number;
-  quality: string;
+  graphics: string;
   enemies: number;
   powerups: number;
   objectives: number;
@@ -62,6 +76,7 @@ const DEFAULT_SETTINGS: GameSettings = {
   invertedY: false,
   gamepadSensitivity: 1.5,
   quality: 'low',
+  graphics: 'sp1',
   volume: 0.8,
   touchMode: false,
   difficulty: 'normal',
@@ -98,7 +113,7 @@ function detectTouch() {
 
 function HeartIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-9 w-9 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" className="h-7 w-7 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <path d="M8 5h6v4h4V5h6v4h4v8h-4v4h-4v4h-4v4h-4v-4H8v-4H4v-4H0V9h4V5h4Z" fill="#ef233c" />
       <path d="M8 7h5v3H8v3H5v-3h3V7Z" fill="#ff7b86" opacity="0.75" />
     </svg>
@@ -107,7 +122,7 @@ function HeartIcon() {
 
 function GasIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-8 w-8 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <path d="M7 4h14v24H5V8h2V4Z" fill="#2bd66f" />
       <path d="M10 8h8v5h-8V8Z" fill="#caffdb" />
       <path d="M21 8h4l3 4v10h-4v-8l-3-2V8Z" fill="#1a9f52" />
@@ -118,7 +133,7 @@ function GasIcon() {
 
 function CoinIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-8 w-8 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <circle cx="16" cy="16" r="12" fill="#ffd43b" />
       <circle cx="16" cy="16" r="8" fill="#f6b800" />
       <rect x="14" y="8" width="4" height="16" fill="#fff3a3" opacity="0.8" />
@@ -128,7 +143,7 @@ function CoinIcon() {
 
 function BulletIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-8 w-8">
+    <svg viewBox="0 0 32 32" className="h-6 w-6">
       <path d="M18 3h5v5h3v16h-3v5H9v-5H6V12h12V3Z" fill="#ffe66d" />
       <path d="M9 17h14v4H9v-4Z" fill="#ff4b35" />
       <path d="M18 7h3v5h-3V7Z" fill="#fff6ad" />
@@ -138,7 +153,7 @@ function BulletIcon() {
 
 function TargetIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-8 w-8 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <circle cx="16" cy="16" r="12" fill="none" stroke="#ff3344" strokeWidth="2.5" />
       <circle cx="16" cy="16" r="5" fill="#ff3344" />
       <rect x="15" y="2" width="2" height="6" fill="#ff3344" />
@@ -163,6 +178,7 @@ const CONTROL_HINTS: { keys: string; label: string }[] = [
   { keys: 'SHIFT', label: 'Afterburner' },
   { keys: 'HOLD FIRE', label: 'Shoot' },
   { keys: 'C', label: 'Deploy Flares' },
+  { keys: 'E', label: 'Devastation' },
 ];
 
 /** Contextual onboarding: a short fading hint sequence after each run starts.
@@ -219,7 +235,7 @@ function ControlHints({ runId }: { runId: number }) {
 
 function Meter({ value, color }: { value: number; color: string }) {
   return (
-    <div className="h-4 w-24 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-48">
+    <div className="h-3 w-20 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-32">
       <div className={`h-full ${color} transition-[width] duration-300`} style={{ width: `${clampPercent(value)}%` }} />
     </div>
   );
@@ -274,7 +290,7 @@ function drawMinimap(
 
   if (!snap) {
     ctx.fillStyle = 'rgba(160, 210, 255, 0.5)';
-    ctx.font = '700 15px system-ui, sans-serif';
+    ctx.font = '700 13px Silkscreen, system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('NO SIGNAL', cx, cy);
@@ -397,7 +413,7 @@ function drawMinimap(
       ctx.stroke();
     }
     ctx.fillStyle = snap.extraction.active ? 'rgba(100,255,175,1)' : 'rgba(85,242,162,0.9)';
-    ctx.font = '900 14px system-ui, sans-serif';
+    ctx.font = '10px "Press Start 2P", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('H', ep.x, ep.y);
@@ -406,7 +422,7 @@ function drawMinimap(
     // Pad elevation vs the player — "▲ 42m" reads as a rooftop to climb to.
     const dy = snap.extraction.elevation - (snap.player.y ?? 0);
     const dir = dy > 4 ? '▲' : dy < -4 ? '▼' : '≈';
-    ctx.font = '800 9px system-ui, sans-serif';
+    ctx.font = '700 8px Silkscreen, system-ui, sans-serif';
     ctx.fillStyle = dy > 4 ? 'rgba(255, 189, 63, 0.95)' : 'rgba(160, 230, 200, 0.95)';
     ctx.fillText(`${dir} ${Math.abs(Math.round(dy))}m`, ep.x, ep.y + 16);
   }
@@ -486,6 +502,32 @@ function drawMinimap(
       ctx.arc(ex, ey, 2, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(85, 255, 153, 0.95)';
       ctx.fill();
+    } else if (v === EnemyVariant.INTERCEPTOR) {
+      // Blue swept arrow — fast pass threat
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 7);
+      ctx.lineTo(ex + 5, ey + 5);
+      ctx.lineTo(ex, ey + 2);
+      ctx.lineTo(ex - 5, ey + 5);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(85, 170, 255, 0.95)';
+      ctx.fill();
+    } else if (v === EnemyVariant.MINELAYER) {
+      // Pink diamond — mine hazard
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 6);
+      ctx.lineTo(ex + 5, ey);
+      ctx.lineTo(ex, ey + 6);
+      ctx.lineTo(ex - 5, ey);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 68, 170, 0.95)';
+      ctx.fill();
+    } else if (v === EnemyVariant.GATLING_HEAVY) {
+      // Heavy yellow square — armored suppressor
+      ctx.fillStyle = 'rgba(255, 217, 46, 0.95)';
+      ctx.fillRect(ex - 4.5, ey - 4.5, 9, 9);
+      ctx.fillStyle = 'rgba(60, 40, 10, 0.95)';
+      ctx.fillRect(ex - 1.5, ey - 1.5, 3, 3);
     } else if (e.type === 1) {
       ctx.beginPath();
       ctx.moveTo(ex, ey - 6);
@@ -594,7 +636,7 @@ function drawMinimap(
     ctx.lineWidth = 2.2;
     ctx.stroke();
     ctx.fillStyle = 'rgba(255, 230, 109, 0.98)';
-    ctx.font = '900 9px system-ui, sans-serif';
+    ctx.font = '7px "Press Start 2P", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('M', mp.x, mp.y + 0.5);
@@ -664,7 +706,7 @@ function drawMinimap(
   ctx.lineTo(cx + 4, cy - R - 4);
   ctx.stroke();
   ctx.fillStyle = 'rgba(125, 249, 255, 0.95)';
-  ctx.font = '900 13px system-ui, sans-serif';
+  ctx.font = '9px "Press Start 2P", system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('N', cx, cy - R - 15);
@@ -697,13 +739,13 @@ function MinimapPanel() {
   }, []);
 
   return (
-    <div className="pointer-events-none absolute right-4 top-4 z-20 sm:right-6">
+    <div className="pointer-events-none">
       <canvas
         ref={canvasRef}
         width={360}
         height={360}
         className="block"
-        style={{ width: 'min(180px, 26vw)', height: 'min(180px, 26vw)' }}
+        style={{ width: 'min(150px, 24vw)', height: 'min(150px, 24vw)' }}
         aria-label="Tactical minimap"
       />
     </div>
@@ -723,8 +765,8 @@ function MenuButton({
 }) {
   const sizing =
     size === 'sm'
-      ? 'h-11 min-w-32 px-3 text-[15px] tracking-[0.1em] sm:flex-1 sm:min-w-0'
-      : 'h-12 min-w-44 px-6 text-lg tracking-[0.16em]';
+      ? 'h-11 min-w-32 px-3 text-[11px] tracking-[0.1em] sm:flex-1 sm:min-w-0'
+      : 'h-12 min-w-44 px-6 text-sm tracking-[0.14em]';
   return (
     <button
       className={`pointer-events-auto rounded-none border font-black uppercase transition hover:-translate-y-0.5 active:translate-y-1 ${sizing} ${
@@ -747,6 +789,7 @@ function ThreeDMenu({
   wave,
   isNewBest,
   stats,
+  history,
   onStart,
   onSettings,
   onHangar,
@@ -757,11 +800,26 @@ function ThreeDMenu({
   wave: number;
   isNewBest: boolean;
   stats: RunStats | null;
+  history: RunRecord[];
   onStart: () => void;
   onSettings: () => void;
   onHangar: () => void;
 }) {
   const isGameOver = mode === 'gameover';
+  const [copied, setCopied] = useState(false);
+
+  // C7: shareable scorecard — latest run to the clipboard.
+  const copyScorecard = async () => {
+    const latest = history[0];
+    if (!latest) return;
+    try {
+      await navigator.clipboard.writeText(formatScorecard(latest, highScore));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // clipboard unavailable — ignore
+    }
+  };
 
   return (
     <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/60 px-4 backdrop-blur-[1px]">
@@ -826,6 +884,34 @@ function ThreeDMenu({
               </div>
             )}
 
+            {/* C7: recent run history + shareable scorecard */}
+            {isGameOver && history.length > 0 && (
+              <div className="mt-3 border border-white/15 bg-black/25 px-3 py-2">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[9px] font-black uppercase tracking-[0.24em] text-white/50">Recent Runs</span>
+                  <button
+                    type="button"
+                    onClick={copyScorecard}
+                    className="border border-[#50ebff]/60 bg-[#50ebff]/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.18em] text-[#9bf1ff] transition hover:bg-[#50ebff]/25"
+                  >
+                    {copied ? 'Copied!' : 'Copy Scorecard'}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-1">
+                  {history.slice(0, 5).map((run) => (
+                    <div key={run.at} className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
+                      <span className={run.victory ? 'text-[#55f2c2]' : 'text-white/55'}>{run.victory ? '✔ EXT' : '✖ KIA'}</span>
+                      <span className="text-[#ffe66d]">{run.score.toLocaleString()}</span>
+                      <span>W{run.wave}</span>
+                      <span>{run.kills} K</span>
+                      <span>{Math.round(run.accuracy * 100)}%</span>
+                      <span>{formatDuration(run.survivalTime)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="mt-5 flex flex-wrap justify-center gap-3">
               <MenuButton size={isGameOver ? 'md' : 'sm'} onClick={onStart}>
                 {isGameOver ? 'Restart' : 'Start'}
@@ -849,6 +935,7 @@ function ThreeDMenu({
               <div className="menu-chip">Alt Descend</div>
               <div className="menu-chip col-span-2 text-center border-[#ff3344]/55 py-1.5 text-[#ff8b96]">Q / R-Click Lock Salvo</div>
               <div className="menu-chip col-span-2 text-center text-[#ffd35c]">C Deploy Flares</div>
+              <div className="menu-chip col-span-2 text-center text-[#ff8f6b]">E Devastation</div>
               <div className="menu-chip col-span-2 text-center border-[#50ebff]/35 py-1.5">ESC / P Pause</div>
             </div>
           </div>
@@ -945,7 +1032,7 @@ function PauseOverlay({
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(400px,calc(100vw-32px))] text-center">
-            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-4xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-2xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Paused
             </div>
             <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-[#9bf1ff]/80">
@@ -991,7 +1078,7 @@ function SettingsPanel({
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card w-[min(460px,calc(100vw-32px))]">
-            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-3xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Settings
             </div>
 
@@ -1052,18 +1139,18 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Visual Quality</div>
-                  <div className="setting-desc">Low/Medium scale render resolution; High adds bloom FX & max pixels</div>
+                  <div className="setting-label">Graphics Mode</div>
+                  <div className="setting-desc">SP1 = chunky low-res PS1-style pixels · HD = crisp full-resolution render with bloom & anti-aliasing</div>
                 </div>
                 <div className="flex gap-2">
-                  {(['low', 'medium', 'high'] as const).map((q) => (
+                  {(['sp1', 'hd'] as const).map((g) => (
                     <button
-                      key={q}
+                      key={g}
                       type="button"
-                      onClick={() => onChange({ quality: q })}
-                      className={`seg-btn ${settings.quality === q ? 'seg-on' : ''}`}
+                      onClick={() => onChange({ graphics: g, quality: g === 'hd' ? 'high' : 'low' })}
+                      className={`seg-btn ${settings.graphics === g ? 'seg-on' : ''}`}
                     >
-                      {q === 'low' ? 'Low' : q === 'medium' ? 'Medium' : 'High'}
+                      {g === 'sp1' ? 'SP1' : 'HD'}
                     </button>
                   ))}
                 </div>
@@ -1166,16 +1253,24 @@ function HangarScreen({
   playerModel,
   credits,
   hangarUpgrades,
+  perks,
+  weaponMods,
   onSelectModel,
   onBuyUpgrade,
+  onBuyPerk,
+  onSelectMod,
   onBack,
 }: {
   mastery: number[];
   playerModel: HelicopterModel;
   credits: number;
   hangarUpgrades: HangarUpgrades;
+  perks: PerkRanks;
+  weaponMods: number[];
   onSelectModel: (m: HelicopterModel) => void;
   onBuyUpgrade: (id: HangarUpgradeId) => void;
+  onBuyPerk: (id: PerkId) => void;
+  onSelectMod: (weaponIndex: number, choice: number) => void;
   onBack: () => void;
 }) {
   return (
@@ -1183,7 +1278,7 @@ function HangarScreen({
       <div className="menu-perspective">
         <div className="menu-rig max-h-[88vh] overflow-y-auto">
           <div className="menu-card w-[min(620px,calc(100vw-32px))]">
-            <div className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-3xl font-black uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Hangar
             </div>
             <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-[#9bf1ff]/75">
@@ -1299,6 +1394,87 @@ function HangarScreen({
               })}
             </div>
 
+            {/* C6: Weapon mods — one free loadout choice per weapon */}
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
+              Weapon Mods
+            </div>
+            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
+              Pick one mod per weapon — applied next run
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {WEAPON_MASTERY_INFO.map((w, i) => {
+                const mods = WEAPON_MODS[i];
+                const current = weaponMods[i] ?? 0;
+                if (!mods) return null;
+                const choices = [{ name: 'Factory', desc: 'Standard issue, no modifiers' }, ...mods];
+                return (
+                  <div key={`mod-${w.name}`} className="border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]">
+                    <div className="mb-2 text-xs font-black uppercase tracking-wide" style={{ color: w.color }}>{w.name}</div>
+                    <div className="flex flex-col gap-1.5">
+                      {choices.map((choice, ci) => (
+                        <button
+                          key={choice.name}
+                          type="button"
+                          onClick={() => onSelectMod(i, ci)}
+                          className={`border px-2 py-1.5 text-left transition ${
+                            current === ci
+                              ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_0_10px_rgba(255,230,109,0.25)]'
+                              : 'border-white/15 bg-black/20 hover:border-[#50ebff]/60'
+                          }`}
+                        >
+                          <div className={`text-[11px] font-black uppercase tracking-wide ${current === ci ? 'text-[#ffe66d]' : 'text-white/85'}`}>
+                            {choice.name}{current === ci ? ' ✓' : ''}
+                          </div>
+                          <div className="text-[10px] font-semibold leading-snug text-white/55">{choice.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* C5: Pilot perk tree — permanent, bought rank by rank */}
+            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
+              Pilot Perks
+            </div>
+            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
+              Permanent pilot training — 3 ranks each
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-4">
+              {(Object.keys(PERK_INFO) as PerkId[]).map((id) => {
+                const info = PERK_INFO[id];
+                const rank = perks[id];
+                const cost = info.costs[rank];
+                const maxed = cost === undefined;
+                const affordable = !maxed && credits >= cost;
+                return (
+                  <div key={`perk-${id}`} className="flex flex-col border border-[#ff9b3d]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(255,155,61,0.05)]">
+                    <div className="text-xs font-black uppercase tracking-wide text-[#ffc37a]">{info.name}</div>
+                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-white/50">Rank {rank} / {MAX_PERK_RANK}</div>
+                    <div className="mt-2 flex justify-center gap-1">
+                      {[1, 2, 3].map((level) => (
+                        <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ff9b3d] shadow-[0_0_6px_rgba(255,155,61,0.6)]' : 'bg-white/10'}`} />
+                      ))}
+                    </div>
+                    <div className="mt-2 min-h-10 text-[10px] font-semibold leading-snug text-white/60">{info.desc}</div>
+                    <button
+                      type="button"
+                      disabled={!affordable}
+                      onClick={() => onBuyPerk(id)}
+                      className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
+                        affordable
+                          ? 'border-[#ffbd3f]/85 bg-gradient-to-b from-[#d18a24] to-[#8a5410] text-white shadow-[0_3px_0_#5c3608,0_0_12px_rgba(255,189,63,0.35)] hover:from-[#e29a30] hover:to-[#9c6216]'
+                          : 'cursor-not-allowed border-white/10 bg-black/25 text-white/30'
+                      }`}
+                    >
+                      {maxed ? 'Max Rank' : `${cost} Credits`}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
             <div className="mt-6 flex justify-center">
               <MenuButton onClick={onBack}>Back</MenuButton>
             </div>
@@ -1379,6 +1555,12 @@ export default function App() {
   const [unsecuredCredits, setUnsecuredCredits] = useState(0);
   const [salvage, setSalvage] = useState(0);
   const [salvageCredits, setSalvageCredits] = useState(0);
+  const [superInfo, setSuperInfo] = useState<{
+    charge: number; ready: boolean; activeRemaining: number; cooldownRemaining: number;
+  } | null>(null);
+  const [perks, setPerks] = useState<PerkRanks>(() => readPerks());
+  const [weaponMods, setWeaponMods] = useState<number[]>(() => readWeaponMods());
+  const [runHistory, setRunHistory] = useState<RunRecord[]>([]);
   const [extraction, setExtraction] = useState<{
     distance: number; bearing: number; progress: number; active: boolean; carrying: boolean;
   } | null>(null);
@@ -1405,7 +1587,7 @@ export default function App() {
   const [mission, setMission] = useState<MissionHudSnapshot | null>(null);
   const [radarLinked, setRadarLinked] = useState(false);
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
-  const [showPerf, setShowPerf] = useState(true);
+  const [showPerf, setShowPerf] = useState(() => import.meta.env.DEV);
   const [hitFlash, setHitFlash] = useState(0);
 
   const applySettings = (patch: Partial<GameSettings>) => {
@@ -1463,6 +1645,7 @@ export default function App() {
       setSalvoInfo(e.detail.salvo || null);
       setCountermeasureInfo(e.detail.countermeasures || null);
       setThreatInfo(e.detail.threatSystem || null);
+      setSuperInfo(e.detail.super || null);
       setUnsecuredCredits(e.detail.unsecuredCredits ?? 0);
       setSalvage(e.detail.salvage ?? 0);
       setSalvageCredits(e.detail.salvageCredits ?? 0);
@@ -1500,6 +1683,8 @@ export default function App() {
     const handleGameOver = (e: CustomEvent) => {
       const finalScore = e.detail.score;
       setMode('gameover');
+      // C7: history was already persisted by the engine — refresh the list.
+      setRunHistory(readRunHistory());
       setRunStats({
         time: e.detail.survivalTime ?? e.detail.time ?? 0,
         kills: e.detail.kills ?? 0,
@@ -1648,6 +1833,23 @@ export default function App() {
     setHangarUpgrades(result.upgrades);
   };
 
+  // C5: pilot perks are bought with the shared credit bank, rank by rank.
+  const purchasePerk = (id: PerkId) => {
+    const rank = perks[id];
+    if (rank >= MAX_PERK_RANK) return;
+    const cost = PERK_INFO[id].costs[rank];
+    if (credits < cost) return;
+    const next = credits - cost;
+    setCredits(next);
+    window.localStorage.setItem('helistrike:credits', String(next));
+    setPerks(writePerkRank(id, rank + 1));
+  };
+
+  // C6: weapon mods are a free loadout choice — persist immediately.
+  const selectWeaponMod = (weaponIndex: number, choice: number) => {
+    setWeaponMods(writeWeaponMod(weaponIndex, choice));
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' && e.key.toLowerCase() !== 'p') return;
@@ -1670,8 +1872,11 @@ export default function App() {
   const dangerOpacity = mode === 'playing' ? clampPercent(35 - health) / 100 : 0;
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#97dff0] font-sans text-white pointer-events-auto select-none">
-      <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full touch-none z-0" />
+    <div className="font-ui relative h-screen w-screen overflow-hidden bg-[#97dff0] text-white pointer-events-auto select-none">
+      <canvas
+          ref={canvasRef}
+          className={`absolute inset-0 block h-full w-full touch-none z-0 ${settings.graphics === 'sp1' ? '[image-rendering:pixelated]' : ''}`}
+        />
       <div className="arcade-scanlines pointer-events-none absolute inset-0 z-10" />
       <div className="arcade-vignette pointer-events-none absolute inset-0 z-10" />
       <div
@@ -1693,7 +1898,7 @@ export default function App() {
       <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
         {/* ══ TOP-LEFT: tactical objectives checklist ══ */}
         {mode === 'playing' && (
-          <div className="hud-panel absolute left-4 top-3 flex flex-col gap-1.5 px-3 py-2 sm:left-6 sm:top-5">
+          <div className="hud-panel absolute left-3 top-2.5 flex flex-col gap-1.5 px-2.5 py-1.5 sm:left-4 sm:top-4">
             <div className="hud-label text-[#ffd35c]">◆ Objectives</div>
             {objectives && objectives.count > 0 ? (
               <>
@@ -1725,23 +1930,19 @@ export default function App() {
         {/* ══ TOP-CENTER: wave banner + run timer ══ */}
         <div className="pointer-events-none absolute left-1/2 top-3 flex -translate-x-1/2 flex-col items-center gap-1.5 sm:top-5">
           <div className="hud-wave-banner flex items-center gap-2.5 px-4 py-1.5">
-            <span className="text-sm font-black uppercase tracking-[0.2em] text-white" style={textShadow}>
+            <span className="font-display text-[10px] uppercase tracking-[0.18em] text-white" style={textShadow}>
               Wave {wave}
             </span>
-            <span className="flex gap-0.5 text-[12px] leading-none">
+            <span className="flex items-center gap-0.5 leading-none">
               {Array.from({ length: 5 }).map((_, i) =>
                 i < Math.min(wave, 5) ? (
-                  <span key={i} className="drop-shadow-[0_0_5px_rgba(239,35,60,0.95)]">
-                    💀
-                  </span>
+                  <Skull key={i} size={13} className="text-[#ff3344] drop-shadow-[0_0_5px_rgba(239,35,60,0.95)]" />
                 ) : (
-                  <span key={i} className="opacity-30 grayscale">
-                    💀
-                  </span>
+                  <Skull key={i} size={13} className="text-white/40 opacity-40" />
                 ),
               )}
             </span>
-            <span className="border-l border-white/25 pl-3 text-base font-black tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
+            <span className="font-ui border-l border-white/25 pl-3 text-lg font-bold tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
               {formatDuration(elapsed)}
             </span>
           </div>
@@ -1810,37 +2011,24 @@ export default function App() {
         )}
         </div>
 
-        {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
-        {mode === 'playing' && <MinimapPanel />}
-
-        {/* ══ LEFT: hull + fuel ══ */}
-        <div className={`hud-panel pointer-events-none absolute left-4 top-[11rem] flex flex-col gap-1.5 px-3 py-2 sm:left-6 ${health <= 30 ? 'hud-danger' : ''}`}>
-          <div className="hud-label">Systems</div>
-          <div className="flex items-center gap-2">
-            <HeartIcon />
-            <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
-            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(health)}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <GasIcon />
-            <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
-            <span className="min-w-12 text-2xl font-black leading-none" style={textShadow}>{Math.round(fuel)}%</span>
-          </div>
-        </div>
-
-        {countermeasureInfo && mode === 'playing' && (
-          <div className="hud-panel pointer-events-none absolute left-4 top-[28.5rem] px-3 py-2 sm:left-6 sm:top-[29rem]">
-            <div className="hud-label text-[#ffbd3f]">Flares · C</div>
-            <div className="mt-1 text-base tracking-[0.18em] text-[#ffbd3f]">
-              {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
-            </div>
-            {countermeasureInfo.cooldown > 0 && <div className="text-[10px] font-black text-white/65">{countermeasureInfo.cooldown.toFixed(1)}s</div>}
-          </div>
-        )}
-
+        {/* RIGHT COLUMN: minimap, pause, extraction, delivery — one auto-stack
+            so panels never overlap or drift as content comes and goes. */}
+        <div className="pointer-events-none absolute right-3 top-2.5 flex flex-col items-end gap-1.5 sm:right-4 sm:top-4">
+          {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
+          {mode === 'playing' && <MinimapPanel />}
+          {mode === 'playing' && !upgradeOffer && (
+            <button
+              type="button"
+              onClick={pauseGame}
+              className="pointer-events-auto rounded-[6px] border-2 border-[#50ebff]/80 bg-[#101a4a]/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.14em] text-[#d8fbff] shadow-[0_4px_0_#0a2f4d,0_8px_18px_rgba(0,0,0,0.24),0_0_12px_rgba(80,235,255,0.25)] transition hover:-translate-y-0.5 hover:bg-[#16205c] active:translate-y-1 active:shadow-[0_2px_0_#0a2f4d,0_5px_12px_rgba(0,0,0,0.22)]"
+              style={textShadow}
+            >
+              Pause
+            </button>
+          )}
         {extraction && mode === 'playing' && (
-          <div className="pointer-events-none absolute right-4 top-[32.5rem] w-[min(250px,44vw)] sm:right-6 sm:top-[33rem]">
-            <div className="hud-panel border-[#55f2a2]/60 px-3 py-2">
+          <div className="pointer-events-none w-[min(212px,40vw)]">
+            <div className="hud-panel border-[#55f2a2]/60 px-2.5 py-1.5">
               <div className="hud-label text-[#55f2a2]">Extraction Available</div>
               <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{(unsecuredCredits + salvageCredits).toLocaleString()} CR</span></div>
               {extraction.active && (
@@ -1860,8 +2048,8 @@ export default function App() {
 
         {/* Compact delivery contract card */}
         {delivery && mode === 'playing' && (
-          <div className="pointer-events-none absolute right-4 top-[19rem] w-[min(250px,44vw)] sm:right-6 sm:top-[19.5rem]">
-            <div className={`hud-panel px-3 py-2.5 ${delivery.difficulty === 'HIGH_VALUE' ? 'border-[#d78cff]/70' : 'border-[#55f2c2]/45'}`}>
+          <div className="pointer-events-none w-[min(212px,40vw)]">
+            <div className={`hud-panel px-2.5 py-2 ${delivery.difficulty === 'HIGH_VALUE' ? 'border-[#d78cff]/70' : 'border-[#55f2c2]/45'}`}>
               <div className="flex items-center justify-between gap-2">
                 <span className="hud-label text-[#55f2c2]">Delivery</span>
                 <span className={`rounded-[3px] px-1.5 py-0.5 text-[9px] font-black tracking-wider ${
@@ -1874,7 +2062,7 @@ export default function App() {
                   {delivery.difficulty.replace('_', ' ')}
                 </span>
               </div>
-              <div className="mt-1 text-base font-black uppercase tracking-wide text-white" style={textShadow}>
+              <div className="mt-1 text-sm font-black uppercase tracking-wide text-white" style={textShadow}>
                 <span className="mr-1.5 text-[#ffbd3f]">{delivery.cargoIcon}</span>{delivery.cargoName}
               </div>
               <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] font-black uppercase tracking-wider">
@@ -1882,16 +2070,16 @@ export default function App() {
                 <span className="text-white">{delivery.distance >= 1000 ? `${(delivery.distance / 1000).toFixed(1)} km` : `${delivery.distance} m`}</span>
               </div>
               <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-wide text-white/55">{delivery.destinationName}</div>
-              <div className="mt-2 flex items-end justify-between gap-2 border-t border-white/12 pt-1.5">
+              <div className="mt-1.5 flex items-end justify-between gap-2 border-t border-white/12 pt-1.5">
                 <div>
                   <div className="hud-label">Reward</div>
-                  <div className="text-base font-black text-[#ffe66d]">{delivery.reward} CR</div>
+                  <div className="text-sm font-black text-[#ffe66d]">{delivery.reward} CR</div>
                   {delivery.samRiskBonus > 0 && <div className="text-[9px] font-black uppercase text-[#ff9b3d]">+{delivery.samRiskBonus} SAM risk</div>}
                 </div>
                 {delivery.timeBonusRemaining !== null && (
                   <div className="text-right">
                     <div className="hud-label">Time Bonus</div>
-                    <div className={delivery.timeBonusRemaining > 0 ? 'text-base font-black text-[#55f2c2]' : 'text-base font-black text-white/35'}>
+                    <div className={delivery.timeBonusRemaining > 0 ? 'text-sm font-black text-[#55f2c2]' : 'text-sm font-black text-white/35'}>
                       {formatDuration(delivery.timeBonusRemaining)}
                     </div>
                   </div>
@@ -1916,6 +2104,7 @@ export default function App() {
             </div>
           </div>
         )}
+        </div>
 
         {/* Edge-style route direction cue; the world beacon takes over nearby. */}
         {delivery && delivery.action !== 'COMPLETE' && delivery.distance > 70 && mode === 'playing' && (
@@ -1935,7 +2124,7 @@ export default function App() {
         {/* Arcade announcement toast */}
         {announcement && mode === 'playing' && (
           <div key={announcement.key} className="arcade-announce pointer-events-none absolute left-1/2 top-[30%] -translate-x-1/2 text-center">
-            <div className="text-4xl font-black uppercase tracking-widest" style={{ ...textShadow, color: announcement.color }}>
+            <div className="font-display text-2xl uppercase tracking-widest" style={{ ...textShadow, color: announcement.color }}>
               {announcement.text}
             </div>
             {announcement.sub && (
@@ -1962,25 +2151,28 @@ export default function App() {
           </div>
         )}
 
-        {mode === 'playing' && !upgradeOffer && (
-          <button
-            type="button"
-            onClick={pauseGame}
-            className="pointer-events-auto absolute right-4 top-[13.5rem] rounded-[6px] border-2 border-[#50ebff]/80 bg-[#101a4a]/95 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-[#d8fbff] shadow-[0_4px_0_#0a2f4d,0_8px_18px_rgba(0,0,0,0.24),0_0_12px_rgba(80,235,255,0.25)] transition hover:-translate-y-0.5 hover:bg-[#16205c] active:translate-y-1 active:shadow-[0_2px_0_#0a2f4d,0_5px_12px_rgba(0,0,0,0.22)] sm:right-6 sm:top-[13.5rem]"
-            style={textShadow}
-          >
-            Pause
-          </button>
-        )}
+        {/* LEFT COLUMN: systems, weapon, salvo, flares — one auto-stack so
+            panels never collide as content grows (LV badges, reloading). */}
+        <div className="pointer-events-none absolute left-3 top-[7.5rem] flex flex-col items-start gap-1.5 sm:left-4 sm:top-[8rem]">
+          <div className={`hud-panel flex flex-col gap-1 px-2.5 py-1.5 ${health <= 30 ? 'hud-danger' : ''}`}>
+            <div className="hud-label">Systems</div>
+            <div className="flex items-center gap-2">
+              <HeartIcon />
+              <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
+              <span className="font-ui font-bold min-w-10 text-xl leading-none" style={textShadow}>{Math.round(health)}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <GasIcon />
+              <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
+              <span className="font-ui font-bold min-w-10 text-xl leading-none" style={textShadow}>{Math.round(fuel)}%</span>
+            </div>
+          </div>
 
-        {/* Weapon + XP + Salvo — one left stack with a fixed gap so the panels
-            can never collide as content grows (LV badges, reloading, locks). */}
-        <div className="pointer-events-none absolute left-4 top-[18.25rem] flex flex-col items-start gap-2 sm:left-6 sm:top-[18.75rem]">
           {weaponInfo && mode === 'playing' && (
-            <div className="hud-panel px-3 py-2">
+            <div className="hud-panel px-2.5 py-1.5">
               <div className="flex items-center gap-2">
                 <BulletIcon />
-                <span className="text-base font-black uppercase tracking-wider" style={textShadow}>
+                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>
                   {weaponInfo.name}
                 </span>
                 {(weaponInfo.level ?? 1) > 1 && (
@@ -1991,11 +2183,11 @@ export default function App() {
               </div>
               <div className="mt-1 flex items-center gap-2">
                 {weaponInfo.reloading ? (
-                  <span className="text-base font-black text-yellow-300" style={textShadow}>
+                  <span className="text-sm font-black text-yellow-300" style={textShadow}>
                     RELOADING... {Math.ceil(weaponInfo.reloadTimer)}s
                   </span>
                 ) : (
-                  <span className="text-base font-black" style={textShadow}>
+                  <span className="text-sm font-black" style={textShadow}>
                     {weaponInfo.ammo} / {weaponInfo.maxAmmo}
                   </span>
                 )}
@@ -2049,13 +2241,23 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {countermeasureInfo && mode === 'playing' && (
+            <div className="hud-panel px-2.5 py-1.5">
+              <div className="hud-label text-[#ffbd3f]">Flares · C</div>
+              <div className="mt-0.5 text-sm tracking-[0.18em] text-[#ffbd3f]">
+                {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
+              </div>
+              {countermeasureInfo.cooldown > 0 && <div className="text-[10px] font-black text-white/65">{countermeasureInfo.cooldown.toFixed(1)}s</div>}
+            </div>
+          )}
         </div>
 
         {/* Combo Display with expiry timer bar — sits below the center stack
             so it never collides with Threat/objectives/SAM banner. */}
         {comboInfo && comboInfo.count > 1 && mode === 'playing' && (
           <div className="pointer-events-none absolute left-1/2 top-[16.5rem] -translate-x-1/2 text-center">
-            <div className="text-2xl font-black text-yellow-300" style={textShadow}>
+            <div className="font-display text-lg text-yellow-300" style={textShadow}>
               {comboInfo.count}x COMBO
             </div>
             <div className="text-sm font-bold text-yellow-200" style={textShadow}>
@@ -2071,10 +2273,10 @@ export default function App() {
         )}
 
         {/* ══ BOTTOM-RIGHT: credits + score + XP ══ */}
-        <div className="hud-panel pointer-events-none absolute right-4 bottom-24 w-[min(250px,42vw)] px-3 py-2 sm:right-6">
+        <div className="hud-panel pointer-events-none absolute right-3 bottom-20 w-[min(200px,36vw)] px-2.5 py-1.5 sm:right-4">
           <div className="flex items-center justify-between gap-2">
             <span className="hud-label">Credits</span>
-            <span className="flex items-center gap-1.5 text-2xl font-black" style={textShadow}>
+            <span className="font-ui font-bold flex items-center gap-1.5 text-xl" style={textShadow}>
               <CoinIcon />{credits.toLocaleString()}
             </span>
           </div>
@@ -2088,15 +2290,15 @@ export default function App() {
               Salvage {salvage.toLocaleString()} → {salvageCredits.toLocaleString()} CR
             </div>
           )}
-          <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="mt-1 flex items-center justify-between gap-2">
             <span className="hud-label">Score</span>
-            <span className="text-xl font-black" style={textShadow}>{score.toLocaleString()}</span>
+            <span className="font-ui font-bold text-lg" style={textShadow}>{score.toLocaleString()}</span>
           </div>
-          <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="mt-1 flex items-center justify-between gap-2">
             <span className="hud-label">XP · LV{runLevel}</span>
             <span className="text-xs font-black text-white/70">{Math.round(runXpProgress * 100)}%</span>
           </div>
-          <div className="mt-1 h-2 w-full overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+          <div className="mt-1 h-1.5 w-full overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
             <div
               className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
               style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
@@ -2112,8 +2314,8 @@ export default function App() {
               </div>
             )}
             {statusInfo.afterburner && (
-              <div className="hud-status border-[#ff7722]/60 text-[#ffb066] animate-pulse" style={textShadow}>
-                🔥 Afterburner
+              <div className="hud-status flex items-center gap-1 border-[#ff7722]/60 text-[#ffb066] animate-pulse" style={textShadow}>
+                <Flame size={11} /> Afterburner
               </div>
             )}
             {statusInfo.risk && statusInfo.risk > 1 && (
@@ -2139,25 +2341,53 @@ export default function App() {
           </div>
         )}
 
+        {/* ══ B3: Devastation super meter ══ */}
+        {mode === 'playing' && superInfo && (
+          <div className="pointer-events-none absolute bottom-[7.2rem] left-1/2 w-72 -translate-x-1/2">
+            <div className="mb-1 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.22em]">
+              <span className={superInfo.ready ? 'text-[#ff5d3a] drop-shadow-[0_0_6px_rgba(255,93,58,0.8)]' : 'text-white/55'}>
+                {superInfo.activeRemaining > 0 ? 'OVERCHARGE' : superInfo.cooldownRemaining > 0 ? 'DEVASTATION RECHARGING' : 'Devastation'}
+              </span>
+              {superInfo.ready && <span className="animate-pulse text-[#ffb199]">Press E</span>}
+              {superInfo.activeRemaining > 0 && <span className="text-[#ff8f6b]">{superInfo.activeRemaining.toFixed(1)}s</span>}
+              {superInfo.cooldownRemaining > 0 && superInfo.activeRemaining <= 0 && <span className="text-white/45">{Math.ceil(superInfo.cooldownRemaining)}s</span>}
+            </div>
+            <div className="h-2.5 w-full overflow-hidden border border-white/25 bg-black/45 shadow-[0_2px_8px_rgba(0,0,0,0.4)]">
+              <div
+                className={`h-full transition-[width] duration-150 ${superInfo.ready ? 'animate-pulse' : ''}`}
+                style={{
+                  width: `${Math.min(100, (superInfo.charge / SUPER_MAX_CHARGE) * 100)}%`,
+                  background: superInfo.activeRemaining > 0
+                    ? 'linear-gradient(90deg,#ff5d3a,#ffd35c)'
+                    : superInfo.ready
+                      ? 'linear-gradient(90deg,#ff9b3d,#ff5d3a)'
+                      : 'linear-gradient(90deg,#7a3b2e,#ff9b3d)',
+                  boxShadow: superInfo.ready || superInfo.activeRemaining > 0 ? '0 0 12px rgba(255,93,58,0.7)' : 'none',
+                }}
+              />
+            </div>
+          </div>
+        )}
+
         {/* ══ BOTTOM-CENTER: loadout ability cards ══ */}
         {mode === 'playing' && (
-          <div className="pointer-events-none absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-2">
+          <div className="pointer-events-none absolute bottom-5 left-1/2 flex -translate-x-1/2 items-end gap-1.5">
             {[
-              { icon: '🚀', name: weaponInfo?.name ?? 'Gun', lv: weaponInfo?.level ?? 1, accent: '#3ae06b' },
-              { icon: '⚙️', name: 'Engine', lv: hangarUpgrades.engine, accent: '#ffbd3f' },
-              { icon: '🛡️', name: 'Armor', lv: hangarUpgrades.armor, accent: '#4aa8ff' },
-              { icon: '⛽', name: 'Fuel', lv: hangarUpgrades.fuel, accent: '#ffd35c' },
+              { icon: <Rocket size={15} />, name: weaponInfo?.name ?? 'Gun', lv: weaponInfo?.level ?? 1, accent: '#3ae06b' },
+              { icon: <Cog size={15} />, name: 'Engine', lv: hangarUpgrades.engine, accent: '#ffbd3f' },
+              { icon: <Shield size={15} />, name: 'Armor', lv: hangarUpgrades.armor, accent: '#4aa8ff' },
+              { icon: <Fuel size={15} />, name: 'Fuel', lv: hangarUpgrades.fuel, accent: '#ffd35c' },
               {
-                icon: '💣',
+                icon: <Bomb size={15} />,
                 name: 'Salvo',
                 lv: salvoInfo ? (salvoInfo.isPainting ? 'LOCK' : salvoInfo.cooldown > 0 ? 'CD' : 'RDY') : 0,
                 accent: '#ff5566',
               },
-              { icon: '✨', name: 'Flares', lv: countermeasureInfo?.charges ?? 0, accent: '#c07bff' },
+              { icon: <Sparkles size={15} />, name: 'Flares', lv: countermeasureInfo?.charges ?? 0, accent: '#c07bff' },
             ].map((c, i) => (
               <div key={c.name} className="hud-ability-card" style={{ borderColor: c.accent }}>
                 <span className="hud-card-num">{i + 1}</span>
-                <span className="text-lg leading-none">{c.icon}</span>
+                <span className="leading-none" style={{ color: c.accent, filter: `drop-shadow(0 0 5px ${c.accent}99)` }}>{c.icon}</span>
                 <span className="hud-card-name" style={{ color: c.accent }}>{c.name}</span>
                 <span className="text-[0.55rem] font-black tracking-wide text-white/70">
                   {typeof c.lv === 'number' ? `LV ${c.lv}` : c.lv}
@@ -2173,7 +2403,7 @@ export default function App() {
 
       {mode === 'playing' && waveMessage && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/10">
-          <h2 className="whitespace-pre-line text-center text-5xl font-black uppercase tracking-widest text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.55)] sm:text-6xl">
+          <h2 className="font-display whitespace-pre-line text-center text-3xl uppercase tracking-widest text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.55)] sm:text-4xl">
             {waveMessage}
           </h2>
         </div>
@@ -2191,6 +2421,12 @@ export default function App() {
             onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:countermeasure')); }}
             className="pointer-events-auto absolute bottom-36 right-8 h-16 w-16 rounded-full border-2 border-[#ffbd3f] bg-[#613914]/80 text-[10px] font-black uppercase text-[#ffe0a0]"
           >Flares</button>
+          <button
+            type="button"
+            aria-label="Trigger Devastation"
+            onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:super')); }}
+            className="pointer-events-auto absolute bottom-56 right-8 h-16 w-16 rounded-full border-2 border-[#ff5d3a] bg-[#5c1a0d]/80 text-[10px] font-black uppercase text-[#ffb199]"
+          >Super</button>
         </div>
       )}
 
@@ -2210,10 +2446,10 @@ export default function App() {
             className="w-[min(680px,92vw)] border-2 border-[#50ebff]/70 bg-[#0a1140]/97 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6),0_0_30px_rgba(80,235,255,0.15)] sm:p-7"
             style={{ clipPath: 'polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px))' }}
           >
-            <div className="mb-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]">
-              ⚡ Level Up
+            <div className="mb-1 flex items-center justify-center gap-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]">
+              <Zap size={12} /> Level Up
             </div>
-            <h2 className="bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text mb-5 text-center text-2xl font-black uppercase tracking-widest text-transparent" style={textShadow}>
+            <h2 className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text mb-5 text-center text-lg uppercase tracking-widest text-transparent" style={textShadow}>
               Choose an Upgrade
             </h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -2262,8 +2498,12 @@ export default function App() {
           playerModel={playerModel}
           credits={credits}
           hangarUpgrades={hangarUpgrades}
+          perks={perks}
+          weaponMods={weaponMods}
           onSelectModel={selectPlayerModel}
           onBuyUpgrade={purchaseHangarUpgrade}
+          onBuyPerk={purchasePerk}
+          onSelectMod={selectWeaponMod}
           onBack={() => setShowHangar(false)}
         />
       )}
@@ -2276,6 +2516,7 @@ export default function App() {
           wave={wave}
           isNewBest={isNewBest}
           stats={runStats}
+          history={runHistory}
           onStart={startRun}
           onSettings={() => setShowSettings(true)}
           onHangar={() => setShowHangar(true)}
@@ -2290,7 +2531,7 @@ export default function App() {
             {perfStats.geometries} GEO · {perfStats.textures} TEX · {perfStats.programs} PROG
           </div>
           <div className="text-[#ffe66d]">
-            {perfStats.enemies} EN · {perfStats.powerups} PU · {perfStats.objectives} OBJ · {perfStats.quality.toUpperCase()}
+            {perfStats.enemies} EN · {perfStats.powerups} PU · {perfStats.objectives} OBJ · {perfStats.graphics.toUpperCase()}
           </div>
         </div>
       )}

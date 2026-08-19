@@ -25,16 +25,19 @@ import {
   PROP_COLORS,
 } from "./props";
 import { Turret } from "./entities";
+import type { GPUParticleSystem, ShockwaveRings } from "./particles";
+import type { DebrisSystem } from "./debris";
 import {
   DISTRICT_CONFIGS,
   buildingArchetype,
+  buildingMassing,
   districtForChunk,
   footprintTier,
   occlusionStrength,
   rhythmDensity,
   sceneRhythmForChunk,
 } from "./logic";
-import type { BuildingArchetype, DistrictConfig, RooftopPropType } from "./logic";
+import type { BuildingArchetype, BuildingMassing, DistrictConfig, RooftopPropType } from "./logic";
 
 /** Cached color for the building damage-darken lerp (Phase 3). */
 let tempDamageTint: THREE.Color | null = null;
@@ -76,6 +79,15 @@ interface Cloud {
   driftY: number;
 }
 
+/** C4: a volatile street prop (fuel tank / generator) that detonates when destroyed. */
+export interface ExplosiveProp {
+  group: THREE.Group;
+  x: number;
+  z: number;
+  hp: number;
+  dead: boolean;
+}
+
 export class CityEnvironment {
   group = new THREE.Group();
   rooftopSpots: RooftopSpot[] = [];
@@ -83,7 +95,15 @@ export class CityEnvironment {
   chunks: Map<number, WorldChunk> = new Map();
   /** Logical depot registry survives chunk unloads; positions are also reproducible from the chunk seed. */
   depotHubs: Map<string, DepotHub> = new Map();
-  particles: any = null;
+  particles: GPUParticleSystem | null = null;
+  /** Physical debris chunks spawned on collapses (wired by the engine). */
+  debris: DebrisSystem | null = null;
+  /** Expanding dust shockwave rings (wired by the engine). */
+  shockwaves: ShockwaveRings | null = null;
+  /** C4: volatile street props — detonate on enough damage and chain-react. */
+  explosiveProps: ExplosiveProp[] = [];
+  /** Engine hook fired when a volatile prop detonates (fx + enemy damage). */
+  onPropExplosion: ((x: number, z: number) => void) | null = null;
   cellSize = 22;
   chunkDepth = 132;
   /** The city is wider than the original build: 1024 units of ground per
@@ -236,6 +256,7 @@ export class CityEnvironment {
     this.chunkBeacons.clear();
     this.disposeBillboardTextures(this.chunkBillboards);
     this.depotHubs.clear();
+    this.explosiveProps = [];
     this.pendingChunks.length = 0;
     this.pendingChunkSet.clear();
     this.update({ x: 0, y: 20, z: 0 }, world);
@@ -337,6 +358,8 @@ export class CityEnvironment {
         this.chunkTurrets.delete(id);
         this.chunkTraffic.delete(id);
         this.chunkBeacons.delete(id);
+        // C4: drop volatile-prop refs whose meshes left the scene.
+        this.explosiveProps = this.explosiveProps.filter((p) => !p.dead && p.group.parent !== null);
         this.disposeBillboardTextures(this.chunkBillboards, id);
         cacheDirty = true;
       }
@@ -603,6 +626,62 @@ export class CityEnvironment {
       const falloff = 1 - Math.sqrt(distSq) / Math.max(radius, 0.001);
       this.damageBlock(block, amount * (0.35 + falloff * 0.65));
     }
+    // C4: any blast that scars buildings can also cook off volatile props.
+    this.damageExplosiveProps(x, z, radius, amount);
+  }
+
+  /** C4: accumulate blast damage on volatile props; destroyed ones detonate.
+   *  Chain-reactions are processed iteratively (not recursively) to avoid
+   *  deep call stacks and per-detonation audio/UI spam. */
+  damageExplosiveProps(x: number, z: number, radius: number, amount: number) {
+    const radiusSq = radius * radius;
+    const queue: ExplosiveProp[] = [];
+    for (const prop of this.explosiveProps) {
+      if (prop.dead) continue;
+      const dx = prop.x - x;
+      const dz = prop.z - z;
+      if (dx * dx + dz * dz > radiusSq) continue;
+      prop.hp -= amount;
+      if (prop.hp <= 0) queue.push(prop);
+    }
+    // Process the batch iteratively — each detonation can add more props
+    // to the same queue via damageNearbyChain, but never recurses.
+    while (queue.length > 0) {
+      const prop = queue.shift()!;
+      if (prop.dead) continue;
+      prop.dead = true;
+      prop.group.parent?.remove(prop.group);
+      this.debris?.spawn(prop.x, 2, prop.z, 5, 16, 0x8a5a2a, 0.7);
+      this.onPropExplosion?.(prop.x, prop.z);
+      // Chain-reaction: scar buildings and cook off neighbors.
+      // Newly dying props are pushed to the same queue.
+      this.damageNearbyChain(prop.x, prop.z, 14, 12, queue);
+    }
+  }
+
+  /** Like damageNearby but pushes dying props to a caller-owned queue
+   *  instead of recursing through damageExplosiveProps. */
+  private damageNearbyChain(x: number, z: number, radius: number, amount: number, queue: ExplosiveProp[]) {
+    const radiusSq = radius * radius;
+    for (const block of this.blocks) {
+      if (block.destroyed) continue;
+      const distSq = this.distanceToBlockFootprintSq(x, z, block);
+      if (distSq > radiusSq) continue;
+      const falloff = 1 - Math.sqrt(distSq) / Math.max(radius, 0.001);
+      this.damageBlock(block, amount * (0.35 + falloff * 0.65));
+    }
+    for (const prop of this.explosiveProps) {
+      if (prop.dead) continue;
+      const dx = prop.x - x;
+      const dz = prop.z - z;
+      if (dx * dx + dz * dz > radiusSq) continue;
+      prop.hp -= amount;
+      if (prop.hp <= 0) queue.push(prop);
+    }
+  }
+
+  private registerExplosiveProp(group: THREE.Group, x: number, z: number, hp: number) {
+    this.explosiveProps.push({ group, x, z, hp, dead: false });
   }
 
   damageProjectilePath(
@@ -794,11 +873,12 @@ export class CityEnvironment {
           Math.abs(z - depot.position.z) < 23
         ) continue;
         const roll = this.hash(id, gx * 13 + local * 37);
-        // Skyline density tapers toward the field edges.
-        const edgeFactor = 1 - Math.min(1, (Math.abs(gx) - 3) / 6) * 0.35;
+        // Skyline density tapers gently toward the field edges.
+        const edgeFactor = 1 - Math.min(1, (Math.abs(gx) - 3) / 6) * 0.22;
         // Pass 9: per-chunk scene rhythm modulates density — dense blocks,
         // open plazas and objective clearings alternate along the flight path.
-        const density = config.density * edgeFactor * rhythmDensity(rhythm);
+        // Floored at 0.85 so even "airy" rhythms keep a populated skyline.
+        const density = config.density * edgeFactor * Math.max(0.85, rhythmDensity(rhythm));
         if (roll > density) {
           // Empty cell -> breathing room: parking lot, rubble lot, courtyard, or bare ground.
           this.addOpenLot(chunk, id, x, z, gx, local, config);
@@ -1236,15 +1316,100 @@ export class CityEnvironment {
     // set of modular forms; every part shrinks inside the collision footprint,
     // so the conservative collision box / getHeightAt / damage / destruction
     // behavior is untouched.
+    //
+    // Pass 10 massing: the volume itself is seeded too — mono keeps the
+    // classic box, while composite massings (podium, L-wing, twins, setback)
+    // compose 2-3 volumes inside the same footprint so no two MEDIUM+ plots
+    // read alike.
+    const massing: BuildingMassing = skyscraper
+      ? 'mono'
+      : buildingMassing(this.hash(chunk.id, gx * 149 + local * 137), tier);
+    const capRoll = this.hash(chunk.id, gx * 41 + local * 59);
+
     const coreParts: THREE.Mesh[] = [];
     const extraMeshes: THREE.Mesh[] = [];
-    const building = createBox(width, height, depth, color);
-    building.position.set(x, height / 2, z);
-    coreParts.push(building);
 
-    const cap = createBox(width + 1.8, 1, depth + 1.8, color);
-    cap.position.set(x, height + 0.5, z);
-    coreParts.push(cap);
+    if (massing === 'podium') {
+      // Wide street base + inset tower — the classic mid-rise silhouette.
+      const podiumH = this.snap(3.5 + this.hash(chunk.id, gx * 71 + local * 11) * Math.max(2, height * 0.3));
+      const towerW = this.snap(width * (0.55 + seed * 0.15));
+      const towerD = this.snap(depth * (0.55 + seed * 0.15));
+      const offX = (width - towerW) * 0.4 * (seed > 0.5 ? 1 : -1);
+      const offZ = (depth - towerD) * 0.4 * (capRoll > 0.5 ? 1 : -1);
+      const podium = createBox(width, podiumH, depth, color);
+      podium.position.set(x, podiumH / 2, z);
+      coreParts.push(podium);
+      const towerH = Math.max(3, height - podiumH);
+      const tower = createBox(towerW, towerH, towerD, color);
+      tower.position.set(x + offX, podiumH + towerH / 2, z + offZ);
+      coreParts.push(tower);
+      const cap = createBox(towerW + 0.8, 0.8, towerD + 0.8, color);
+      cap.position.set(x + offX, podiumH + towerH + 0.4, z + offZ);
+      coreParts.push(cap);
+    } else if (massing === 'lshape') {
+      // Front wing + perpendicular side wing; the corner overlap keeps the
+      // L solid. The side wing tops out lower for a broken roofline.
+      const sideZ = seed > 0.5 ? 1 : -1;
+      const sideX = capRoll > 0.5 ? 1 : -1;
+      const wingD = this.snap(depth * 0.52);
+      const wingW = this.snap(width * 0.52);
+      const wingA = createBox(width, height, wingD, color);
+      wingA.position.set(x, height / 2, z + sideZ * (depth - wingD) * 0.5);
+      coreParts.push(wingA);
+      const hB = this.snap(Math.max(3.5, height * (0.55 + capRoll * 0.35)));
+      const wingB = createBox(wingW, hB, depth, color);
+      wingB.position.set(x + sideX * (width - wingW) * 0.5, hB / 2, z);
+      coreParts.push(wingB);
+      const cap = createBox(width + 0.6, 0.7, wingD + 0.6, color);
+      cap.position.set(x, height + 0.35, z + sideZ * (depth - wingD) * 0.5);
+      coreParts.push(cap);
+    } else if (massing === 'twins') {
+      // Two slim towers side by side, one topping out lower than the other.
+      const tW = this.snap(width * 0.44);
+      const tD = this.snap(depth * 0.82);
+      const off = (width - tW) * 0.5;
+      const hA = height;
+      const hB = this.snap(Math.max(3.5, height * (0.68 + seed * 0.24)));
+      const towerA = createBox(tW, hA, tD, color);
+      towerA.position.set(x - off * (capRoll > 0.5 ? 1 : -1), hA / 2, z);
+      coreParts.push(towerA);
+      const towerB = createBox(tW, hB, tD, color);
+      towerB.position.set(x + off * (capRoll > 0.5 ? 1 : -1), hB / 2, z);
+      coreParts.push(towerB);
+      const capA = createBox(tW + 0.7, 0.7, tD + 0.7, color);
+      capA.position.set(towerA.position.x, hA + 0.35, z);
+      coreParts.push(capA);
+      const capB = createBox(tW + 0.7, 0.7, tD + 0.7, color);
+      capB.position.set(towerB.position.x, hB + 0.35, z);
+      coreParts.push(capB);
+    } else if (massing === 'stepped') {
+      // Asymmetric setback: full base with a corner-loaded upper stage.
+      const baseH = this.snap(Math.max(3.5, height * (0.45 + seed * 0.2)));
+      const base = createBox(width, baseH, depth, color);
+      base.position.set(x, baseH / 2, z);
+      coreParts.push(base);
+      const upperW = this.snap(width * (0.52 + capRoll * 0.2));
+      const upperD = this.snap(depth * (0.52 + capRoll * 0.2));
+      const upperH = Math.max(3, height - baseH);
+      const offX = (width - upperW) * 0.42 * (seed > 0.5 ? 1 : -1);
+      const offZ = (depth - upperD) * 0.42 * (capRoll > 0.5 ? 1 : -1);
+      const upper = createBox(upperW, upperH, upperD, color);
+      upper.position.set(x + offX, baseH + upperH / 2, z + offZ);
+      coreParts.push(upper);
+      const cap = createBox(upperW + 0.8, 0.8, upperD + 0.8, color);
+      cap.position.set(x + offX, baseH + upperH + 0.4, z + offZ);
+      coreParts.push(cap);
+    } else {
+      // mono — the classic box, with a seeded cap: overhang, flush, or inset.
+      const building = createBox(width, height, depth, color);
+      building.position.set(x, height / 2, z);
+      coreParts.push(building);
+      const capPad = capRoll < 0.45 ? 1.8 : capRoll < 0.75 ? 0.4 : -width * 0.16;
+      const capH = capRoll < 0.45 ? 1 : 0.7;
+      const cap = createBox(width + capPad, capH, depth + capPad, color);
+      cap.position.set(x, height + capH / 2, z);
+      coreParts.push(cap);
+    }
 
     const archetype = buildingArchetype({
       district: config.name,
@@ -1255,7 +1420,7 @@ export class CityEnvironment {
     });
     let roofY = height + 1.8; // rooftop spawn height (raised above any structure)
 
-    if (archetype === 'steppedTower' && height > 20) {
+    if (massing === 'mono' && archetype === 'steppedTower' && height > 20) {
       // Setback tower: shrinking tiers + spire + blinking aviation light.
       let tierWidth = width * 0.72;
       let tierDepth = depth * 0.72;
@@ -1291,13 +1456,13 @@ export class CityEnvironment {
       chunk.group.add(warnLight);
       this.chunkBeacons.get(chunk.id)?.push(warnLight);
       extraMeshes.push(warnLight);
-    } else if (archetype === 'office') {
+    } else if (massing === 'mono' && archetype === 'office') {
       // Narrow office tower: a crown cap steps the head above the body.
       const crown = createBox(width * 0.8, 1.6, depth * 0.8, color);
       crown.position.set(x, height + 1.6, z);
       coreParts.push(crown);
       roofY = height + 3.6;
-    } else if (archetype === 'slab' || (archetype === 'resBlock' && tier >= 1)) {
+    } else if (massing === 'mono' && (archetype === 'slab' || (archetype === 'resBlock' && tier >= 1))) {
       // Slab / apartment block: a corner mechanical penthouse breaks the flat
       // roofline while leaving the center clear for props and turrets. Only on
       // MEDIUM+ footprints — small resBlocks stay plain so a centered turret
@@ -1307,13 +1472,13 @@ export class CityEnvironment {
       pent.position.set(x + side * width * 0.28, height + 1.4, z + side * depth * 0.28);
       coreParts.push(pent);
       roofY = height + 3.5;
-    } else if (archetype === 'warehouse') {
+    } else if (massing === 'mono' && archetype === 'warehouse') {
       // Warehouse: a low ridge running the length reads as a shed roof.
       const ridge = createBox(width * 0.92, 2.2, depth * 0.5, color);
       ridge.position.set(x, height + 1.1, z);
       coreParts.push(ridge);
       roofY = height + 3.4;
-    } else if (archetype === 'factory') {
+    } else if (massing === 'mono' && archetype === 'factory') {
       // Factory: sawtooth parapet boxes + a corner chimney.
       for (let i = 0; i < 3; i++) {
         const toothH = this.snap(1.8 + this.hash(chunk.id, i * 31 + 7) * 1.4);
@@ -1328,7 +1493,7 @@ export class CityEnvironment {
       chimney.position.set(x - width * 0.48, height + 2.25, z - depth * 0.48);
       coreParts.push(chimney);
       roofY = height + 5.7;
-    } else if (archetype === 'parking') {
+    } else if (massing === 'mono' && archetype === 'parking') {
       // Parking structure: two stacked setbacks read as ramps.
       const p1 = createBox(width * 0.85, 2.2, depth * 0.85, color);
       p1.position.set(x, height + 1.1, z);
@@ -1337,7 +1502,7 @@ export class CityEnvironment {
       p2.position.set(x, height + 3.1, z);
       coreParts.push(p2);
       roofY = height + 5.2;
-    } else if (archetype === 'comm') {
+    } else if (massing === 'mono' && archetype === 'comm') {
       // Communications building: a corner mast + dish above the block.
       const mast = createBox(0.5, 6, 0.5, color);
       mast.position.set(x + width * 0.3, height + 3, z + depth * 0.3);
@@ -1359,6 +1524,7 @@ export class CityEnvironment {
       depth,
       seed,
       archetype,
+      massing,
     );
 
     // Rooftop props + turrets need a flat, unobstructed roof center. Archetypes
@@ -1368,10 +1534,11 @@ export class CityEnvironment {
     const turretRoll = this.hash(chunk.id, gx * 61 + local * 73);
     const developed = config.name !== 'desert' && config.name !== 'forest';
     const flatRoof =
-      archetype === 'plain' ||
-      archetype === 'slab' ||
-      archetype === 'resBlock' ||
-      archetype === 'comm';
+      massing === 'mono' &&
+      (archetype === 'plain' ||
+        archetype === 'slab' ||
+        archetype === 'resBlock' ||
+        archetype === 'comm');
     const turretHere =
       developed && flatRoof && !skyscraper && height < 38 && turretRoll > 0.45 && Math.abs(x) > 38;
     const rooftopMeshes =
@@ -1434,23 +1601,31 @@ export class CityEnvironment {
     depth: number,
     seed: number,
     archetype: BuildingArchetype,
+    massing: BuildingMassing,
   ) {
     const details: THREE.Mesh[] = [];
     const isLitZone = config.name !== 'desert' && config.name !== 'forest';
     const windowColor = config.windowColor;
     const trimColor = config.trimColor;
-    const bandCount = isLitZone ? Math.max(1, Math.min(3, Math.floor(height / 8))) : 1;
+    // Composite massings inset their upper volumes, so full-width facade
+    // stripes would float in mid-air — they get the base band only, and their
+    // silhouette does the talking.
+    const bandCount =
+      massing !== 'mono' ? 0 : isLitZone ? Math.max(1, Math.min(3, Math.floor(height / 8))) : 1;
+    const detailSeed = Math.floor(seed * 1000);
 
     for (let i = 0; i < bandCount; i++) {
       const y = 3.4 + i * (height / (bandCount + 0.45));
       const bandHeight = isLitZone ? 0.34 : 0.22;
       // Pass 8: windows stay controlled accents — fewer lit bands, softer
       // opacity — so facades read as texture, never as glowing grids.
-      const lit = isLitZone && this.hash(chunk.id, Math.floor(seed * 1000) + i * 29) > 0.3;
+      const lit = isLitZone && this.hash(chunk.id, detailSeed + i * 29) > 0.3;
       const materialColor = lit ? windowColor : trimColor;
       const opacity = lit ? 0.5 : 0.22;
+      // Pass 10: seeded band width — no two facades carry identical stripes.
+      const bandW = width * (0.5 + this.hash(chunk.id, detailSeed + i * 13) * 0.3);
 
-      const front = createGlowBox(width * 0.62, bandHeight, 0.08, materialColor, opacity);
+      const front = createGlowBox(bandW, bandHeight, 0.08, materialColor, opacity);
       front.position.set(x, y, z + depth * 0.5 + 0.08);
       chunk.group.add(front);
       details.push(front);
@@ -1465,13 +1640,32 @@ export class CityEnvironment {
       }
     }
 
-    if (height > 14 && seed > 0.42) {
+    if (massing === 'mono' && height > 14 && seed > 0.42) {
       const beacon = createGlowBox(1.2, 0.5, 1.2, seed > 0.7 ? 0xff3344 : 0xffe66d, 0.9);
       beacon.position.set(x, height + 1.22, z + depth * 0.18);
       beacon.userData.phase = seed * Math.PI * 2;
       chunk.group.add(beacon);
       this.chunkBeacons.get(chunk.id)?.push(beacon);
       details.push(beacon);
+    }
+
+    // Pass 10 facade variety: a street-level base band grounds the mass, and
+    // taller towers get paired vertical pilasters that break up flat walls.
+    // Both are single glow boxes — near-zero cost, kept off the corridor.
+    if (height > 9 && Math.abs(x) > 34) {
+      const base = createGlowBox(width * 0.96, 1.4, 0.08, trimColor, 0.25);
+      base.position.set(x, 1.1, z + depth * 0.5 + 0.08);
+      chunk.group.add(base);
+      details.push(base);
+    }
+    if (isLitZone && massing === 'mono' && height > 13 && Math.abs(x) > 34 && this.hash(chunk.id, detailSeed + 7) > 0.55) {
+      const pilH = height * 0.72;
+      for (const px of [-1, 1]) {
+        const pilaster = createGlowBox(0.3, pilH, 0.08, trimColor, 0.28);
+        pilaster.position.set(x + px * width * 0.32, pilH / 2 + 1.2, z + depth * 0.5 + 0.08);
+        chunk.group.add(pilaster);
+        details.push(pilaster);
+      }
     }
 
     // Archetype accents (Pass 6): a few cheap emissive strips that make the
@@ -2388,6 +2582,8 @@ export class CityEnvironment {
         const tank = buildStorageTank(Math.floor(this.hash(id, gx * 361 + local * 367) * 4), config.accentColor);
         tank.position.set(x + w * 0.18, 0, z - d * 0.12);
         chunk.group.add(tank);
+        // C4: full fuel tank — volatile.
+        this.registerExplosiveProp(tank, x + w * 0.18, z - d * 0.12, 30);
         const pipes = buildPipeRun();
         pipes.position.set(x - w * 0.25, 0, z + d * 0.22);
         pipes.rotation.y = this.hash(id, gx * 373 + local * 379) * Math.PI;
@@ -2397,6 +2593,8 @@ export class CityEnvironment {
         const gen = buildGenerator();
         gen.position.set(x - w * 0.2, 0, z - d * 0.1);
         chunk.group.add(gen);
+        // C4: transformer generator — pops when shot up.
+        this.registerExplosiveProp(gen, x - w * 0.2, z - d * 0.1, 22);
         for (let i = 0; i < 2; i++) {
           const crate = buildCrate(Math.floor(this.hash(id, gx + i * 31) * 4));
           crate.position.set(x + w * 0.25 + i * 2.2, 0, z + d * 0.2);
@@ -2908,18 +3106,37 @@ export class CityEnvironment {
     return mat;
   }
 
-  /** Kick off the collapse-out sequence: dust burst, physics off, then a 0.5s fall. */
+  /** Kick off the collapse sequence: staged top-down crumble, physics off, dust + debris. */
   private startBlockCollapse(block: CityBlock) {
     block.destroyed = true;
     block.collapseProgress = 0;
     block.initialHeights = block.meshes.map((m) => m.position.y);
 
+    // Staged crumble: compute each mesh's start delay from its height fraction
+    // so the roof tier lets go first and the base holds until the end.
+    const heights = block.initialHeights;
+    let minH = Infinity;
+    let maxH = -Infinity;
+    for (const h of heights) {
+      if (h < minH) minH = h;
+      if (h > maxH) maxH = h;
+    }
+    const span = Math.max(0.001, maxH - minH);
+    const MAX_DELAY = 0.34;
+    block.collapseDelays = heights.map((h) => (1 - (h - minH) / span) * MAX_DELAY);
+    block.collapseDuration = MAX_DELAY + CityEnvironment.COLLAPSE_FALL_TIME;
+    // The whole block shears sideways a little as it crumbles ( pancake falls
+    // read flat; a drift direction sells weight ).
+    const shearAngle = Math.random() * Math.PI * 2;
+    block.collapseShearX = Math.cos(shearAngle);
+    block.collapseShearZ = Math.sin(shearAngle);
+
     if (block.body) {
       block.body.collisionFilterMask = 0;
       block.body.collisionResponse = false;
     }
+    const now = performance.now() / 1000;
     if (this.particles) {
-      const now = performance.now() / 1000;
       this.particles.spawnExplosion(
         block.x,
         block.height * 0.5,
@@ -2941,20 +3158,44 @@ export class CityEnvironment {
       this.particles.spawnSmoke(block.x + 3, block.height * 0.3, block.z - 2, now);
       this.particles.spawnSmoke(block.x - 3, block.height * 0.2, block.z + 2, now);
     }
+    // Physical debris chunks, tinted from the building's own palette color.
+    if (this.debris) {
+      let tint = 0x6a625a;
+      const firstMat = block.meshes[0]?.material;
+      if (firstMat instanceof THREE.MeshLambertMaterial || firstMat instanceof THREE.MeshToonMaterial) {
+        const base = firstMat.userData.baseColor as THREE.Color | undefined;
+        if (base) tint = base.getHex();
+        else if (firstMat.color) tint = firstMat.color.getHex();
+      }
+      const count = Math.min(12, 6 + Math.floor(Math.min(block.width, block.height) / 8));
+      this.debris.spawn(block.x, block.height * 0.55, block.z, now, count, 18 + block.height * 0.35, tint, 0.8 + block.width * 0.04);
+    }
+    // Pressure-wave dust ring rolling out from the footprint.
+    this.shockwaves?.spawn(block.x, 0.4, block.z, now, Math.max(18, block.width * 2.2), 0xd8c9a2, 0.9);
   }
 
-  /** Collapse animation: everything sinks and tilts, then the block is removed. */
+  private static readonly COLLAPSE_FALL_TIME = 0.46;
+
+  /** Collapse animation: tiers crumble top-down with shear, then the block is removed. */
   private animateCollapses(delta: number) {
     for (const block of this.blocks) {
       if (!block.destroyed || block.collapseProgress === undefined) continue;
-      block.collapseProgress += delta * 1.9;
-      const p = Math.min(1, block.collapseProgress);
+      block.collapseProgress += delta;
+      const progress = block.collapseProgress;
       const fall = 8 + block.height * 0.3;
+      const fallTime = CityEnvironment.COLLAPSE_FALL_TIME;
+      const duration = block.collapseDuration ?? 0.6;
+      const shearX = block.collapseShearX ?? 0;
+      const shearZ = block.collapseShearZ ?? 0;
       for (let i = 0; i < block.meshes.length; i++) {
         const m = block.meshes[i];
         // Rooftop prop children ride their group down as a unit (their local y
         // is not world y, so the per-mesh fall below would misplace them).
         const propGroup = m.userData.propGroup as THREE.Group | undefined;
+        const delay = block.collapseDelays?.[i] ?? 0;
+        const local = Math.min(1, Math.max(0, (progress - delay) / fallTime));
+        if (local <= 0) continue;
+        const p = local;
         if (propGroup) {
           if (propGroup.userData.collapseBase === undefined) {
             propGroup.userData.collapseBase = propGroup.position.y;
@@ -2964,9 +3205,18 @@ export class CityEnvironment {
         }
         const baseY = block.initialHeights?.[i] ?? 0;
         m.position.y = baseY - p * p * fall;
-        m.rotation.z = p * (0.08 + (i % 3) * 0.06);
+        // Shear: the tier slides sideways as it drops, rotating into the drift.
+        m.position.x += shearX * delta * 6 * p;
+        m.position.z += shearZ * delta * 6 * p;
+        m.rotation.z = p * (0.08 + (i % 3) * 0.06) + p * shearX * 0.1;
+        m.rotation.x = p * shearZ * 0.08;
+        // One dust puff per tier, fired as that tier lets go.
+        if (!m.userData.collapsePuffed && this.particles) {
+          m.userData.collapsePuffed = true;
+          this.particles.spawnSmoke(m.position.x, baseY, m.position.z, performance.now() / 1000);
+        }
       }
-      if (p >= 1) this.finishBlockCollapse(block);
+      if (progress >= duration) this.finishBlockCollapse(block);
     }
   }
 

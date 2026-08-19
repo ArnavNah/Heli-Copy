@@ -3,13 +3,22 @@ import type * as CANNON from "cannon-es";
 import type { SamState } from "./sam";
 import type { MissionType } from "./mission";
 
+/** Structural type compatible with both CANNON.Vec3 and THREE.Vector3.
+ *  Used to avoid `as any` casts when copying physics positions to render meshes. */
+export interface Vec3Like { x: number; y: number; z: number }
+
+/** Copy a cannon-es Vec3 (or any {x,y,z}) into a Three.js Object3D position. */
+export function copyPhysicsPos(mesh: THREE.Object3D, pos: Vec3Like): void {
+  mesh.position.set(pos.x, pos.y, pos.z);
+}
+
 // Desert warzone art direction: warm hazy sky over a sand battlefield. The
 // clear sky is a pale dry blue, and the fog is a dust-colored haze so distant
 // structures melt into the horizon instead of turning cyan. Storm colors stay
 // dark/moody so silhouettes remain readable.
 export const SKY_CLEAR_COLOR = 0xa9c6d3;
 export const SKY_STORM_COLOR = 0x55656b;
-export const FOG_CLEAR_COLOR = 0xd8c9a2;
+export const FOG_CLEAR_COLOR = 0xe6d3a2;
 export const FOG_STORM_COLOR = 0x3a4038;
 /**
  * Linear fog band (low-poly pass): near-field combat stays completely clear,
@@ -45,6 +54,13 @@ export type CityBlock = {
   destroyed: boolean;
   collapseProgress?: number;
   initialHeights?: number[];
+  /** Per-mesh crumble delay (seconds) — roof tier falls first, base last. */
+  collapseDelays?: number[];
+  /** Total collapse duration in seconds (max delay + per-tier fall time). */
+  collapseDuration?: number;
+  /** Lateral shear direction the building slides toward while crumbling. */
+  collapseShearX?: number;
+  collapseShearZ?: number;
   /** True once the collapse-out sequence has finished (fires onBuildingDestroyed once). */
   collapseFinished?: boolean;
   /** Camera-occlusion ghost factor 0..1 (0 = fully visible, 1 = fully ghosted). */
@@ -108,7 +124,7 @@ export type MinimapMission = {
   x: number;
   z: number;
   type: MissionType;
-  targetKind?: "SAM" | "RADAR" | "DELIVERY" | "ELITE" | "AREA";
+  targetKind?: "SAM" | "RADAR" | "DELIVERY" | "ELITE" | "AREA" | "CONVOY" | "CRASH_SITE";
 };
 
 export interface MinimapSnapshot {
@@ -137,12 +153,15 @@ export type StickInput = {
 };
 
 export type QualityPreset = 'low' | 'medium' | 'high';
+/** Graphics mode: SP1 = chunky low-res PS1-style pixels; HD = crisp full-res render. */
+export type GraphicsMode = 'sp1' | 'hd';
 export type Difficulty = 'casual' | 'normal' | 'hard';
 
 export interface GameSettings {
   invertedY: boolean;
   gamepadSensitivity: number;
   quality: QualityPreset;
+  graphics: GraphicsMode;
   volume: number;
   touchMode: boolean;
   difficulty: Difficulty;
@@ -175,6 +194,12 @@ export enum EnemyVariant {
   REPAIR_DRONE = "REPAIR_DRONE",
   HEAVY_GUNSHIP = "HEAVY_GUNSHIP",
   SIEGE_TANK = "SIEGE_TANK",
+  /** Fast jet — strafes in with short bursts, then peels off to re-attack. */
+  INTERCEPTOR = "INTERCEPTOR",
+  /** Slow hover platform that lobs slow, homing proximity mines. */
+  MINELAYER = "MINELAYER",
+  /** Armored gunship with a wind-up tracking gatling stream. */
+  GATLING_HEAVY = "GATLING_HEAVY",
 }
 
 export enum EnemyModifier {
@@ -182,7 +207,13 @@ export enum EnemyModifier {
   SHIELDED = 1, // Absorbs first N hits with an energy shield
   REGENERATING = 2, // Slowly heals when not recently damaged
   ELITE = 4, // Miniboss-tier: bigger, tougher, worth more
+  EXPLOSIVE = 8, // Detonates on death — the blast hurts EVERYTHING nearby
+  SPLITTER = 16, // Breaks into drone escorts on death
+  VAMPIRIC = 32, // Heals itself when its shots connect with the player
 }
+
+/** Elemental status effects the player can inflict (burn DoT / EMP silence / shock slow). */
+export type StatusEffectKind = 'burn' | 'emp' | 'shock';
 
 export enum AttackPattern {
   CHASE = 0, // Default: approach and strafe

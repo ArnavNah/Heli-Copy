@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BonusObjectiveType, MissionManager, MissionState, MissionType } from "./mission";
+import { BonusObjectiveType, MissionManager, MissionState, MissionType, convoyPositionAt } from "./mission";
 
 const runtime = (healthRatio = 1, carryingCargo = false) => ({ player: { x: 0, y: 20, z: 0 }, healthRatio, carryingCargo });
 const context = (wave = 1) => ({
@@ -14,7 +14,7 @@ const context = (wave = 1) => ({
 function generateType(type: MissionType) {
   const manager = new MissionManager();
   let mission = null;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     mission = manager.tryGenerate(10 + i * 40, context(4));
     if (mission?.type === type) return { manager, mission };
     if (mission) manager.failActive(mission.id, 10 + i * 40);
@@ -94,8 +94,11 @@ describe("MissionManager", () => {
       if (active?.type === MissionType.DESTROY_SAM) manager.reportObjectiveDestroyed("sam-1", "SAM", time, runtime());
       else if (active?.type === MissionType.DESTROY_RADAR) manager.reportObjectiveDestroyed("radar-1", "RADAR", time, runtime());
       else if (active?.type === MissionType.HIGH_VALUE_TARGET) manager.reportEnemyDestroyed(active.targetId, true, time, runtime());
+      else if (active?.type === MissionType.BOUNTY) manager.reportEnemyDestroyed(active.targetId, true, time, runtime());
       else if (active?.type === MissionType.CLEAR_AIRSPACE) manager.reportEnemyDestroyed(undefined, false, time, runtime(), active.destination);
       else if (active?.type === MissionType.DEFEND) manager.update(time, 1, { ...runtime(), player: { ...active.origin! } });
+      else if (active?.type === MissionType.RESCUE) manager.update(time, 1, { ...runtime(), player: { ...active.origin! } });
+      else if (active?.type === MissionType.ESCORT) manager.update(time, 1, { ...runtime(), player: { ...convoyPositionAt(active, time) } });
       else if (active?.type === MissionType.DELIVERY) manager.reportDeliveryComplete("delivery-1", time, runtime());
       let completed = manager.takeCompleted();
       while (completed) {

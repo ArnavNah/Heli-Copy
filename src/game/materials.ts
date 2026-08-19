@@ -239,6 +239,43 @@ export function createBox(
   return mesh;
 }
 
+// --- Fake blob shadows ------------------------------------------------------
+// shadowMap is disabled for perf, so entities get a radial-gradient decal on
+// the street instead. One shared CanvasTexture; each mesh owns its material
+// so per-instance opacity (altitude fade) never mutates shared state.
+let blobShadowTexture: THREE.CanvasTexture | null = null;
+
+function getBlobShadowTexture(): THREE.CanvasTexture {
+  if (blobShadowTexture) return blobShadowTexture;
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const g = ctx.createRadialGradient(size / 2, size / 2, size * 0.08, size / 2, size / 2, size / 2);
+  g.addColorStop(0, "rgba(0, 0, 0, 0.55)");
+  g.addColorStop(0.65, "rgba(0, 0, 0, 0.28)");
+  g.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  blobShadowTexture = new THREE.CanvasTexture(canvas);
+  return blobShadowTexture;
+}
+
+/** Flat radial-gradient decal laid on the street under a flying entity. */
+export function createBlobShadow(radius: number): THREE.Mesh {
+  const geometry = new THREE.PlaneGeometry(radius * 2, radius * 2);
+  geometry.rotateX(-Math.PI / 2);
+  const material = new THREE.MeshBasicMaterial({
+    map: getBlobShadowTexture(),
+    transparent: true,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = 1;
+  return mesh;
+}
+
 const cylinderGeometryCache = new Map<string, THREE.BufferGeometry>();
 
 /** Return a shared low-poly cylinder geometry (8-sided chunky silhouette). */

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
 import { Helicopter, MOVEMENT_CONFIG, type MovementCommand } from './entities';
+import { HelicopterModel } from './types';
 
 const NEUTRAL: MovementCommand = { x: 0, y: 0, z: 0, afterburner: 1 };
 const FORWARD: MovementCommand = { x: 0, y: 0, z: -1, afterburner: 1 };
@@ -15,7 +16,7 @@ interface TestRig {
 
 const rigs: TestRig[] = [];
 
-function createRig(): TestRig {
+function createRig(model: HelicopterModel = HelicopterModel.APACHE): TestRig {
   const scene = new THREE.Scene();
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, 0, 0) });
   world.defaultContactMaterial.friction = 0;
@@ -23,7 +24,7 @@ function createRig(): TestRig {
   const rig = {
     scene,
     world,
-    helicopter: new Helicopter(scene, world),
+    helicopter: new Helicopter(scene, world, model),
     time: 0,
   };
   rigs.push(rig);
@@ -161,6 +162,94 @@ describe('arcade helicopter movement', () => {
     const referenceDistance = 127;
     expect(-rig.helicopter.body.position.z).toBeGreaterThan(referenceDistance - 4);
     expect(-rig.helicopter.body.position.z).toBeLessThan(referenceDistance + 4);
+  });
+});
+
+describe('handling upgrades', () => {
+  it('settles onto the hover floor with a damped spring, never slamming through', () => {
+    const rig = createRig();
+    const body = rig.helicopter.body;
+    body.position.y = 12;
+    body.velocity.y = -10;
+
+    let minY = body.position.y;
+    const dt = 1 / 60;
+    for (let i = 0; i < 240; i++) {
+      step(rig, dt, NEUTRAL, false);
+      minY = Math.min(minY, body.position.y);
+    }
+
+    // Under-damped settle: may dip slightly under the clearance band while
+    // the spring absorbs the descent, but never slams through the floor.
+    expect(minY).toBeGreaterThan(5.5);
+    expect(body.position.y).toBeGreaterThan(MOVEMENT_CONFIG.hoverClearance - 1);
+    expect(body.position.y).toBeLessThan(MOVEMENT_CONFIG.hoverClearance + 3);
+    expect(Math.abs(body.velocity.y)).toBeLessThan(2);
+  });
+
+  it('swings the nose with a yaw-rate limit instead of snapping', () => {
+    const rig = createRig();
+    const strafeRight: MovementCommand = { x: 1, y: 0, z: 0, afterburner: 1 };
+
+    step(rig, 1 / 60, strafeRight);
+    // A rate limit of ~7 rad/s caps the first frame well under a radian;
+    // the old exponential snap would have jumped a large fraction of π/2.
+    expect(rig.helicopter.mesh.rotation.y).toBeLessThan(0.3);
+
+    simulate(rig, 1, 60, strafeRight);
+    expect(rig.helicopter.mesh.rotation.y).toBeCloseTo(Math.PI / 2, 1);
+  });
+
+  it('pitches the nose up when climbing and down when descending', () => {
+    const climber = createRig();
+    simulate(climber, 0.4, 60, { ...NEUTRAL, y: 1 });
+    expect(climber.helicopter.mesh.rotation.x).toBeLessThan(-0.02);
+
+    const diver = createRig();
+    simulate(diver, 0.25, 60, { ...NEUTRAL, y: -1 });
+    expect(diver.helicopter.mesh.rotation.x).toBeGreaterThan(0.01);
+  });
+
+  it('drifts with storm gusts while hovering', () => {
+    const rig = createRig();
+    const wind = new CANNON.Vec3(150, 0, 0);
+    const dt = 1 / 60;
+    for (let i = 0; i < 90; i++) {
+      rig.time += dt;
+      rig.helicopter.setHoverFloor(0);
+      rig.helicopter.update(rig.time, dt, wind, undefined, false, false, false, NEUTRAL);
+      rig.world.step(1 / 60, dt, 3);
+      rig.helicopter.syncBodyTransform();
+    }
+
+    expect(rig.helicopter.body.velocity.x).toBeGreaterThan(4);
+    expect(rig.helicopter.body.position.x).toBeGreaterThan(4);
+  });
+
+  it('gives Warlock and Nighthawk distinct speed envelopes', () => {
+    const warlock = createRig(HelicopterModel.WARLOCK);
+    const nighthawk = createRig(HelicopterModel.NIGHTHAWK);
+
+    simulate(warlock, 2, 60, FORWARD);
+    simulate(nighthawk, 2, 60, FORWARD);
+
+    const warlockSpeed = -warlock.helicopter.body.velocity.z;
+    const nighthawkSpeed = -nighthawk.helicopter.body.velocity.z;
+    expect(warlockSpeed).toBeLessThan(MOVEMENT_CONFIG.maxHorizontalSpeed);
+    expect(nighthawkSpeed).toBeGreaterThan(MOVEMENT_CONFIG.maxHorizontalSpeed);
+    expect(nighthawkSpeed - warlockSpeed).toBeGreaterThan(8);
+  });
+
+  it('accelerates Warlock slower than Nighthawk off the line', () => {
+    const warlock = createRig(HelicopterModel.WARLOCK);
+    const nighthawk = createRig(HelicopterModel.NIGHTHAWK);
+
+    simulate(warlock, 0.12, 60, FORWARD);
+    simulate(nighthawk, 0.12, 60, FORWARD);
+
+    expect(-nighthawk.helicopter.body.velocity.z).toBeGreaterThan(
+      -warlock.helicopter.body.velocity.z,
+    );
   });
 });
 

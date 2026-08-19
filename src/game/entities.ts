@@ -3,6 +3,7 @@ import * as CANNON from "cannon-es";
 import { createBox, createGlowBox, createGlowMaterial, createLowPolyMaterial, disposeObject3D } from "./materials";
 import {
   AttackPattern,
+  copyPhysicsPos,
   EnemyLock,
   EnemyModifier,
   EnemyType,
@@ -10,9 +11,13 @@ import {
   HelicopterModel,
   ObjectiveType,
   PowerUpType,
+  type StatusEffectKind,
 } from "./types";
 import {
   BOSS_TELEGRAPH_DURATION,
+  BURN_DPS,
+  SHOCK_SPEED_MULT,
+  STATUS_DURATIONS,
   bossPhaseForRatio,
   bossVolleyConfig,
   objectiveConfig,
@@ -49,7 +54,7 @@ export class Entity {
 
   update(time: number = 0) {
     if (this.active && this.mesh && this.body) {
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
       // We don't copy quaternion directly because we manually bank/tilt the mesh for stylized physics
     }
   }
@@ -117,6 +122,31 @@ export const MOVEMENT_CONFIG = {
 } as const;
 
 /**
+ * Per-model handling profiles — the Hangar choice is more than paint. Warlock
+ * flies heavy (slower, wider turns, deeper bank), Nighthawk is light and agile
+ * (faster, snappier, shallower bank). Multipliers scale the shared arcade
+ * controller so every model keeps the same core feel with a distinct weight.
+ */
+const MODEL_MOVEMENT = {
+  [HelicopterModel.APACHE]: { speed: 1, accel: 1, turn: 1, bank: 1 },
+  [HelicopterModel.NIGHTHAWK]: { speed: 1.08, accel: 1.12, turn: 1.2, bank: 0.92 },
+  [HelicopterModel.WARLOCK]: { speed: 0.92, accel: 0.84, turn: 0.8, bank: 1.12 },
+} as const;
+
+/**
+ * Hover-settle spring — when the pilot releases vertical control near the
+ * terrain floor, the helicopter settles on a damped spring instead of a
+ * linear stop, so landings read as weighty instead of snapping to a hover.
+ * Under-damped (DAMP < 2*sqrt(K)) for a soft, readable settle, never a bounce.
+ */
+const HOVER_SPRING = {
+  RANGE: 14, // engage within this many units above the floor + clearance
+  K: 20, // stiffness
+  DAMP: 6.4, // 2*sqrt(20)*~0.72 — under-damped settle
+  MAX_SETTLE: 12, // settle speed cap (u/s)
+} as const;
+
+/**
  * Phase 2 — per-frame movement command from the engine. Inputs are
  * world-space and already normalized: x = strafe (A/D), z = forward (W/S,
  * -z is forward), y = vertical -1..1 (Space/Alt), afterburner = speed
@@ -167,6 +197,12 @@ export class Helicopter extends Entity {
   desiredVelocity: CANNON.Vec3 = new CANNON.Vec3();
   currentAcceleration: CANNON.Vec3 = new CANNON.Vec3();
   private filteredAcceleration: CANNON.Vec3 = new CANNON.Vec3();
+  /** A3: external knockback velocity (explosions, heavy-weapon recoil).
+   *  Folded into the desired-velocity controller and decayed exponentially,
+   *  so the kick never fights player input. */
+  private impulseVelocity: THREE.Vector2 = new THREE.Vector2();
+  private static readonly MAX_IMPULSE = 55;
+  private static readonly IMPULSE_DECAY = 2.8; // /s exponential
   private terrainSafetyActive = false;
   private trailEffectTimer = 0;
   private damageEffectTimer = 0;
@@ -729,6 +765,24 @@ export class Helicopter extends Entity {
     }
 
     let desiredVy = inputY * cfg.maxVerticalSpeed * engineEff * cargoMultiplier;
+
+    // Hover-settle spring: with no vertical input near the floor, ease down
+    // onto a damped spring so landings have weight. The safety floor below
+    // still wins when penetration occurs, and the spring is capped so it
+    // never feels like a vacuum suction.
+    if (Math.abs(inputY) < 0.01) {
+      const floorY = this.smoothedHoverFloor + cfg.hoverClearance;
+      const heightAbove = this.body.position.y - floorY;
+      if (heightAbove < HOVER_SPRING.RANGE && heightAbove > -3) {
+        const springAccel = -HOVER_SPRING.K * heightAbove - HOVER_SPRING.DAMP * this.body.velocity.y;
+        desiredVy = THREE.MathUtils.clamp(
+          this.body.velocity.y + springAccel * delta,
+          -HOVER_SPRING.MAX_SETTLE,
+          HOVER_SPRING.MAX_SETTLE,
+        );
+      }
+    }
+
     if (this.terrainSafetyActive) {
       if (desiredVy < 0) desiredVy = 0;
       const safetyCorrection = safetyFloorY - this.body.position.y;
@@ -800,6 +854,26 @@ export class Helicopter extends Entity {
     this.firePitchImpulse = Math.min(Helicopter.FIRE_PITCH_MAX, Math.max(this.firePitchImpulse, amount));
   }
 
+  /**
+   * A3: external knockback (explosion blasts, heavy-weapon recoil). Applies
+   * an instant velocity kick and tracks it in impulseVelocity, which the
+   * velocity controller folds into its desired velocity — the push decays
+   * smoothly instead of being braked away. Horizontal only.
+   */
+  addImpulse(ix: number, iz: number) {
+    if (!Number.isFinite(ix) || !Number.isFinite(iz)) return;
+    const nx = this.impulseVelocity.x + ix;
+    const nz = this.impulseVelocity.y + iz;
+    const mag = Math.sqrt(nx * nx + nz * nz);
+    const scale = mag > Helicopter.MAX_IMPULSE ? Helicopter.MAX_IMPULSE / mag : 1;
+    const appliedX = nx * scale - this.impulseVelocity.x;
+    const appliedZ = nz * scale - this.impulseVelocity.y;
+    this.impulseVelocity.x = nx * scale;
+    this.impulseVelocity.y = nz * scale;
+    this.body.velocity.x += appliedX;
+    this.body.velocity.z += appliedZ;
+  }
+
   /** Advance the visual recoil/fire-pitch spring back to rest. */
   private updateFireFeedback(delta: number) {
     if (this.gunRecoil > 0.0005) {
@@ -852,6 +926,7 @@ export class Helicopter extends Entity {
     this.desiredVelocity.set(0, 0, 0);
     this.currentAcceleration.set(0, 0, 0);
     this.filteredAcceleration.set(0, 0, 0);
+    this.impulseVelocity.set(0, 0);
     this.gunYawPivot.rotation.y = 0;
     this.gunPitchPivot.rotation.x = 0;
     this.targetPosition.set(0, 26, 0);
@@ -925,7 +1000,7 @@ export class Helicopter extends Entity {
         this.mesh.rotation.z = 0;
       }
 
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
 
       if (particles && this.trailEffectTimer === 0) {
         this.trailEffectTimer = 0.04;
@@ -1000,6 +1075,7 @@ export class Helicopter extends Entity {
     // and easy to correct. Diagonal input is normalized upstream, so W+D moves
     // at the same max speed as W alone.
     const cfg = MOVEMENT_CONFIG;
+    const profile = MODEL_MOVEMENT[this.model];
     const moveX = move?.x ?? 0;
     const moveZ = move?.z ?? 0;
     const moveY = move?.y ?? 0;
@@ -1009,10 +1085,18 @@ export class Helicopter extends Entity {
       (speedBoostActive ? cfg.speedBoostMultiplier : 1) *
       engineEff *
       cargoMultiplier;
-    const maxSpeed = cfg.maxHorizontalSpeed * speedMult;
+    const maxSpeed = cfg.maxHorizontalSpeed * speedMult * profile.speed;
 
-    const desiredVx = moveX * maxSpeed;
-    const desiredVz = moveZ * maxSpeed;
+    let desiredVx = moveX * maxSpeed + this.impulseVelocity.x;
+    let desiredVz = moveZ * maxSpeed + this.impulseVelocity.y;
+
+    // Storm wind nudges the aircraft — a gentle, always-present drift that
+    // scales with storm intensity. Small next to full-throttle control, but
+    // it makes weather a real (minor) flying condition at idle and low speed.
+    if (windForce && (windForce.x !== 0 || windForce.z !== 0)) {
+      desiredVx += THREE.MathUtils.clamp(windForce.x * 0.055, -9, 9);
+      desiredVz += THREE.MathUtils.clamp(windForce.z * 0.055, -9, 9);
+    }
     this.desiredVelocity.x = desiredVx;
     this.desiredVelocity.z = desiredVz;
 
@@ -1030,7 +1114,7 @@ export class Helicopter extends Entity {
         ? cfg.horizontalBraking
         : cfg.horizontalAcceleration;
     if ((move?.afterburner ?? 1) > 1) acceleration *= cfg.afterburnerAccelerationMultiplier;
-    acceleration *= authority * rotorEff * cargoMultiplier;
+    acceleration *= authority * rotorEff * cargoMultiplier * profile.accel;
 
     const deltaVx = desiredVx - vx;
     const deltaVz = desiredVz - vz;
@@ -1047,8 +1131,17 @@ export class Helicopter extends Entity {
     if (desiredSpeed === 0 && Math.abs(this.body.velocity.x) < 0.02) this.body.velocity.x = 0;
     if (desiredSpeed === 0 && Math.abs(this.body.velocity.z) < 0.02) this.body.velocity.z = 0;
 
-    // Weather wind remains visual/audio only; it never causes idle player drift.
-    void windForce;
+    // A3: decay external knockback — as it fades, the desired velocity
+    // returns to pure input and the controller brakes back to normal flight.
+    if (this.impulseVelocity.x !== 0 || this.impulseVelocity.y !== 0) {
+      this.impulseVelocity.multiplyScalar(Math.exp(-Helicopter.IMPULSE_DECAY * delta));
+      if (Math.abs(this.impulseVelocity.x) < 0.05 && Math.abs(this.impulseVelocity.y) < 0.05) {
+        this.impulseVelocity.set(0, 0);
+      }
+    }
+
+    // Wind drift was folded into desiredVx/desiredVz above — the velocity
+    // controller below brakes back to pure input as the gust fades.
 
     // Step 8/9: vertical is separate from horizontal — climb/descend with its
     // own accel/brake/cap, plus a terrain-safety floor and altitude cap.
@@ -1094,15 +1187,16 @@ export class Helicopter extends Entity {
     while (diff < -Math.PI) diff += Math.PI * 2;
     while (diff > Math.PI) diff -= Math.PI * 2;
 
-    // Turn the nose toward travel at a deliberately slower rate so the ship
-    // shows cross-controlled banking: strafing left drifts the hull sideways
-    // with a visible bank while the nose swings in behind the motion (Phase 2
-    // physics — helicopter-like weight instead of an instantly-aligned nose).
-    const headingResponse = (4.35 + inputAgility * 4.0) * rotorEff;
-    this.mesh.rotation.y += diff * (1 - Math.exp(-headingResponse * delta));
+    // Turn the nose toward travel with a yaw-RATE limit: at speed the aircraft
+    // swings wide (helicopter inertia), at hover it pivots tight. The limit
+    // replaces the old exponential snap so high-speed turns read as weighty.
+    const speedRatioTurn = THREE.MathUtils.clamp(speed / Math.max(maxSpeed, 1), 0, 1);
+    const maxYawRate = THREE.MathUtils.lerp(7.0, 3.0, speedRatioTurn) * rotorEff * profile.turn * (1 + inputAgility * 0.25);
+    const maxStep = maxYawRate * delta;
+    this.mesh.rotation.y += THREE.MathUtils.clamp(diff, -maxStep, maxStep);
 
     // Synchronize the visual root before converting world aim into turret-local space.
-    this.mesh.position.copy(this.body.position as any);
+    copyPhysicsPos(this.mesh, this.body.position);
 
     // Rotating chin gun turret (separate yaw/pitch pivots) — tracks the auto-aim
     // target, or eases to neutral. ONLY the gun moves; the helicopter body stays
@@ -1184,6 +1278,10 @@ export class Helicopter extends Entity {
         -PITCH_LIMIT,
         PITCH_LIMIT,
       );
+    // Climb pitches the nose up, descent pitches it down — vertical motion now
+    // has a visible attitude, so the hull reads as flying a 3D vector instead
+    // of a hovering turret on a flat plane.
+    const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0011, -0.06, 0.06);
     const targetTiltZ =
       -THREE.MathUtils.clamp(
         (localVx * 0.0046 +
@@ -1193,7 +1291,7 @@ export class Helicopter extends Entity {
         ROLL_LIMIT,
       );
     const targetPitch = THREE.MathUtils.clamp(
-      targetTiltX + this.firePitchImpulse,
+      targetTiltX + climbPitch + this.firePitchImpulse,
       -PITCH_LIMIT,
       PITCH_LIMIT,
     );
@@ -1206,9 +1304,9 @@ export class Helicopter extends Entity {
         ? BANK_IN_RESPONSE
         : BANK_OUT_RESPONSE;
     this.mesh.rotation.x +=
-      (targetPitch - this.mesh.rotation.x) * (1 - Math.exp(-bankRespX * delta));
+      (targetPitch - this.mesh.rotation.x) * (1 - Math.exp(-bankRespX * profile.bank * delta));
     this.mesh.rotation.z +=
-      (targetTiltZ - this.mesh.rotation.z) * (1 - Math.exp(-bankRespZ * delta));
+      (targetTiltZ - this.mesh.rotation.z) * (1 - Math.exp(-bankRespZ * profile.bank * delta));
 
     // Rotor animation never perturbs the helicopter transform.
     this.mainRotor.position.y = 2.1;
@@ -1218,7 +1316,7 @@ export class Helicopter extends Entity {
 
   /** Synchronize the presentation root after CANNON integrates the player body. */
   syncBodyTransform() {
-    if (this.active) this.mesh.position.copy(this.body.position as any);
+    if (this.active) copyPhysicsPos(this.mesh, this.body.position);
   }
 
   private updateAccelerationState(delta: number) {
@@ -1266,13 +1364,17 @@ export class Helicopter extends Entity {
     this.mainRotor.rotation.y -= visualSpeed * delta;
     this.tailRotor.rotation.x -= visualSpeed * 1.35 * delta;
 
-    // Toggle Blur meshes based on speed
-    const isFast = this.rotorSpeed > 28;
-    const blurDisc = this.mainRotor.getObjectByName("rotorBlur");
+    // Fade the blur discs in smoothly as rotor speed rises (no binary pop).
+    // Main and tail discs share one material, so one opacity write covers both.
+    const blurT = THREE.MathUtils.clamp((this.rotorSpeed - 20) / 10, 0, 1);
+    const blurDisc = this.mainRotor.getObjectByName("rotorBlur") as THREE.Mesh | undefined;
     const tailBlurDisc = this.tailRotor.getObjectByName("tailBlur");
-    
-    if (blurDisc) blurDisc.visible = isFast;
-    if (tailBlurDisc) tailBlurDisc.visible = isFast;
+
+    if (blurDisc) {
+      blurDisc.visible = blurT > 0.02;
+      (blurDisc.material as THREE.MeshBasicMaterial).opacity = 0.24 * blurT;
+    }
+    if (tailBlurDisc) tailBlurDisc.visible = blurT > 0.02;
 
     // Do not hide blades, let them spin inside the blur disc for a better visual effect
     this.mainRotor.children.forEach(c => {
@@ -1328,6 +1430,18 @@ export class Enemy extends Entity {
   regenPerSecond: number = 0;
   regenMesh: THREE.Mesh | null = null;
 
+  // B1: status effects — burn (DoT), EMP (can't fire), shock (slowed).
+  // Timestamps are game seconds; enemies are constructed fresh per spawn,
+  // so no reset path is needed.
+  statusBurnUntil = 0;
+  statusEmpUntil = 0;
+  statusShockUntil = 0;
+  private burnAccum = 0;
+  private statusTime = 0;
+  /** Burn finished this enemy off — the engine routes it through the normal
+   *  kill pipeline (score/drops/affixes) instead of the silent sweep. */
+  diedFromStatus = false;
+
   // Hit feedback: a brief emissive/color flash after taking damage. Shared
   // cached materials are cloned lazily on the first hit (clone-on-write), so
   // flashing one enemy never tints every enemy sharing the same material. The
@@ -1336,6 +1450,9 @@ export class Enemy extends Entity {
   private flashClones: { material: THREE.Material; baseColor: THREE.Color }[] | null = null;
   private static readonly HIT_FLASH_DURATION = 0.14;
   private static readonly HIT_FLASH_COLOR = new THREE.Color(1.0, 0.9, 0.68);
+  private static readonly STATUS_TINT_BURN = new THREE.Color(1.0, 0.42, 0.08);
+  private static readonly STATUS_TINT_EMP = new THREE.Color(0.35, 0.72, 1.0);
+  private static readonly STATUS_TINT_SHOCK = new THREE.Color(1.0, 0.95, 0.35);
 
   // Attack pattern state
   patternTimer: number = 0;
@@ -1439,6 +1556,8 @@ export class Enemy extends Entity {
       if (this.variant === EnemyVariant.SCOUT_DRONE || this.variant === EnemyVariant.KAMIKAZE_DRONE) radius *= 0.85;
       if (this.variant === EnemyVariant.HEAVY_GUNSHIP) radius *= 1.35;
       if (this.variant === EnemyVariant.SIEGE_TANK) radius *= 1.15;
+      if (this.variant === EnemyVariant.INTERCEPTOR) radius *= 0.85;
+      if (this.variant === EnemyVariant.GATLING_HEAVY) radius *= 1.2;
     }
 
     this.hp = this.maxHp;
@@ -1817,6 +1936,25 @@ export class Enemy extends Entity {
       this.buildVariantVisuals(this.variant, radius, accentHex);
       this.buildVariantTelegraph(accentHex);
     }
+    this.buildThreatSignature(radius, accentHex, type);
+  }
+
+  /**
+   * Enemy redesign: color-coded emissive flank strips + a dorsal sensor node
+   * so every hull reads its threat role at a glance. Variant units use their
+   * signature accent; standard units use the base-hull accent.
+   */
+  private buildThreatSignature(r: number, accent: number, type: EnemyType) {
+    if (type === EnemyType.BOSS) return; // Boss already carries heavy glowwork
+    const ring = this.ring;
+    for (const s of [-1, 1]) {
+      const strip = createGlowBox(r * 0.1, r * 0.14, r * 1.4, accent, 0.7);
+      strip.position.set(s * r * 0.92, 0, 0);
+      ring.add(strip);
+    }
+    const node = createGlowBox(r * 0.22, r * 0.22, r * 0.22, accent, 0.9);
+    node.position.set(0, r * 0.75, -r * 0.2);
+    ring.add(node);
   }
 
   /** Extra silhouette parts that identify the combat role at a glance. */
@@ -1954,6 +2092,63 @@ export class Enemy extends Entity {
         ring.add(muzzle);
         break;
       }
+      case EnemyVariant.INTERCEPTOR: {
+        // Delta wings + twin tail fins + blue afterburner — reads fast jet
+        for (const s of [-1, 1]) {
+          const wing = createBox(r * 1.7, 0.09, r * 0.85, 0x1d2733);
+          wing.position.set(s * r * 1.1, -0.1, -r * 0.35);
+          wing.rotation.y = -s * 0.5;
+          ring.add(wing);
+          const fin = createBox(0.1, r * 0.8, r * 0.5, 0x1d2733);
+          fin.position.set(s * r * 0.45, r * 0.4, -r * 1.0);
+          fin.rotation.z = s * 0.28;
+          ring.add(fin);
+          const edge = createGlowBox(r * 0.7, 0.05, 0.1, accent, 0.8);
+          edge.position.set(s * r * 1.5, -0.1, -r * 0.35);
+          ring.add(edge);
+        }
+        const burner = createGlowBox(r * 0.5, r * 0.5, r * 0.4, accent, 0.95);
+        burner.position.set(0, 0, -r * 1.35);
+        ring.add(burner);
+        break;
+      }
+      case EnemyVariant.MINELAYER: {
+        // Belly mine rack (3 orbs) + blinking pink arming lamps
+        const rack = createBox(r * 1.6, 0.16, r * 0.9, 0x241a22);
+        rack.position.set(0, -r * 0.65, 0);
+        ring.add(rack);
+        for (let i = -1; i <= 1; i++) {
+          const orb = createGlowBox(r * 0.42, r * 0.42, r * 0.42, accent, 0.9);
+          orb.position.set(i * r * 0.62, -r * 0.95, 0);
+          ring.add(orb);
+        }
+        for (const s of [-1, 1]) {
+          const lamp = createGlowBox(r * 0.18, r * 0.18, r * 0.18, 0xff88cc, 0.95);
+          lamp.position.set(s * r * 0.9, 0.1, r * 0.7);
+          ring.add(lamp);
+        }
+        break;
+      }
+      case EnemyVariant.GATLING_HEAVY: {
+        // Rotary gatling drum + triple barrels + yellow ammo feed stripes
+        const drum = createBox(r * 0.9, r * 0.9, r * 1.1, 0x1a1a1a);
+        drum.position.set(0, 1.15, 0.9);
+        ring.add(drum);
+        for (let i = -1; i <= 1; i++) {
+          const barrel = createBox(0.13, 0.13, 2.6, 0x333333);
+          barrel.position.set(i * 0.32, 1.15, 2.5);
+          ring.add(barrel);
+        }
+        const muzzle = createGlowBox(0.9, 0.5, 0.24, accent, 0.9);
+        muzzle.position.set(0, 1.15, 3.85);
+        ring.add(muzzle);
+        for (const s of [-1, 1]) {
+          const belt = createGlowBox(r * 0.12, r * 0.12, r * 1.5, accent, 0.75);
+          belt.position.set(s * r * 0.75, 1.15, 0.6);
+          ring.add(belt);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -2011,6 +2206,62 @@ export class Enemy extends Entity {
     return "hit";
   }
 
+  /** B1: apply a status effect. Bosses shrug off EMP (volleys are telegraphed). */
+  applyStatus(kind: StatusEffectKind, now: number) {
+    const until = now + STATUS_DURATIONS[kind];
+    if (kind === "burn") {
+      this.statusBurnUntil = Math.max(this.statusBurnUntil, until);
+    } else if (kind === "emp") {
+      if (this.type === EnemyType.BOSS) return;
+      this.statusEmpUntil = Math.max(this.statusEmpUntil, until);
+    } else {
+      this.statusShockUntil = Math.max(this.statusShockUntil, until);
+    }
+  }
+
+  isBurning(now: number) {
+    return now < this.statusBurnUntil;
+  }
+
+  isEmpSuppressed(now: number) {
+    return now < this.statusEmpUntil;
+  }
+
+  isShocked(now: number) {
+    return now < this.statusShockUntil;
+  }
+
+  /**
+   * B1: per-frame status tick. Must run EVERY frame for every enemy — it
+   * keeps statusTime fresh for the shock-slow check. Burn DoT is applied
+   * directly to shield/hull in whole-point chunks (bypasses takeDamage so it
+   * never spams the hit flash); a burn kill flags diedFromStatus so the
+   * engine still runs the full kill pipeline (score, drops, affixes).
+   */
+  tickStatusEffects(time: number, delta: number) {
+    this.statusTime = time;
+    if (!this.active || time >= this.statusBurnUntil) return;
+    this.burnAccum += BURN_DPS * delta;
+    if (this.burnAccum < 1) return;
+    const dmg = Math.floor(this.burnAccum);
+    this.burnAccum -= dmg;
+    this.lastDamageTime = time; // burning keeps regen suppressed
+    if (this.shieldHp > 0) {
+      const absorbed = Math.min(this.shieldHp, dmg);
+      this.shieldHp -= absorbed;
+      if (this.shieldHp <= 0 && this.shieldMesh) this.shieldMesh.visible = false;
+      const over = dmg - absorbed;
+      if (over > 0) this.hp -= over;
+    } else {
+      this.hp -= dmg;
+    }
+    if (this.hp <= 0) {
+      this.hp = 0;
+      this.active = false;
+      this.diedFromStatus = true;
+    }
+  }
+
   /**
    * Variant combat behaviors — every non-standard enemy routes through here so
    * each role owns its movement, fire and telegraphs. Support drones (shield /
@@ -2032,6 +2283,8 @@ export class Enemy extends Entity {
     delta: number,
     allEnemies: Enemy[],
     playerBody: CANNON.Body | null,
+    city: CityEnvironment,
+    targetVel: CANNON.Vec3 | null,
   ): boolean {
     const v = ENEMY_VARIANTS[this.variant];
 
@@ -2132,7 +2385,7 @@ export class Enemy extends Entity {
       const interval = isRocket ? 0.26 : isHeavy ? 0.17 : 0.12;
       const cooldown = isRocket ? 3.4 : isHeavy ? 2.6 : 2.0;
       this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < fireRange) {
+      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < fireRange && this.hasLineOfSight(city, targetPos)) {
         const useRockets = isRocket || (isHeavy && Math.random() < 0.45);
         this.burstIsRockets = useRockets;
         if (useRockets) {
@@ -2154,12 +2407,13 @@ export class Enemy extends Entity {
       } else if (this.variantPhase === 2) {
         if (this.variantTimer <= 0) {
           const rockets = isRocket || (isHeavy && this.burstIsRockets);
+          const aim = this.leadAim(targetPos, targetVel, rockets ? 95 : 130);
           pool.spawn(
             this.body.position.x,
             this.body.position.y + 0.4,
             this.body.position.z,
-            dirX,
-            dirZ,
+            aim.x,
+            aim.z,
             time,
             rockets ? 95 : 130,
             Math.round((rockets ? 10 : 6) * v.damageMult * this.waveDamageMult),
@@ -2184,18 +2438,19 @@ export class Enemy extends Entity {
       const speed = 15 * v.speedMult;
       this.applySmoothMovement(dirX * speed + repelForceX + avoidForceX, dirZ * speed + repelForceZ + avoidForceZ, delta, this.smoothRate());
       this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 150) {
+      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 150 && this.hasLineOfSight(city, targetPos)) {
         this.variantPhase = 2;
         this.variantTimer = 0;
         this.burstShotCount = 0;
       } else if (this.variantPhase === 2) {
         if (this.variantTimer <= 0) {
+          const aim = this.leadAim(targetPos, targetVel, 150);
           pool.spawn(
             this.body.position.x,
             this.body.position.y + 1.4,
             this.body.position.z,
-            dirX,
-            dirZ,
+            aim.x,
+            aim.z,
             time,
             150,
             Math.round(3 * v.damageMult * this.waveDamageMult),
@@ -2310,6 +2565,158 @@ export class Enemy extends Entity {
         if (this.variantTimer <= 0) this.variantPhase = 0;
       }
       this.showTelegraph(time, this.variantPhase === 2, 0xff7744);
+      return false;
+    }
+
+    // ---- INTERCEPTOR: fast approach → strafe-through burst → peel off ----
+    if (this.variant === EnemyVariant.INTERCEPTOR) {
+      const speed = 62 * v.speedMult;
+      const tangentX = -dirZ * this.flankDir;
+      const tangentZ = dirX * this.flankDir;
+      this.variantTimer -= delta;
+      if (this.variantPhase === 0) {
+        // Approach — fast and direct
+        this.applySmoothMovement(dirX * speed + repelForceX + avoidForceX, dirZ * speed + repelForceZ + avoidForceZ, delta, 14);
+        if (dist < 95 && this.hasLineOfSight(city, targetPos)) {
+          this.variantPhase = 1;
+          this.burstShotCount = 0;
+          this.variantTimer = 0;
+        }
+      } else if (this.variantPhase === 1) {
+        // Strafe-through: keep speed, arc past the target while bursting
+        this.applySmoothMovement(
+          (dirX * 0.35 + tangentX) * speed + avoidForceX,
+          (dirZ * 0.35 + tangentZ) * speed + avoidForceZ,
+          delta, 10,
+        );
+        if (this.variantTimer <= 0 && this.burstShotCount < 3) {
+          const aim = this.leadAim(targetPos, targetVel, 175);
+          pool.spawn(
+            this.body.position.x,
+            this.body.position.y + 0.2,
+            this.body.position.z,
+            aim.x,
+            aim.z,
+            time,
+            175,
+            Math.round(4 * v.damageMult * this.waveDamageMult),
+            0,
+            0x55aaff,
+          );
+          this.burstShotCount++;
+          this.variantTimer = 0.09;
+        }
+        if (this.burstShotCount >= 3) {
+          this.variantPhase = 2;
+          this.variantTimer = 1.7;
+        }
+      } else {
+        // Peel off — swing wide before lining up the next pass
+        this.applySmoothMovement(
+          (-dirX * 0.5 + tangentX) * speed * 0.8 + avoidForceX,
+          (-dirZ * 0.5 + tangentZ) * speed * 0.8 + avoidForceZ,
+          delta, 8,
+        );
+        if (this.variantTimer <= 0) this.variantPhase = 0;
+      }
+      this.showTelegraph(time, this.variantPhase === 1, 0x55aaff);
+      return false;
+    }
+
+    // ---- MINELAYER: keeps its distance and seeds slow homing mines ----
+    if (this.variant === EnemyVariant.MINELAYER) {
+      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 130);
+      this.variantTimer -= delta;
+      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 240) {
+        this.variantPhase = 1; // arming telegraph
+        this.variantTimer = 0.8;
+      } else if (this.variantPhase === 1 && this.variantTimer <= 0) {
+        this.variantPhase = 2;
+        this.burstShotCount = 0;
+        this.variantTimer = 0;
+      } else if (this.variantPhase === 2) {
+        if (this.variantTimer <= 0 && this.burstShotCount < 3) {
+          pool.spawn(
+            this.body.position.x,
+            this.body.position.y - 0.8,
+            this.body.position.z,
+            dirX,
+            dirZ,
+            time,
+            13, // slow drift — the mine is the trap, not the bullet
+            Math.round(12 * v.damageMult * this.waveDamageMult),
+            11, // proximity blast radius
+            0xff44aa,
+            playerBody ? { body: playerBody, active: true } : null,
+            1.1, // gentle homing
+            0,
+            0,
+            this.waveDamageMult,
+          );
+          this.burstShotCount++;
+          this.variantTimer = 0.35;
+        }
+        if (this.burstShotCount >= 3) {
+          this.variantPhase = 0;
+          this.variantTimer = 4.2;
+        }
+      }
+      this.showTelegraph(time, this.variantPhase === 1, 0xff44aa);
+      return false;
+    }
+
+    // ---- GATLING HEAVY: telegraphed wind-up, then a tracking shell stream ----
+    if (this.variant === EnemyVariant.GATLING_HEAVY) {
+      const speed = 13 * v.speedMult;
+      const tangentX = -dirZ * this.flankDir;
+      const tangentZ = dirX * this.flankDir;
+      let mx: number;
+      let mz: number;
+      if (dist < 75) {
+        mx = (-dirX + tangentX * 0.6) * speed;
+        mz = (-dirZ + tangentZ * 0.6) * speed;
+      } else if (dist > 130) {
+        mx = dirX * speed;
+        mz = dirZ * speed;
+      } else {
+        mx = (tangentX + dirX * 0.1) * speed;
+        mz = (tangentZ + dirZ * 0.1) * speed;
+      }
+      this.applySmoothMovement(mx + repelForceX + avoidForceX, mz + repelForceZ + avoidForceZ, delta, this.smoothRate());
+
+      this.variantTimer -= delta;
+      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 165 && this.hasLineOfSight(city, targetPos)) {
+        this.variantPhase = 1; // spin-up telegraph — the tell for the stream
+        this.variantTimer = 0.9;
+      } else if (this.variantPhase === 1 && this.variantTimer <= 0) {
+        this.variantPhase = 2;
+        this.burstShotCount = 0;
+        this.variantTimer = 0;
+      } else if (this.variantPhase === 2) {
+        if (this.variantTimer <= 0 && this.burstShotCount < 14) {
+          const spread = 0.11;
+          const aim = this.leadAim(targetPos, targetVel, 185);
+          pool.spawn(
+            this.body.position.x,
+            this.body.position.y + 1.15,
+            this.body.position.z,
+            aim.x + (Math.random() - 0.5) * spread,
+            aim.z + (Math.random() - 0.5) * spread,
+            time,
+            185,
+            Math.max(2, Math.round(2.5 * v.damageMult * this.waveDamageMult)),
+            0,
+            0xffd92e,
+          );
+          this.burstShotCount++;
+          this.variantTimer = 0.065;
+        }
+        if (this.burstShotCount >= 14) {
+          this.variantPhase = 0;
+          this.variantTimer = 3.4;
+        }
+      }
+      this.showTelegraph(time, this.variantPhase === 1 || this.variantPhase === 2, 0xffd92e);
       return false;
     }
 
@@ -2465,7 +2872,10 @@ export class Enemy extends Entity {
     const k = Math.min(1, delta * rate);
     this.smoothVelX += (desiredX - this.smoothVelX) * k;
     this.smoothVelZ += (desiredZ - this.smoothVelZ) * k;
-    this.body.velocity.set(this.smoothVelX, 0, this.smoothVelZ);
+    // B1: shock slow scales only the written velocity — the smoothed state
+    // stays at full speed, so recovery is instant when the effect expires.
+    const slow = this.statusTime < this.statusShockUntil ? SHOCK_SPEED_MULT : 1;
+    this.body.velocity.set(this.smoothVelX * slow, 0, this.smoothVelZ * slow);
   }
 
   /** Lazily clone shared materials so the flash never mutates a shared cache. */
@@ -2503,6 +2913,24 @@ export class Enemy extends Entity {
           entry.material.color.copy(entry.baseColor).lerp(Enemy.HIT_FLASH_COLOR, strength);
         }
       }
+    } else if (this.statusTime < this.statusBurnUntil || this.statusTime < this.statusEmpUntil || this.statusTime < this.statusShockUntil) {
+      // B1: status tint while no hit flash is running (burn > EMP > shock).
+      this.ensureHitFlashClones();
+      if (!this.flashClones) return;
+      const burning = this.statusTime < this.statusBurnUntil;
+      const emped = !burning && this.statusTime < this.statusEmpUntil;
+      const tint = burning
+        ? Enemy.STATUS_TINT_BURN
+        : emped
+          ? Enemy.STATUS_TINT_EMP
+          : Enemy.STATUS_TINT_SHOCK;
+      for (const entry of this.flashClones) {
+        if (entry.material instanceof THREE.MeshLambertMaterial || entry.material instanceof THREE.MeshToonMaterial) {
+          entry.material.emissive.copy(tint).multiplyScalar(0.5);
+        } else if (entry.material instanceof THREE.MeshBasicMaterial) {
+          entry.material.color.copy(entry.baseColor).lerp(tint, 0.45);
+        }
+      }
     } else if (this.flashClones) {
       for (const entry of this.flashClones) {
         if (entry.material instanceof THREE.MeshLambertMaterial || entry.material instanceof THREE.MeshToonMaterial) {
@@ -2522,6 +2950,102 @@ export class Enemy extends Entity {
     return 8;
   }
 
+  /**
+   * Aim lead: predict where the target will be when a straight bullet arrives
+   * so shots track a moving player instead of firing at a stale position.
+   * The intercept is solved with fixed-point iteration on bullet travel time.
+   */
+  private leadAim(
+    targetPos: CANNON.Vec3,
+    targetVel: CANNON.Vec3 | null,
+    projectileSpeed: number,
+  ): { x: number; z: number } {
+    let t = Math.hypot(targetPos.x - this.body.position.x, targetPos.z - this.body.position.z) / Math.max(1, projectileSpeed);
+    t = Math.min(t, 3.0);
+    if (targetVel) {
+      for (let i = 0; i < 3; i++) {
+        const px = targetPos.x + targetVel.x * t;
+        const pz = targetPos.z + targetVel.z * t;
+        t = Math.hypot(px - this.body.position.x, pz - this.body.position.z) / Math.max(1, projectileSpeed);
+        t = Math.min(t, 3.0);
+      }
+    }
+    const ax = targetPos.x + (targetVel ? targetVel.x * t : 0) - this.body.position.x;
+    const az = targetPos.z + (targetVel ? targetVel.z * t : 0) - this.body.position.z;
+    const len = Math.hypot(ax, az) + 0.001;
+    return { x: ax / len, z: az / len };
+  }
+
+  /**
+   * Line-of-sight: does a straight bullet line from the enemy to the target
+   * pass through any standing building? Only blocks taller than the shooter
+   * can occlude — rooftop gunners and high fliers shoot over buildings, which
+   * mirrors the movement avoidance's "flying above the roof" rule.
+   */
+  private hasLineOfSight(city: CityEnvironment, targetPos: CANNON.Vec3): boolean {
+    const x1 = this.body.position.x;
+    const y1 = this.body.position.y + 0.35;
+    const z1 = this.body.position.z;
+    const x2 = targetPos.x;
+    const y2 = targetPos.y;
+    const z2 = targetPos.z;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dz = z2 - z1;
+
+    for (const block of city.blocks) {
+      if (block.destroyed) continue;
+      if (block.height <= y1 - 0.5) continue;
+      const minX = block.x - block.width / 2;
+      const maxX = block.x + block.width / 2;
+      const maxY = block.height;
+      const minZ = block.z - block.depth / 2;
+      const maxZ = block.z + block.depth / 2;
+
+      // Slab test for segment-vs-AABB intersection (t in [0,1]).
+      let tmin = 0;
+      let tmax = 1;
+      let blocked = true;
+
+      if (Math.abs(dx) < 1e-6) {
+        if (x1 < minX || x1 > maxX) blocked = false;
+      } else {
+        let t1 = (minX - x1) / dx;
+        let t2 = (maxX - x1) / dx;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) blocked = false;
+      }
+      if (!blocked) continue;
+
+      if (Math.abs(dy) < 1e-6) {
+        if (y1 < 0 || y1 > maxY) blocked = false;
+      } else {
+        let t1 = (0 - y1) / dy;
+        let t2 = (maxY - y1) / dy;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) blocked = false;
+      }
+      if (!blocked) continue;
+
+      if (Math.abs(dz) < 1e-6) {
+        if (z1 < minZ || z1 > maxZ) blocked = false;
+      } else {
+        let t1 = (minZ - z1) / dz;
+        let t2 = (maxZ - z1) / dz;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) blocked = false;
+      }
+      if (blocked) return false;
+    }
+    return true;
+  }
+
   updateDirection(
     targetPos: CANNON.Vec3,
     time: number,
@@ -2532,10 +3056,15 @@ export class Enemy extends Entity {
     fireRateMult: number = 1.0,
     delta: number = 0.016,
     playerBody: CANNON.Body | null = null,
+    targetVel: CANNON.Vec3 | null = null,
   ) {
     if (!this.active) return false;
 
     this.updateHitFlash(delta);
+
+    // B1: EMP silences weapons — pinning the shot clock keeps every existing
+    // interval gate (time - lastShotTime > rate) closed while suppressed.
+    if (time < this.statusEmpUntil) this.lastShotTime = time;
 
     // Boids horizontal repulsion force to prevent enemies from stacking
     let repelForceX = 0;
@@ -2662,7 +3191,7 @@ export class Enemy extends Entity {
     // =====================================================================
     if (this.type === EnemyType.BOSS) {
       fired = this.updateBoss(targetPos, time, dist, dirX, dirZ, enemyProjectilePool, repelForceX, repelForceZ, fireRateMult, delta, avoidForceX, avoidForceZ);
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
       if (this.telegraphMesh) {
         this.telegraphMesh.visible = this.telegraphTimer > 0;
         if (this.telegraphTimer > 0) {
@@ -2695,8 +3224,10 @@ export class Enemy extends Entity {
         delta,
         allEnemies,
         playerBody,
+        city,
+        targetVel,
       );
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
       this.mesh.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.y = Math.atan2(dirX, dirZ);
       this.updateVariantVisuals(time);
@@ -2717,7 +3248,7 @@ export class Enemy extends Entity {
         14,
       );
       // No ranged fire — dies by ramming
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
       this.mesh.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.1;
@@ -2740,14 +3271,15 @@ export class Enemy extends Entity {
       );
 
       // Drones fire rapidly at close range
-      if (dist < 60 && time - this.lastShotTime > 0.8 * fireRateMult) {
+      if (dist < 60 && time - this.lastShotTime > 0.8 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
         this.lastShotTime = time;
+        const aim = this.leadAim(targetPos, targetVel, 160);
         enemyProjectilePool.spawn(
           this.body.position.x,
           this.body.position.y + 0.35,
           this.body.position.z,
-          dirX,
-          dirZ,
+          aim.x,
+          aim.z,
           time,
           160,
           5,
@@ -2762,7 +3294,7 @@ export class Enemy extends Entity {
         fired = true;
       }
 
-      this.mesh.position.copy(this.body.position as any);
+      copyPhysicsPos(this.mesh, this.body.position);
       this.mesh.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.x = Math.sin(time * 5) * 0.1;
@@ -2832,11 +3364,11 @@ export class Enemy extends Entity {
           ? 3.5
           : 2.4;
     if (dist < fireRange && time - this.lastShotTime > fireRate * fireRateMult) {
-      this.lastShotTime = time + Math.random() * 0.35;
       const projectileSpeed = this.type === EnemyType.TANK ? 95 : 130;
       if (this.pattern === AttackPattern.ARTILLERY) {
         // Arcing artillery shell: high lob that reaches player altitude,
-        // then lands with a visible splash.
+        // then lands with a visible splash. Lobs over buildings — no LOS.
+        this.lastShotTime = time + Math.random() * 0.35;
         enemyProjectilePool.spawn(
           this.body.position.x,
           this.body.position.y + 4.0,
@@ -2854,13 +3386,15 @@ export class Enemy extends Entity {
           95, // gravity
           this.waveDamageMult,
         );
-      } else {
+      } else if (this.hasLineOfSight(city, targetPos)) {
+        this.lastShotTime = time + Math.random() * 0.35;
+        const aim = this.leadAim(targetPos, targetVel, projectileSpeed);
         enemyProjectilePool.spawn(
           this.body.position.x,
           this.body.position.y + 0.35,
           this.body.position.z,
-          dirX,
-          dirZ,
+          aim.x,
+          aim.z,
           time,
           projectileSpeed,
           5,
@@ -2876,7 +3410,7 @@ export class Enemy extends Entity {
       fired = true;
     }
 
-    this.mesh.position.copy(this.body.position as any);
+    copyPhysicsPos(this.mesh, this.body.position);
     this.mesh.rotation.y = Math.atan2(dirX, dirZ);
     this.ring.rotation.y = Math.atan2(dirX, dirZ);
     this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.04;
@@ -3052,6 +3586,12 @@ export class Projectile {
   waveDamageMult: number = 1;
   kind: "STANDARD" | "SAM_MISSILE" = "STANDARD";
   targetType: "PLAYER" | "DECOY" | "NONE" = "NONE";
+  /** B1/C6: weapon-mod tags carried with this shot (reset on every spawn). */
+  procKind: StatusEffectKind | null = null;
+  procChance = 0;
+  cluster = false;
+  piercing = false;
+  shaped = false;
   sourceObjective: Objective | null = null;
   acceleration = 0;
   maxSpeed = Infinity;
@@ -3132,6 +3672,11 @@ export class Projectile {
     this.vy = vy;
     this.gravity = gravity;
     this.kind = "STANDARD";
+    this.procKind = null;
+    this.procChance = 0;
+    this.cluster = false;
+    this.piercing = false;
+    this.shaped = false;
     this.sourceObjective = null;
     this.acceleration = 0;
     this.maxSpeed = Infinity;
@@ -4124,7 +4669,10 @@ export class Turret {
   position: CANNON.Vec3;
   mesh: THREE.Group;
   head: THREE.Group;
+  /** Pitch pivot for the barrel — lets the gun track the player vertically. */
+  gunPivot: THREE.Group;
   yaw: number = 0;
+  pitch: number = 0;
   block: CityBlock | null;
   chunkId: number;
   // +Infinity = never fired; the engine sets it on first encounter so turrets
@@ -4134,6 +4682,11 @@ export class Turret {
   range: number = 200;
   basePoints: number = 75;
   seed: number;
+  static readonly PITCH_MIN = -0.6; // rad — barrel can depress this far
+  static readonly PITCH_MAX = 0.9; // rad — enough to hit the player at cruise altitude
+  static readonly HIT_FLASH_DURATION = 0.14;
+  /** Brief emissive flash after taking damage — mirrors the enemy hit-flash. */
+  private hitFlashTimer = 0;
 
   constructor(
     chunkGroup: THREE.Group,
@@ -4164,7 +4717,8 @@ export class Turret {
     base.position.y = 0.25;
     this.mesh.add(base);
 
-    // Rotating head: body + barrel + glowing eye
+    // Rotating head: body + glowing eye; the barrel sits on its own pitch
+    // pivot so the turret tracks the player vertically as well as in yaw.
     this.head = new THREE.Group();
     this.head.position.y = 0.7;
     this.mesh.add(this.head);
@@ -4174,10 +4728,14 @@ export class Turret {
     body.position.y = 0.55;
     this.head.add(body);
 
+    this.gunPivot = new THREE.Group();
+    this.gunPivot.position.y = 0.72;
+    this.head.add(this.gunPivot);
+
     const barrel = createBox(0.34, 0.34, 2.6, 0x1d2530);
     barrel.material = darkMat;
-    barrel.position.set(0, 0.72, 1.7);
-    this.head.add(barrel);
+    barrel.position.set(0, 0, 1.7);
+    this.gunPivot.add(barrel);
 
     const eye = createBox(0.55, 0.45, 0.45, 0xff3344);
     eye.material = eyeMat;
@@ -4186,8 +4744,8 @@ export class Turret {
 
     // Muzzle flash glow tip
     const tip = createGlowBox(0.4, 0.4, 0.4, 0xffaa44, 0.9);
-    tip.position.set(0, 0.72, 3.0);
-    this.head.add(tip);
+    tip.position.set(0, 0, 3.0);
+    this.gunPivot.add(tip);
 
     chunkGroup.add(this.mesh);
   }
@@ -4197,11 +4755,12 @@ export class Turret {
     return !this.active || (this.block !== null && this.block.destroyed);
   }
 
-  /** Rotate the head to track the player (yaw only). */
-  aimAt(px: number, pz: number, time: number) {
+  /** Rotate the head to track the player in yaw and the barrel in pitch. */
+  aimAt(px: number, py: number, pz: number, time: number) {
     const dx = px - this.position.x;
     const dz = pz - this.position.z;
-    if (Math.abs(dx) < 0.01 && Math.abs(dz) < 0.01) return;
+    const horiz = Math.hypot(dx, dz);
+    if (horiz < 0.01) return;
     const targetYaw = Math.atan2(dx, dz);
     let diff = targetYaw - this.yaw;
     while (diff < -Math.PI) diff += Math.PI * 2;
@@ -4209,15 +4768,24 @@ export class Turret {
     // Smooth-yaw tracking (≈0.4 of the remaining angle per frame)
     this.yaw += diff * 0.4;
     this.head.rotation.y = this.yaw;
+
+    // Barrel pitch: aim at the player's altitude, clamped to the gun's travel.
+    const dy = py - (this.position.y + 1.42);
+    const targetPitch = Math.atan2(dy, horiz);
+    const clamped = Math.max(Turret.PITCH_MIN, Math.min(Turret.PITCH_MAX, targetPitch));
+    this.pitch += (clamped - this.pitch) * 0.35;
+    this.gunPivot.rotation.x = -this.pitch;
+
     // Barrel bob while tracking
-    this.head.rotation.x = Math.sin(time * 2.2 + this.seed * 6.28) * 0.06;
+    this.head.rotation.x = Math.sin(time * 2.2 + this.seed * 6.28) * 0.03;
   }
 
   getMuzzle() {
+    const cy = Math.cos(this.pitch);
     return {
-      x: this.position.x + Math.sin(this.yaw) * 3.0,
-      y: this.position.y + 1.4,
-      z: this.position.z + Math.cos(this.yaw) * 3.0,
+      x: this.position.x + Math.sin(this.yaw) * 3.0 * cy,
+      y: this.position.y + 1.42 + Math.sin(this.pitch) * 3.0,
+      z: this.position.z + Math.cos(this.yaw) * 3.0 * cy,
     };
   }
 
@@ -4228,6 +4796,30 @@ export class Turret {
       this.mesh.visible = false;
       return true;
     }
+    this.hitFlashTimer = Turret.HIT_FLASH_DURATION;
     return false;
+  }
+
+  /** Decay the hit flash — a red emissive kick that eases back to rest.
+   *  The turret's body materials are per-instance (created fresh in the
+   *  constructor), so tinting them never affects a shared material cache. */
+  updateHitFlash(delta: number) {
+    if (this.hitFlashTimer > 0) {
+      this.hitFlashTimer -= delta;
+    }
+    const strength = this.hitFlashTimer > 0
+      ? Math.max(0, Math.min(1, this.hitFlashTimer / Turret.HIT_FLASH_DURATION))
+      : 0;
+    this.mesh.traverse((child) => {
+      const m = child as THREE.Mesh;
+      if (m.material instanceof THREE.MeshToonMaterial) {
+        if (strength > 0.001) {
+          m.material.emissive.setRGB(1, 0.13, 0.2).multiplyScalar(strength * 0.9);
+        } else {
+          const base = m.material.userData.baseColor as THREE.Color | undefined;
+          if (base) m.material.emissive.copy(base).multiplyScalar(0.025);
+        }
+      }
+    });
   }
 }

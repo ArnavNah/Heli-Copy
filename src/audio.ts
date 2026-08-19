@@ -15,7 +15,7 @@ export class AudioManager {
   private volume = 0.8;
 
   // Background Music Sequencer
-  private musicInterval: any = null;
+  private musicInterval: number | null = null;
   private musicStep = 0;
   
   private lastExplosionTime = 0;
@@ -26,7 +26,7 @@ export class AudioManager {
 
   private init() {
     if (this.ctx) return;
-    this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    this.ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.value = this.volume * 0.5;
     this.masterGain.connect(this.ctx.destination);

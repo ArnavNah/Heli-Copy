@@ -5,6 +5,9 @@ export enum MissionType {
   HIGH_VALUE_TARGET = "HIGH_VALUE_TARGET",
   CLEAR_AIRSPACE = "CLEAR_AIRSPACE",
   DEFEND = "DEFEND",
+  ESCORT = "ESCORT",
+  RESCUE = "RESCUE",
+  BOUNTY = "BOUNTY",
 }
 
 export enum MissionState {
@@ -47,7 +50,7 @@ export interface Mission {
   state: MissionState;
   title: string;
   targetId?: string;
-  targetKind?: "SAM" | "RADAR" | "DELIVERY" | "ELITE" | "AREA";
+  targetKind?: "SAM" | "RADAR" | "DELIVERY" | "ELITE" | "AREA" | "CONVOY" | "CRASH_SITE";
   origin?: MissionPosition;
   destination?: MissionPosition;
   progress: number;
@@ -90,6 +93,12 @@ export interface MissionHudSnapshot {
 
 const ZERO_REWARD: MissionReward = { credits: 0, xp: 0, salvage: 0 };
 
+/** C2: escort — convoy travel time and the leash radius the player must hold. */
+export const ESCORT_TRAVEL_SECONDS = 42;
+export const ESCORT_RADIUS = 42;
+/** C2: rescue — hover-hold radius at the crash site. */
+export const RESCUE_RADIUS = 34;
+
 function reward(credits: number, xp: number, salvage: number, extra: Partial<MissionReward> = {}): MissionReward {
   return { credits, xp, salvage, ...extra };
 }
@@ -121,7 +130,14 @@ export class MissionManager {
     if (context.sams.length) available.push(MissionType.DESTROY_SAM);
     if (context.radars.length) available.push(MissionType.DESTROY_RADAR);
     if (context.delivery) available.push(MissionType.DELIVERY);
-    available.push(MissionType.HIGH_VALUE_TARGET, MissionType.CLEAR_AIRSPACE, MissionType.DEFEND);
+    available.push(
+      MissionType.HIGH_VALUE_TARGET,
+      MissionType.CLEAR_AIRSPACE,
+      MissionType.DEFEND,
+      MissionType.ESCORT,
+      MissionType.RESCUE,
+      MissionType.BOUNTY,
+    );
     const desired = [
       MissionType.DESTROY_SAM,
       MissionType.DESTROY_RADAR,
@@ -129,7 +145,10 @@ export class MissionManager {
       MissionType.CLEAR_AIRSPACE,
       MissionType.DEFEND,
       MissionType.DELIVERY,
-    ][this.sequence % 6];
+      MissionType.ESCORT,
+      MissionType.RESCUE,
+      MissionType.BOUNTY,
+    ][this.sequence % 9];
     const type = available.includes(desired) ? desired : available[this.sequence % available.length];
     const id = `mission-${++this.sequence}`;
     const scale = Math.min(1.45, 1 + Math.max(0, context.wave - 1) * 0.035 + Math.max(0, context.threat - 1) * 0.04);
@@ -163,6 +182,23 @@ export class MissionManager {
       const targetProgress = 8 + Math.min(5, Math.floor(context.wave / 3));
       mission = make({ type, title: "Clear Hostile Airspace", targetKind: "AREA", destination: { x: context.player.x, y: context.player.y, z: context.player.z - 150 }, targetProgress,
         reward: reward(Math.round(240 * scale), 20, 2), bonusObjectives: [bonus(BonusObjectiveType.HEALTH_ABOVE_50, "Finish above 50% hull", 1, reward(75, 0, 1))] });
+    } else if (type === MissionType.ESCORT) {
+      // C2: convoy drives origin → destination; stay in the leash to bank time.
+      const origin = { x: context.player.x + (this.sequence % 2 ? 70 : -70), y: context.player.y, z: context.player.z - 130 };
+      const destination = { x: origin.x, y: origin.y, z: origin.z - 165 };
+      mission = make({ type, title: "Escort Supply Convoy", targetKind: "CONVOY", origin, destination, targetProgress: 26,
+        reward: reward(Math.round(340 * scale), 24, 3, { repair: 10 }), bonusObjectives: [bonus(BonusObjectiveType.HEALTH_ABOVE_50, "Escort with hull above 50%", 1, reward(95, 0, 1))] });
+    } else if (type === MissionType.RESCUE) {
+      // C2: hover-hold at a crash site while hostiles converge.
+      const origin = { x: context.player.x + (this.sequence % 2 ? 58 : -58), y: context.player.y, z: context.player.z - 140 };
+      mission = make({ type, title: "Rescue Downed Crew", targetKind: "CRASH_SITE", origin, destination: origin, targetProgress: 18,
+        reward: reward(Math.round(300 * scale), 20, 2, { repair: 15 }), bonusObjectives: [bonus(BonusObjectiveType.HEALTH_ABOVE_50, "Hold with hull above 50%", 1, reward(85, 0, 1))] });
+    } else if (type === MissionType.BOUNTY) {
+      // C2: named elite — buffed spawn handled by the engine, jackpot salvage.
+      const targetId = `${id}-bounty`;
+      const destination = { x: context.player.x + (this.sequence % 2 ? 92 : -92), y: context.player.y, z: context.player.z - 180 };
+      mission = make({ type, title: "Bounty: Ace Squadron Leader", targetId, targetKind: "ELITE", destination, targetProgress: 1,
+        reward: reward(Math.round(420 * scale), 28, 5, { countermeasures: 1 }), bonusObjectives: [bonus(BonusObjectiveType.TIME_LIMIT, "Claim the bounty before it escapes", 1, reward(150, 0, 2), time + 75)] });
     } else {
       const origin = { x: context.player.x + (this.sequence % 2 ? 64 : -64), y: context.player.y, z: context.player.z - 145 };
       mission = make({ type: MissionType.DEFEND, title: "Defend Forward Beacon", targetKind: "AREA", origin, destination: origin, targetProgress: 25,
@@ -182,6 +218,20 @@ export class MissionManager {
       const inside = Math.hypot(snapshot.player.x - mission.origin.x, snapshot.player.z - mission.origin.z) <= 34;
       if (inside) mission.progress = Math.min(mission.targetProgress, mission.progress + Math.max(0, delta));
       if (mission.progress >= mission.targetProgress) this.complete(time, snapshot);
+    }
+    if (mission.type === MissionType.RESCUE && mission.origin) {
+      // C2: same hover-hold as DEFEND but at a tighter crash-site radius.
+      const inside = Math.hypot(snapshot.player.x - mission.origin.x, snapshot.player.z - mission.origin.z) <= RESCUE_RADIUS;
+      if (inside) mission.progress = Math.min(mission.targetProgress, mission.progress + Math.max(0, delta));
+      if (mission.progress >= mission.targetProgress) this.complete(time, snapshot);
+    }
+    if (mission.type === MissionType.ESCORT && mission.origin && mission.destination) {
+      // C2: convoy advances origin → destination; progress banks only in the leash.
+      const convoy = convoyPositionAt(mission, time);
+      const inside = Math.hypot(snapshot.player.x - convoy.x, snapshot.player.z - convoy.z) <= ESCORT_RADIUS;
+      if (inside) mission.progress = Math.min(mission.targetProgress, mission.progress + Math.max(0, delta));
+      if (mission.progress >= mission.targetProgress) this.complete(time, snapshot);
+      else if (time - mission.startedAt >= ESCORT_TRAVEL_SECONDS) this.reportTargetLost(mission.origin ? `${mission.id}-convoy` : mission.targetId ?? mission.id);
     }
   }
 
@@ -203,7 +253,7 @@ export class MissionManager {
   ) {
     const mission = this.activeMission;
     if (!mission) return false;
-    if (mission.type === MissionType.HIGH_VALUE_TARGET && isElite && targetId === mission.targetId) {
+    if ((mission.type === MissionType.HIGH_VALUE_TARGET || mission.type === MissionType.BOUNTY) && isElite && targetId === mission.targetId) {
       mission.progress = 1;
       this.complete(time, snapshot);
       return true;
@@ -244,7 +294,10 @@ export class MissionManager {
 
   reportTargetLost(targetId: string) {
     const mission = this.activeMission;
-    if (!mission || mission.targetId !== targetId || mission.state !== MissionState.ACTIVE) return;
+    if (!mission || mission.state !== MissionState.ACTIVE) return;
+    // Escort convoys fail on route completion regardless of id bookkeeping.
+    const matches = mission.targetId === targetId || mission.type === MissionType.ESCORT;
+    if (!matches) return;
     mission.state = MissionState.FAILED;
     this.lastMission = mission;
     this.activeMission = null;
@@ -313,4 +366,16 @@ export class MissionManager {
       bonus: optional ? { label: optional.label, state: optional.state, progress: optional.progress, targetProgress: optional.targetProgress, rewardCredits: optional.reward.credits } : null,
     };
   }
+}
+
+/** C2: linear convoy position along its route at `time` (origin at t=0). */
+export function convoyPositionAt(mission: Mission, time: number): MissionPosition {
+  const origin = mission.origin ?? { x: 0, z: 0 };
+  const destination = mission.destination ?? origin;
+  const t = Math.min(1, Math.max(0, (time - mission.startedAt) / ESCORT_TRAVEL_SECONDS));
+  return {
+    x: origin.x + (destination.x - origin.x) * t,
+    y: origin.y,
+    z: origin.z + (destination.z - origin.z) * t,
+  };
 }

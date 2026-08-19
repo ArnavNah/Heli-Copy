@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import { EnemyType, EnemyVariant } from "./types";
 import {
   accuracyFor,
+  affixChancesForWave,
   bossPhaseForRatio,
   bossVolleyConfig,
   buildingArchetype,
+  buildingMassing,
+  canOfferExtraction,
   clamp,
   coinsForScore,
   comboMultiplier,
   compositionFitsBudget,
   compositionThreatCost,
+  createQualityGovernor,
   DIFFICULTIES,
   DISTRICT_CONFIGS,
   DISTRICT_SCHEDULE,
@@ -17,33 +21,60 @@ import {
   ENEMY_VARIANTS,
   footprintTier,
   formatDuration,
+  formatScorecard,
+  GOVERNOR_MAX_LEVEL,
+  governorBloomAllowed,
+  governorParticleScale,
+  governorPixelScale,
+  MAX_PERK_RANK,
   MAX_WEAPON_LEVEL,
   multikillTier,
+  nightOpForWave,
+  NIGHT_OPS_MIN_WAVE,
   objectiveConfig,
   occlusionStrength,
+  PERK_INFO,
+  perkEffect,
   pickEnemyVariant,
   pickSquadForWave,
   pickUpgrades,
   readMastery,
+  readPerks,
+  readRunHistory,
+  readWeaponMods,
+  recordRun,
   riskMultiplier,
+  RUN_HISTORY_LIMIT,
   runLevelForXp,
   runXpForLevel,
   rhythmDensity,
   sceneRhythmForChunk,
   SPAWN_CONFIG,
   SQUAD_TEMPLATES,
+  statusProcChance,
+  STATUS_DURATIONS,
+  SUPER_MAX_CHARGE,
+  superChargeForKill,
+  updateQualityGovernor,
+  UPGRADE_POOL,
   variantAtCap,
+  WEAPON_MODS,
+  writeMastery,
+  writePerkRank,
+  writeWeaponMod,
   xpForEnemyType,
   waveEnemyCount,
   waveEnemyDamage,
   waveEnemyFireRate,
   waveEnemyPower,
+  waveSpawnBudget,
+  waveComposition,
+  waveStatScale,
   waveThreatBudget,
   waveDuration,
   weaponLevelBonus,
   weaponLevelForXp,
   weaponXpForLevel,
-  writeMastery,
 } from "./logic";
 
 describe("occlusionStrength", () => {
@@ -231,7 +262,7 @@ describe("pickUpgrades", () => {
     expect(new Set(picks.map((p) => p.category)).size).toBe(3);
   });
   it("clamps to pool size", () => {
-    expect(pickUpgrades(999).length).toBeLessThanOrEqual(14);
+    expect(pickUpgrades(999).length).toBeLessThanOrEqual(UPGRADE_POOL.length);
     expect(pickUpgrades(0)).toHaveLength(1);
   });
 });
@@ -251,6 +282,41 @@ describe("threat-budgeted spawning", () => {
     expect(cost).toBe(ENEMY_VARIANTS[EnemyVariant.STANDARD].threat + ENEMY_VARIANTS[EnemyVariant.MISSILE_CARRIER].threat);
     expect(compositionFitsBudget(members, cost)).toBe(true);
     expect(compositionFitsBudget(members, cost - 1)).toBe(false);
+  });
+});
+
+describe("public wave API (budget → composition → stat scale)", () => {
+  it("waveSpawnBudget grows with wave and threat", () => {
+    expect(waveSpawnBudget(1, 1)).toBeGreaterThan(15);
+    expect(waveSpawnBudget(10, 1)).toBeGreaterThan(waveSpawnBudget(1, 1));
+    expect(waveSpawnBudget(5, 3)).toBeGreaterThan(waveSpawnBudget(5, 1));
+    expect(waveSpawnBudget(5, 1)).toBe(waveThreatBudget(5, 1));
+  });
+
+  it("waveComposition respects the remaining budget and wave gates", () => {
+    // Low wave + tiny budget: only the cheap STANDARD hull fits.
+    const early = waveComposition(1, 0.5, () => 0.99);
+    expect(early).toBe(EnemyVariant.STANDARD);
+    // High wave + generous budget: a heavy variant can be picked.
+    const late = waveComposition(12, 20, () => 0.99);
+    expect(ENEMY_VARIANTS[late].threat).toBeLessThanOrEqual(20);
+    // New variants stay locked until their minWave.
+    const w8 = waveComposition(8, 20, () => 0.99);
+    expect(w8).not.toBe(EnemyVariant.GATLING_HEAVY);
+    expect(w8).not.toBe(EnemyVariant.INTERCEPTOR);
+    expect(w8).not.toBe(EnemyVariant.MINELAYER);
+  });
+
+  it("waveStatScale unifies hp/damage/fire-rate growth with caps", () => {
+    const s1 = waveStatScale(1);
+    const s20 = waveStatScale(20);
+    expect(s1.hp).toBe(1);
+    expect(s1.damage).toBe(1);
+    expect(s1.fireRate).toBe(1);
+    expect(s20.hp).toBe(waveEnemyPower(20));
+    expect(s20.damage).toBe(waveEnemyDamage(20));
+    expect(s20.fireRate).toBe(waveEnemyFireRate(20));
+    expect(waveStatScale(200).damage).toBe(3.2);
   });
 });
 
@@ -428,6 +494,39 @@ describe("footprintTier", () => {
   });
 });
 
+describe("buildingMassing (Pass 10)", () => {
+  it("keeps SMALL footprints as single boxes", () => {
+    for (let r = 0; r < 1; r += 0.05) {
+      expect(buildingMassing(r, 0)).toBe("mono");
+    }
+  });
+
+  it("maps roll ranges to composite massings on larger footprints", () => {
+    expect(buildingMassing(0.0, 1)).toBe("mono");
+    expect(buildingMassing(0.51, 2)).toBe("mono");
+    expect(buildingMassing(0.52, 1)).toBe("podium");
+    expect(buildingMassing(0.69, 2)).toBe("podium");
+    expect(buildingMassing(0.7, 1)).toBe("lshape");
+    expect(buildingMassing(0.82, 2)).toBe("lshape");
+    expect(buildingMassing(0.83, 1)).toBe("twins");
+    expect(buildingMassing(0.91, 2)).toBe("twins");
+    expect(buildingMassing(0.92, 1)).toBe("stepped");
+    expect(buildingMassing(0.99, 2)).toBe("stepped");
+  });
+
+  it("keeps mono the most common massing so the skyline keeps anchors", () => {
+    const counts = new Map<string, number>();
+    for (let i = 0; i < 1000; i++) {
+      const m = buildingMassing((i * 0.6180339887) % 1, 1 + (i % 2));
+      counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    expect(counts.get("mono")).toBeGreaterThan(480);
+    for (const kind of ["podium", "lshape", "twins", "stepped"]) {
+      expect(counts.get(kind) ?? 0).toBeGreaterThan(30);
+    }
+  });
+});
+
 describe("weapon mastery persistence", () => {
   const storage = () => {
     const data = new Map<string, string>();
@@ -535,7 +634,8 @@ describe("scene rhythm (Pass 9)", () => {
 });
 
 describe("enemy variants", () => {
-  it("configures all eleven variants with sane stats", () => {
+  it("configures all fourteen variants with sane stats", () => {
+    expect(Object.keys(ENEMY_VARIANTS)).toHaveLength(14);
     for (const variant of Object.keys(ENEMY_VARIANTS) as EnemyVariant[]) {
       const cfg = ENEMY_VARIANTS[variant];
       expect(cfg.threat).toBeGreaterThan(0);
@@ -560,6 +660,43 @@ describe("enemy variants", () => {
     expect(threat(EnemyVariant.REPAIR_DRONE)).toBe(2.25);
     expect(threat(EnemyVariant.SIEGE_TANK)).toBe(2.5);
     expect(threat(EnemyVariant.HEAVY_GUNSHIP)).toBe(3.0);
+    expect(threat(EnemyVariant.INTERCEPTOR)).toBe(2.0);
+    expect(threat(EnemyVariant.MINELAYER)).toBe(2.25);
+    expect(threat(EnemyVariant.GATLING_HEAVY)).toBe(2.5);
+  });
+
+  it("unlocks the late-war variants on their tier ladder", () => {
+    expect(ENEMY_VARIANTS[EnemyVariant.GATLING_HEAVY].minWave).toBe(9);
+    expect(ENEMY_VARIANTS[EnemyVariant.INTERCEPTOR].minWave).toBe(10);
+    expect(ENEMY_VARIANTS[EnemyVariant.MINELAYER].minWave).toBe(11);
+  });
+
+  it("caps the new specialist variants so they never swarm", () => {
+    expect(ENEMY_VARIANTS[EnemyVariant.INTERCEPTOR].maxActive).toBe(4);
+    expect(ENEMY_VARIANTS[EnemyVariant.MINELAYER].maxActive).toBe(2);
+    expect(ENEMY_VARIANTS[EnemyVariant.GATLING_HEAVY].maxActive).toBe(2);
+  });
+
+  it("never rolls new variants before their unlock wave", () => {
+    for (let i = 0; i < 400; i++) {
+      const w8 = pickEnemyVariant(8);
+      expect(w8).not.toBe(EnemyVariant.GATLING_HEAVY);
+      expect(w8).not.toBe(EnemyVariant.INTERCEPTOR);
+      expect(w8).not.toBe(EnemyVariant.MINELAYER);
+      const w9 = pickEnemyVariant(9);
+      expect(w9).not.toBe(EnemyVariant.INTERCEPTOR);
+      expect(w9).not.toBe(EnemyVariant.MINELAYER);
+      const w10 = pickEnemyVariant(10);
+      expect(w10).not.toBe(EnemyVariant.MINELAYER);
+    }
+  });
+
+  it("eventually fields the new variants once unlocked", () => {
+    const seen = new Set<EnemyVariant>();
+    for (let i = 0; i < 4000; i++) seen.add(pickEnemyVariant(12));
+    expect(seen.has(EnemyVariant.GATLING_HEAVY)).toBe(true);
+    expect(seen.has(EnemyVariant.INTERCEPTOR)).toBe(true);
+    expect(seen.has(EnemyVariant.MINELAYER)).toBe(true);
   });
 
   it("gates variants by wave — nothing appears before its minWave", () => {
@@ -622,5 +759,221 @@ describe("enemy variants", () => {
         expect(ENEMY_VARIANTS[member].minWave).toBeLessThanOrEqual(squad.minWave);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// New systems (mega polish pack)
+// ---------------------------------------------------------------------------
+
+const memStorage = () => {
+  const data = new Map<string, string>();
+  return {
+    getItem: (k: string) => data.get(k) ?? null,
+    setItem: (k: string, v: string) => void data.set(k, v),
+  } as Storage;
+};
+
+describe("status effects", () => {
+  it("defines durations for all three effects", () => {
+    expect(STATUS_DURATIONS.burn).toBeGreaterThan(0);
+    expect(STATUS_DURATIONS.emp).toBeGreaterThan(0);
+    expect(STATUS_DURATIONS.shock).toBeGreaterThan(0);
+  });
+  it("proc chance clamps to [0, 0.95] and stacks bonuses", () => {
+    expect(statusProcChance(0.18, 0.1)).toBeCloseTo(0.28);
+    expect(statusProcChance(0.9, 0.5)).toBe(0.95);
+    expect(statusProcChance(0.1, -1)).toBeCloseTo(0.1);
+  });
+});
+
+describe("elite affixes", () => {
+  it("are all zero before their debut waves", () => {
+    const c = affixChancesForWave(5);
+    expect(c.explosive).toBe(0);
+    expect(c.splitter).toBe(0);
+    expect(c.vampiric).toBe(0);
+  });
+  it("ramp in order: explosive (6) → splitter (8) → vampiric (9)", () => {
+    expect(affixChancesForWave(6).explosive).toBeGreaterThan(0);
+    expect(affixChancesForWave(7).splitter).toBe(0);
+    expect(affixChancesForWave(8).splitter).toBeGreaterThan(0);
+    expect(affixChancesForWave(9).vampiric).toBeGreaterThan(0);
+  });
+  it("never exceed their caps even at extreme waves", () => {
+    const c = affixChancesForWave(60);
+    expect(c.explosive).toBeLessThanOrEqual(0.18);
+    expect(c.splitter).toBeLessThanOrEqual(0.14);
+    expect(c.vampiric).toBeLessThanOrEqual(0.12);
+  });
+});
+
+describe("devastation super meter", () => {
+  it("charges more for elites and much more for bosses", () => {
+    expect(superChargeForKill(0, false, false)).toBe(4);
+    expect(superChargeForKill(0, true, false)).toBe(12);
+    expect(superChargeForKill(0, false, true)).toBe(40);
+  });
+  it("combo accelerates charge, capped at +6", () => {
+    expect(superChargeForKill(4, false, false)).toBe(5);
+    expect(superChargeForKill(400, false, false)).toBe(10);
+  });
+  it("SUPER_MAX_CHARGE is reachable in a reasonable fight", () => {
+    let charge = 0;
+    for (let i = 0; i < 25; i++) charge += superChargeForKill(i, false, false);
+    expect(charge).toBeGreaterThanOrEqual(SUPER_MAX_CHARGE);
+  });
+});
+
+describe("adaptive quality governor", () => {
+  it("steps down after two consecutive low-FPS windows", () => {
+    let g = createQualityGovernor();
+    g = updateQualityGovernor(g, 40, 0);
+    expect(g.level).toBe(0);
+    g = updateQualityGovernor(g, 40, 1.5);
+    expect(g.level).toBe(1);
+  });
+  it("respects the cooldown — no double step-down inside 5s", () => {
+    let g = createQualityGovernor();
+    g = updateQualityGovernor(g, 40, 0);
+    g = updateQualityGovernor(g, 40, 1.5); // → level 1
+    g = updateQualityGovernor(g, 40, 3);
+    g = updateQualityGovernor(g, 40, 4.5);
+    expect(g.level).toBe(1);
+  });
+  it("recovers after four consecutive high-FPS windows past cooldown", () => {
+    let g = createQualityGovernor();
+    g = updateQualityGovernor(g, 40, 0);
+    g = updateQualityGovernor(g, 40, 1.5); // level 1
+    for (let i = 0; i < 4; i++) g = updateQualityGovernor(g, 60, 8 + i * 1.5);
+    expect(g.level).toBe(0);
+  });
+  it("hysteresis: mid-band FPS resets both counters", () => {
+    let g = createQualityGovernor();
+    g = updateQualityGovernor(g, 40, 0);
+    expect(g.lowWindows).toBe(1);
+    g = updateQualityGovernor(g, 53, 1.5);
+    expect(g.lowWindows).toBe(0);
+    expect(g.level).toBe(0);
+  });
+  it("never exceeds the max level", () => {
+    let g = createQualityGovernor();
+    for (let i = 0; i < 20; i++) g = updateQualityGovernor(g, 30, i * 1.5 + (i > 1 ? 60 : 0));
+    expect(g.level).toBeLessThanOrEqual(GOVERNOR_MAX_LEVEL);
+  });
+  it("scales pixel ratio and particles down with level, never below floors", () => {
+    expect(governorPixelScale(0)).toBe(1);
+    expect(governorPixelScale(3)).toBeCloseTo(0.55);
+    expect(governorParticleScale(3)).toBeGreaterThan(0.4);
+    expect(governorPixelScale(99)).toBeCloseTo(0.55); // clamped
+  });
+  it("bloom survives level 1 but is cut at level 2", () => {
+    expect(governorBloomAllowed(1, true)).toBe(true);
+    expect(governorBloomAllowed(2, true)).toBe(false);
+    expect(governorBloomAllowed(0, false)).toBe(false); // respects user preset
+  });
+});
+
+describe("pilot perks", () => {
+  it("reads empty storage as all-zero ranks", () => {
+    const perks = readPerks(memStorage());
+    expect(Object.values(perks).every((r) => r === 0)).toBe(true);
+  });
+  it("persists ranks and clamps to MAX_PERK_RANK", () => {
+    const s = memStorage();
+    writePerkRank("magnet", 2, s);
+    writePerkRank("dash", 99, s);
+    const perks = readPerks(s);
+    expect(perks.magnet).toBe(2);
+    expect(perks.dash).toBe(MAX_PERK_RANK);
+  });
+  it("perkEffect scales linearly with rank", () => {
+    expect(perkEffect("magnet", 0)).toBe(0);
+    expect(perkEffect("magnet", 2)).toBeCloseTo(PERK_INFO.magnet.perRank * 2);
+  });
+  it("every perk has exactly 3 rank costs", () => {
+    for (const info of Object.values(PERK_INFO)) {
+      expect(info.costs.length).toBe(3);
+      expect(info.costs[1]).toBeGreaterThan(info.costs[0]);
+    }
+  });
+});
+
+describe("weapon mods", () => {
+  it("reads empty storage as all factory (0)", () => {
+    expect(readWeaponMods(memStorage())).toEqual([0, 0, 0, 0]);
+  });
+  it("persists a choice per weapon, clamped to [0,2]", () => {
+    const s = memStorage();
+    writeWeaponMod(0, 1, s);
+    writeWeaponMod(2, 7, s);
+    expect(readWeaponMods(s)).toEqual([1, 0, 2, 0]);
+  });
+  it("every weapon offers exactly two mods", () => {
+    expect(Object.keys(WEAPON_MODS).length).toBe(4);
+    for (const pair of Object.values(WEAPON_MODS)) expect(pair.length).toBe(2);
+  });
+});
+
+describe("extraction", () => {
+  it("requires the minimum wave AND objectives AND a fresh run", () => {
+    expect(canOfferExtraction(6, 2, false)).toBe(true);
+    expect(canOfferExtraction(5, 2, false)).toBe(false);
+    expect(canOfferExtraction(6, 1, false)).toBe(false);
+    expect(canOfferExtraction(6, 2, true)).toBe(false);
+  });
+});
+
+describe("run history", () => {
+  const rec = (score: number) => ({
+    score,
+    wave: 5,
+    kills: 100,
+    accuracy: 0.5,
+    survivalTime: 120,
+    victory: false,
+    at: Date.now(),
+  });
+  it("records most-recent-first and caps at the limit", () => {
+    const s = memStorage();
+    for (let i = 1; i <= 15; i++) recordRun(rec(i * 100), s);
+    const history = readRunHistory(s);
+    expect(history.length).toBe(RUN_HISTORY_LIMIT);
+    expect(history[0].score).toBe(1500);
+  });
+  it("drops malformed entries when reading", () => {
+    const s = memStorage();
+    s.setItem("helistrike:history", JSON.stringify([rec(100), { nope: true }, null]));
+    expect(readRunHistory(s).length).toBe(1);
+  });
+  it("scorecard mentions score and NEW BEST", () => {
+    const text = formatScorecard(rec(5000), 5000);
+    expect(text).toContain("5000");
+    expect(text).toContain("NEW BEST");
+    expect(text).toContain("2:00");
+  });
+});
+
+describe("nightOpForWave", () => {
+  it("never triggers before the minimum wave", () => {
+    for (let seed = 0; seed < 20; seed++) {
+      expect(nightOpForWave(NIGHT_OPS_MIN_WAVE - 1, seed)).toBe(false);
+    }
+  });
+  it("is deterministic for a given wave and seed", () => {
+    for (let wave = NIGHT_OPS_MIN_WAVE; wave < NIGHT_OPS_MIN_WAVE + 12; wave++) {
+      const a = nightOpForWave(wave, 7);
+      expect(nightOpForWave(wave, 7)).toBe(a);
+    }
+  });
+  it("lands roughly near the 25% chance across many waves", () => {
+    let hits = 0;
+    const total = 400;
+    for (let wave = NIGHT_OPS_MIN_WAVE; wave < NIGHT_OPS_MIN_WAVE + total; wave++) {
+      if (nightOpForWave(wave, 1234)) hits++;
+    }
+    // Loose bounds — the hash should sit near the intended probability.
+    expect(hits).toBeGreaterThan(total * 0.1);
+    expect(hits).toBeLessThan(total * 0.45);
   });
 });

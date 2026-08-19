@@ -1,7 +1,7 @@
 // Pure game logic — no THREE/CANNON/DOM dependencies, unit-testable.
 // EnemyType is imported as a value but types.ts only uses type-only imports
 // for THREE/CANNON, so it stays dependency-free at runtime.
-import { EnemyType } from "./types";
+import { EnemyType, WeaponType } from "./types";
 
 // ---------------------------------------------------------------------------
 // Difficulty
@@ -65,6 +65,44 @@ export function waveThreatBudget(wave: number, threatLevel = 1): number {
   const safeWave = Math.max(1, Math.floor(wave));
   const safeThreat = Math.max(1, Math.min(5, Math.floor(threatLevel)));
   return Math.round((16 + safeWave * 7) * (1 + (safeThreat - 1) * 0.12));
+}
+
+// ---------------------------------------------------------------------------
+// Public wave API — the plan contract: budget → composition → stat scaling.
+// These wrap the threat-budget director so gameplay code can drive a wave from
+// one surface without reaching into the pickers below.
+// ---------------------------------------------------------------------------
+
+/** Total spawn budget the horde director may spend this wave. */
+export function waveSpawnBudget(wave: number, threatLevel = 1): number {
+  return waveThreatBudget(wave, threatLevel);
+}
+
+/**
+ * Pick the next composition member within the remaining budget, preferring a
+ * wave-gated squad template (arrives as a staggered stream) before falling
+ * back to an individual variant. Returns STANDARD when nothing heavier fits.
+ */
+export function waveComposition(
+  wave: number,
+  remainingBudget: number,
+  rng: () => number = Math.random,
+): EnemyVariant {
+  const squad = pickSquadForWave(wave, () => Math.max(0, rng() - 0.1));
+  if (squad && squad.length > 0 && compositionFitsBudget(squad, remainingBudget)) {
+    return squad[0];
+  }
+  const v = pickEnemyVariant(wave, rng);
+  return ENEMY_VARIANTS[v].threat <= remainingBudget ? v : EnemyVariant.STANDARD;
+}
+
+/** Unified stat scaling for a wave: hp, shot damage, and fire-rate multipliers. */
+export function waveStatScale(wave: number): { hp: number; damage: number; fireRate: number } {
+  return {
+    hp: waveEnemyPower(wave),
+    damage: waveEnemyDamage(wave),
+    fireRate: waveEnemyFireRate(wave),
+  };
 }
 
 /**
@@ -297,7 +335,7 @@ export function objectiveConfig(type: number): ObjectiveConfig {
 // Enemy variants (combat roles on top of the five base EnemyTypes)
 // ---------------------------------------------------------------------------
 
-import { EnemyVariant } from "./types";
+import { EnemyVariant, type StatusEffectKind } from "./types";
 
 export interface EnemyVariantConfig {
   variant: EnemyVariant;
@@ -454,6 +492,42 @@ export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
     rare: true,
     maxActive: 1,
   },
+  [EnemyVariant.INTERCEPTOR]: {
+    variant: EnemyVariant.INTERCEPTOR,
+    baseType: EnemyType.DRONE,
+    threat: 2.0,
+    minWave: 10,
+    hpMult: 1.3,
+    speedMult: 2.2,
+    damageMult: 1.2,
+    pointsMult: 1.8,
+    accent: 0x55aaff,
+    maxActive: 4,
+  },
+  [EnemyVariant.MINELAYER]: {
+    variant: EnemyVariant.MINELAYER,
+    baseType: EnemyType.SHOOTER,
+    threat: 2.25,
+    minWave: 11,
+    hpMult: 1.6,
+    speedMult: 0.7,
+    damageMult: 1.0,
+    pointsMult: 1.9,
+    accent: 0xff44aa,
+    maxActive: 2,
+  },
+  [EnemyVariant.GATLING_HEAVY]: {
+    variant: EnemyVariant.GATLING_HEAVY,
+    baseType: EnemyType.TANK,
+    threat: 2.5,
+    minWave: 9,
+    hpMult: 2.6,
+    speedMult: 0.6,
+    damageMult: 1.35,
+    pointsMult: 2.1,
+    accent: 0xffd92e,
+    maxActive: 2,
+  },
 };
 
 /** Pick a random variant available at the given wave (weighted toward newer, spicier units). */
@@ -498,6 +572,9 @@ export const SQUAD_TEMPLATES: SquadTemplate[] = [
   { members: [EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 6, weight: 0.6 }, // High pressure
   { members: [EnemyVariant.HEAVY_GUNSHIP, EnemyVariant.SHIELD_DRONE, EnemyVariant.SCOUT_DRONE, EnemyVariant.SCOUT_DRONE], minWave: 8, weight: 0.5 }, // Heavy assault
   { members: [EnemyVariant.SIEGE_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.SCOUT_DRONE], minWave: 9, weight: 0.4 }, // Siege push
+  { members: [EnemyVariant.GATLING_HEAVY, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.SHIELD_DRONE], minWave: 9, weight: 0.6 }, // Gatling guard
+  { members: [EnemyVariant.INTERCEPTOR, EnemyVariant.INTERCEPTOR, EnemyVariant.SCOUT_DRONE], minWave: 10, weight: 0.7 }, // Interceptor sweep
+  { members: [EnemyVariant.MINELAYER, EnemyVariant.FLAK_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 11, weight: 0.5 }, // Minefield escort
 ];
 
 export function compositionThreatCost(members: readonly EnemyVariant[]): number {
@@ -574,7 +651,10 @@ export type UpgradeId =
   | 'repair'
   | 'xpMagnet'
   | 'dashCooldown'
-  | 'bomb';
+  | 'bomb'
+  | 'incendiary'
+  | 'empPayload'
+  | 'shockCoils';
 
 export type UpgradeCategory = 'OFFENSE' | 'DEFENSE' | 'MOBILITY' | 'UTILITY' | 'WEAPON';
 
@@ -601,6 +681,9 @@ export const UPGRADE_POOL: UpgradeOption[] = [
   { id: 'speed', title: 'Afterburners', desc: '+20% move speed for 12s', icon: '💨', category: 'MOBILITY' },
   { id: 'dashCooldown', title: 'Vector Jets', desc: 'Dash cooldown -15%', icon: '💨', category: 'MOBILITY' },
   { id: 'bomb', title: 'Airstrike', desc: 'Instantly clear the screen', icon: '💣', category: 'OFFENSE' },
+  { id: 'incendiary', title: 'Incendiary Rounds', desc: '+6% burn chance per stack (all weapons)', icon: '🔥', category: 'OFFENSE' },
+  { id: 'empPayload', title: 'EMP Payload', desc: '+7% EMP chance per stack (blast weapons)', icon: '📡', category: 'OFFENSE' },
+  { id: 'shockCoils', title: 'Shock Coils', desc: '+5% shock chance per stack (all weapons)', icon: '⚡', category: 'OFFENSE' },
 ];
 
 /** Pick `count` distinct random upgrades (clamped to the pool size). */
@@ -776,7 +859,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     sidewalk: 0x9ba0a5,
     windowColor: 0xbcd6de,
     trimColor: 0x8fb4c8,
-    density: 0.48,
+    density: 0.84,
     footprintWeights: [0.42, 0.42, 0.16],
     heightBand: [10, 20],
     skyscraperChance: 0.5,
@@ -788,7 +871,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     accentColor: 0x8fb4c8,
     signColors: [0x75b8ff, 0xffe66d, 0xff5f8f, 0x56e6ff],
     billboardCount: 4,
-    openSpaceChance: 0.35,
+    openSpaceChance: 0.08,
     landmarkChance: 1,
     crossStreetHalf: 10,
     propDensity: 0.9,
@@ -801,7 +884,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     sidewalk: 0xa8a49a,
     windowColor: 0xf2d48a,
     trimColor: 0xc9a35f,
-    density: 0.44,
+    density: 0.8,
     footprintWeights: [0.5, 0.38, 0.12],
     heightBand: [8, 18],
     skyscraperChance: 0.15,
@@ -813,7 +896,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     accentColor: 0xc9a35f,
     signColors: [0xc9a35f, 0xffd97a, 0x9fd0e8],
     billboardCount: 3,
-    openSpaceChance: 0.4,
+    openSpaceChance: 0.1,
     landmarkChance: 0.9,
     crossStreetHalf: 10,
     propDensity: 0.8,
@@ -826,7 +909,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     sidewalk: 0x8f8a80,
     windowColor: 0xff8f2a,
     trimColor: 0xd97b4a,
-    density: 0.4,
+    density: 0.72,
     footprintWeights: [0.48, 0.4, 0.12],
     heightBand: [4, 11],
     skyscraperChance: 0.08,
@@ -838,7 +921,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     accentColor: 0xd97b4a,
     signColors: [0xd97b4a, 0xff8f2a, 0x9aa3b3],
     billboardCount: 2,
-    openSpaceChance: 0.55,
+    openSpaceChance: 0.22,
     landmarkChance: 1,
     crossStreetHalf: 14,
     propDensity: 0.85,
@@ -851,7 +934,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     sidewalk: 0xc0b4a0,
     windowColor: 0xffd9b0,
     trimColor: 0xd9b08a,
-    density: 0.46,
+    density: 0.8,
     footprintWeights: [0.62, 0.3, 0.08],
     heightBand: [5, 11],
     skyscraperChance: 0,
@@ -863,7 +946,7 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
     accentColor: 0xd9b08a,
     signColors: [0xd9b08a, 0xffd9b0, 0x93a99a],
     billboardCount: 2,
-    openSpaceChance: 0.6,
+    openSpaceChance: 0.25,
     landmarkChance: 0.55,
     crossStreetHalf: 8,
     propDensity: 0.7,
@@ -1052,6 +1135,24 @@ export function buildingArchetype(r: ArchetypeRoll): BuildingArchetype {
   return 'plain';
 }
 
+// --- Environment Pass 10: procedural massing ------------------------------
+// Two buildings with the same archetype still differ in how their volume is
+// composed: the classic single box plus podium+tower, L-wing, twin-tower and
+// asymmetric setback massings. The roll is pure and deterministic (seeded per
+// cell), and SMALL footprints always stay single boxes so the combat corridor
+// keeps its clean low-rise walls.
+
+export type BuildingMassing = 'mono' | 'podium' | 'lshape' | 'twins' | 'stepped';
+
+export function buildingMassing(roll: number, tier: number): BuildingMassing {
+  if (tier === 0) return 'mono';
+  if (roll < 0.52) return 'mono';
+  if (roll < 0.7) return 'podium';
+  if (roll < 0.83) return 'lshape';
+  if (roll < 0.92) return 'twins';
+  return 'stepped';
+}
+
 // --- Environment Pass 9: procedural scene rhythm ---------------------------
 // Chunks alternate visual intensity along the flight path instead of reading
 // as one uniform grid: dense blocks → plazas/open space → airier objective
@@ -1110,4 +1211,395 @@ export function rhythmDensity(rhythm: SceneRhythm): number {
     case 'landmark':
       return 0.85;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Status effects (Burn / EMP / Shock)
+// ---------------------------------------------------------------------------
+
+/** How long each status effect lasts once applied (seconds). */
+export const STATUS_DURATIONS: Record<StatusEffectKind, number> = {
+  burn: 3.0,
+  emp: 2.0,
+  shock: 2.5,
+};
+
+/** Burn damage per second while ignited. */
+export const BURN_DPS = 14;
+/** Movement-speed multiplier while shocked (lower = slower). */
+export const SHOCK_SPEED_MULT = 0.55;
+
+/** Clamp a status proc chance (base + perk/upgrade bonuses) to a sane ceiling. */
+export function statusProcChance(base: number, bonus = 0): number {
+  return clamp(base + Math.max(0, bonus), 0, 0.95);
+}
+
+// ---------------------------------------------------------------------------
+// Elite affixes (new EnemyModifier bitflags)
+// ---------------------------------------------------------------------------
+
+export interface AffixChances {
+  explosive: number;
+  splitter: number;
+  vampiric: number;
+}
+
+/** Per-spawn affix roll chances by wave — all zero before their debut wave. */
+export function affixChancesForWave(wave: number): AffixChances {
+  const w = Math.max(1, Math.floor(wave));
+  return {
+    explosive: w >= 6 ? Math.min(0.18, 0.06 + (w - 6) * 0.01) : 0,
+    splitter: w >= 8 ? Math.min(0.14, 0.04 + (w - 8) * 0.008) : 0,
+    vampiric: w >= 9 ? Math.min(0.12, 0.03 + (w - 9) * 0.008) : 0,
+  };
+}
+
+/** Drones released when a SPLITTER enemy dies. */
+export const SPLITTER_DRONE_COUNT = 3;
+/** Death-detonation radius / damage for EXPLOSIVE enemies. */
+export const EXPLOSIVE_AFFIX_RADIUS = 26;
+export const EXPLOSIVE_AFFIX_DAMAGE = 30;
+/** Fraction of dealt damage a VAMPIRIC enemy heals back. */
+export const VAMPIRIC_HEAL_FRACTION = 0.5;
+
+// ---------------------------------------------------------------------------
+// Devastation super meter
+// ---------------------------------------------------------------------------
+
+export const SUPER_MAX_CHARGE = 100;
+/** Seconds the Devastation overcharge lasts once triggered. */
+export const SUPER_DURATION = 5;
+/** Seconds before the meter can charge again after an overcharge ends. */
+export const SUPER_COOLDOWN = 8;
+
+/** Charge granted per kill — combo accelerates it, elites/bosses are jackpots. */
+export function superChargeForKill(comboCount: number, isElite: boolean, isBoss: boolean): number {
+  if (isBoss) return 40;
+  const base = isElite ? 12 : 4;
+  return base + Math.min(6, Math.floor(Math.max(0, comboCount) / 4));
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive quality governor (pure — the engine feeds it FPS windows)
+// ---------------------------------------------------------------------------
+
+export interface QualityGovernorState {
+  /** 0 = full quality .. GOVERNOR_MAX_LEVEL = maximum degradation. */
+  level: number;
+  /** Consecutive measurement windows below GOVERNOR_LOW_FPS. */
+  lowWindows: number;
+  /** Consecutive measurement windows above GOVERNOR_HIGH_FPS. */
+  highWindows: number;
+  /** Timestamp (s) of the last level change — enforces the cooldown. */
+  lastChangeAt: number;
+}
+
+export const GOVERNOR_MAX_LEVEL = 3;
+export const GOVERNOR_LOW_FPS = 50;
+export const GOVERNOR_HIGH_FPS = 57;
+/** Minimum seconds between level changes (prevents oscillation). */
+export const GOVERNOR_COOLDOWN_SECONDS = 5;
+/** Pixel-ratio multiplier applied on top of the user's quality preset. */
+export const GOVERNOR_PIXEL_SCALE = [1, 0.85, 0.7, 0.55] as const;
+/** Particle spawn-count multiplier per governor level. */
+export const GOVERNOR_PARTICLE_SCALE = [1, 0.8, 0.6, 0.45] as const;
+
+export function createQualityGovernor(): QualityGovernorState {
+  return { level: 0, lowWindows: 0, highWindows: 0, lastChangeAt: -999 };
+}
+
+/**
+ * Advance the governor with one measurement window. Two consecutive windows
+ * below LOW_FPS step down; four above HIGH_FPS step back up; the band in
+ * between is a hysteresis dead zone. Level changes respect a cooldown.
+ */
+export function updateQualityGovernor(
+  state: QualityGovernorState,
+  avgFps: number,
+  now: number,
+): QualityGovernorState {
+  if (!Number.isFinite(avgFps) || !Number.isFinite(now)) return state;
+  let { level, lowWindows, highWindows, lastChangeAt } = state;
+  if (avgFps < GOVERNOR_LOW_FPS) {
+    lowWindows += 1;
+    highWindows = 0;
+  } else if (avgFps > GOVERNOR_HIGH_FPS) {
+    highWindows += 1;
+    lowWindows = 0;
+  } else {
+    lowWindows = 0;
+    highWindows = 0;
+  }
+  const cooldownOk = now - lastChangeAt >= GOVERNOR_COOLDOWN_SECONDS;
+  if (cooldownOk && lowWindows >= 2 && level < GOVERNOR_MAX_LEVEL) {
+    level += 1;
+    lowWindows = 0;
+    highWindows = 0;
+    lastChangeAt = now;
+  } else if (cooldownOk && highWindows >= 4 && level > 0) {
+    level -= 1;
+    lowWindows = 0;
+    highWindows = 0;
+    lastChangeAt = now;
+  }
+  if (
+    level === state.level &&
+    lowWindows === state.lowWindows &&
+    highWindows === state.highWindows
+  ) {
+    return state;
+  }
+  return { level, lowWindows, highWindows, lastChangeAt };
+}
+
+export function governorPixelScale(level: number): number {
+  return GOVERNOR_PIXEL_SCALE[clamp(Math.floor(level), 0, GOVERNOR_MAX_LEVEL)];
+}
+
+export function governorParticleScale(level: number): number {
+  return GOVERNOR_PARTICLE_SCALE[clamp(Math.floor(level), 0, GOVERNOR_MAX_LEVEL)];
+}
+
+/** Bloom survives light degradation but is the first heavy effect cut. */
+export function governorBloomAllowed(level: number, userWantsHigh: boolean): boolean {
+  return userWantsHigh && level < 2;
+}
+
+// ---------------------------------------------------------------------------
+// Pilot perks (persistent meta-progression, bought with salvage credits)
+// ---------------------------------------------------------------------------
+
+export type PerkId =
+  | 'magnet'
+  | 'dash'
+  | 'salvageLuck'
+  | 'crashResist'
+  | 'xpGain'
+  | 'fuelSaver'
+  | 'superCharge'
+  | 'procChance';
+
+export const MAX_PERK_RANK = 3;
+
+export interface PerkInfo {
+  name: string;
+  desc: string;
+  /** Salvage-credit cost per rank (index 0 = rank 1). */
+  costs: [number, number, number];
+  /** Numeric effect granted per rank (meaning depends on the perk). */
+  perRank: number;
+}
+
+export const PERK_INFO: Record<PerkId, PerkInfo> = {
+  magnet: { name: 'Salvage Magnet', desc: '+20% pickup & gem magnet radius per rank', costs: [120, 300, 620], perRank: 0.2 },
+  dash: { name: 'Vector Thrusters', desc: 'Dash cooldown -8% per rank', costs: [140, 320, 660], perRank: 0.08 },
+  salvageLuck: { name: 'Scavenger Rig', desc: '+10% salvage from all sources per rank', costs: [150, 340, 700], perRank: 0.1 },
+  crashResist: { name: 'Crash Plating', desc: 'Collision damage -12% per rank', costs: [130, 310, 640], perRank: 0.12 },
+  xpGain: { name: 'Combat Computer', desc: '+8% run XP per rank', costs: [160, 360, 720], perRank: 0.08 },
+  fuelSaver: { name: 'Lean Burn', desc: 'Fuel drain -6% per rank', costs: [120, 300, 620], perRank: 0.06 },
+  superCharge: { name: 'Devastator Core', desc: '+15% Devastation charge rate per rank', costs: [180, 400, 780], perRank: 0.15 },
+  procChance: { name: 'Elemental Coils', desc: '+5% status proc chance per rank', costs: [170, 380, 740], perRank: 0.05 },
+};
+
+export type PerkRanks = Record<PerkId, number>;
+
+export function defaultPerks(): PerkRanks {
+  return { magnet: 0, dash: 0, salvageLuck: 0, crashResist: 0, xpGain: 0, fuelSaver: 0, superCharge: 0, procChance: 0 };
+}
+
+export function readPerks(storage: Pick<Storage, 'getItem'> = window.localStorage): PerkRanks {
+  const ranks = defaultPerks();
+  try {
+    const raw = storage.getItem('helistrike:perks');
+    if (!raw) return ranks;
+    const parsed = JSON.parse(raw) as Partial<Record<PerkId, number>>;
+    for (const id of Object.keys(ranks) as PerkId[]) {
+      ranks[id] = clamp(Math.floor(parsed?.[id] ?? 0), 0, MAX_PERK_RANK);
+    }
+  } catch {
+    // storage unavailable — defaults
+  }
+  return ranks;
+}
+
+export function writePerkRank(
+  id: PerkId,
+  rank: number,
+  storage: Pick<Storage, 'getItem' | 'setItem'> = window.localStorage,
+): PerkRanks {
+  const ranks = readPerks(storage);
+  ranks[id] = clamp(Math.floor(rank), 0, MAX_PERK_RANK);
+  try {
+    storage.setItem('helistrike:perks', JSON.stringify(ranks));
+  } catch {
+    // storage unavailable — ignore
+  }
+  return ranks;
+}
+
+/** Numeric effect of a perk at a rank (e.g. magnet rank 2 = 0.4 → +40% radius). */
+export function perkEffect(id: PerkId, rank: number): number {
+  return PERK_INFO[id].perRank * clamp(Math.floor(rank), 0, MAX_PERK_RANK);
+}
+
+// ---------------------------------------------------------------------------
+// Weapon mods (one per weapon, chosen in the Hangar — persisted)
+// ---------------------------------------------------------------------------
+
+/** 0 = factory config, 1 = mod A, 2 = mod B. */
+export type WeaponModChoice = 0 | 1 | 2;
+
+export interface WeaponModInfo {
+  name: string;
+  desc: string;
+}
+
+export const WEAPON_MODS: Record<number, [WeaponModInfo, WeaponModInfo]> = {
+  [WeaponType.MACHINE_GUN]: [
+    { name: 'Incendiary Rounds', desc: '18% chance to ignite targets (burn 3s)' },
+    { name: 'Piercing Rounds', desc: '+35% damage vs TANK & BOSS hulls' },
+  ],
+  [WeaponType.MISSILE]: [
+    { name: 'EMP Warheads', desc: 'Blast disables enemy weapons for 2s' },
+    { name: 'Cluster Warheads', desc: 'Impact splits into 3 mini-blasts' },
+  ],
+  [WeaponType.ROCKET]: [
+    { name: 'Napalm Payload', desc: '+30% blast radius, ignites survivors' },
+    { name: 'Shaped Charge', desc: '+45% damage vs BOSS & elite targets' },
+  ],
+  [WeaponType.SHOTGUN]: [
+    { name: 'Shock Shells', desc: '25% chance to slow enemies (2.5s)' },
+    { name: 'Slug Barrel', desc: '+30% damage, tighter spread' },
+  ],
+};
+
+export function readWeaponMods(storage: Pick<Storage, 'getItem'> = window.localStorage): number[] {
+  try {
+    const raw = storage.getItem('helistrike:weaponMods');
+    if (!raw) return [0, 0, 0, 0];
+    const parsed = JSON.parse(raw) as number[];
+    return [0, 1, 2, 3].map((i) => clamp(Math.floor(parsed[i] ?? 0), 0, 2));
+  } catch {
+    return [0, 0, 0, 0];
+  }
+}
+
+export function writeWeaponMod(
+  weaponIndex: number,
+  choice: number,
+  storage: Pick<Storage, 'getItem' | 'setItem'> = window.localStorage,
+): number[] {
+  const mods = readWeaponMods(storage);
+  if (weaponIndex >= 0 && weaponIndex < mods.length) {
+    mods[weaponIndex] = clamp(Math.floor(choice), 0, 2);
+  }
+  try {
+    storage.setItem('helistrike:weaponMods', JSON.stringify(mods));
+  } catch {
+    // storage unavailable — ignore
+  }
+  return mods;
+}
+
+// ---------------------------------------------------------------------------
+// Extraction run structure
+// ---------------------------------------------------------------------------
+
+export const EXTRACTION_MIN_WAVE = 6;
+export const EXTRACTION_MIN_OBJECTIVES = 2;
+/** Seconds the player must hold the LZ while the evac rides in. */
+export const EXTRACTION_HOLD_SECONDS = 12;
+
+// ---------------------------------------------------------------------------
+// Night ops (wave-scoped palette swap — seeded so a run is reproducible)
+// ---------------------------------------------------------------------------
+
+export const NIGHT_OPS_MIN_WAVE = 8;
+export const NIGHT_OPS_CHANCE = 0.25;
+
+/** Deterministic per-wave night-op roll: same (wave, seed) always agrees. */
+export function nightOpForWave(wave: number, seed: number): boolean {
+  if (!Number.isFinite(wave) || !Number.isFinite(seed)) return false;
+  if (wave < NIGHT_OPS_MIN_WAVE) return false;
+  let h = (Math.floor(wave) * 374761393 + Math.floor(seed) * 668265263) >>> 0;
+  h = (h ^ (h >>> 13)) >>> 0;
+  h = Math.imul(h, 1274126177) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return h % 1000 < Math.round(NIGHT_OPS_CHANCE * 1000);
+}
+
+/** An LZ evac may be offered once per run, after the player has proven themselves. */
+export function canOfferExtraction(
+  wave: number,
+  objectivesDestroyed: number,
+  alreadyHandled: boolean,
+): boolean {
+  return (
+    !alreadyHandled &&
+    wave >= EXTRACTION_MIN_WAVE &&
+    objectivesDestroyed >= EXTRACTION_MIN_OBJECTIVES
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Run history & shareable scorecard
+// ---------------------------------------------------------------------------
+
+export interface RunRecord {
+  score: number;
+  wave: number;
+  kills: number;
+  accuracy: number;
+  survivalTime: number;
+  victory: boolean;
+  /** Epoch milliseconds when the run ended. */
+  at: number;
+}
+
+export const RUN_HISTORY_LIMIT = 10;
+
+export function readRunHistory(storage: Pick<Storage, 'getItem'> = window.localStorage): RunRecord[] {
+  try {
+    const raw = storage.getItem('helistrike:history');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((r): r is RunRecord =>
+        !!r &&
+        Number.isFinite(r.score) &&
+        Number.isFinite(r.wave) &&
+        Number.isFinite(r.kills),
+      )
+      .slice(0, RUN_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+/** Prepend a run to the persisted history (most recent first, capped). */
+export function recordRun(
+  rec: RunRecord,
+  storage: Pick<Storage, 'getItem' | 'setItem'> = window.localStorage,
+): RunRecord[] {
+  const history = [rec, ...readRunHistory(storage)].slice(0, RUN_HISTORY_LIMIT);
+  try {
+    storage.setItem('helistrike:history', JSON.stringify(history));
+  } catch {
+    // storage unavailable — ignore
+  }
+  return history;
+}
+
+/** Plain-text scorecard for clipboard sharing. */
+export function formatScorecard(rec: RunRecord, best: number): string {
+  const lines = [
+    `HELI-STRIKE ${rec.victory ? '— MISSION COMPLETE' : '— RUN REPORT'}`,
+    `Score: ${rec.score}${rec.score >= best && rec.score > 0 ? ' (NEW BEST!)' : ''}`,
+    `Wave reached: ${rec.wave}`,
+    `Kills: ${rec.kills}`,
+    `Accuracy: ${Math.round(rec.accuracy * 100)}%`,
+    `Survived: ${formatDuration(rec.survivalTime)}`,
+  ];
+  return lines.join('\n');
 }
