@@ -604,3 +604,36 @@ body,
     opacity: 0;
   }
 }
+
+/* ── Directional damage indicator ──────────────────────────────────── */
+/* Red arc flashing at the screen edge toward the incoming hit. The engine
+   sends a camera-relative angle: 0° = dead ahead (top), +90° = right,
+   ±180° = behind (bottom), -90° = left. The element pivots around screen
+   center: rotate to the threat bearing, slide outward to the edge. */
+.damage-arc {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(42vmin, 250px);
+  height: min(9vmin, 56px);
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent 4%, rgba(255, 46, 46, 0.95) 50%, transparent 96%);
+  box-shadow: 0 0 22px rgba(255, 60, 40, 0.85), 0 0 48px rgba(255, 40, 30, 0.4);
+  transform: rotate(var(--arc-angle, 0deg)) translateY(calc(-50vmin + 46px)) translateX(-50%);
+  animation: damage-arc-flash 0.7s ease-out forwards;
+}
+
+@keyframes damage-arc-flash {
+  0% {
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+  }
+}

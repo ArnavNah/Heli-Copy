@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import {
   EnemyVariant,
   GameEngine,
@@ -1589,6 +1589,8 @@ export default function App() {
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
   const [showPerf, setShowPerf] = useState(() => import.meta.env.DEV);
   const [hitFlash, setHitFlash] = useState(0);
+  // Directional damage indicators: red edge arcs pointing toward the threat.
+  const [damageArcs, setDamageArcs] = useState<{ id: number; angle: number }[]>([]);
 
   const applySettings = (patch: Partial<GameSettings>) => {
     const next = { ...settings, ...patch };
@@ -1729,6 +1731,19 @@ export default function App() {
       window.setTimeout(() => setHitFlash(0), 140);
     };
 
+    // Damage direction: the engine sends a camera-relative angle (0° = ahead,
+    // +90° = right, ±180° = behind). Each hit mints one edge arc that fades
+    // out on its own timer; overlapping hits stack (capped at 6).
+    const handleDamageDirection = (e: Event) => {
+      const detail = (e as CustomEvent<{ angle: number; amount: number }>).detail;
+      if (!detail) return;
+      const id = Date.now() + Math.random();
+      setDamageArcs((arcs) => [...arcs.slice(-5), { id, angle: detail.angle }]);
+      window.setTimeout(() => {
+        setDamageArcs((arcs) => arcs.filter((a) => a.id !== id));
+      }, 700);
+    };
+
     window.addEventListener('helistrike:update', handleUpdate as EventListener);
     window.addEventListener('helistrike:stats', handleStats as EventListener);
     window.addEventListener('helistrike:gameover', handleGameOver as EventListener);
@@ -1736,6 +1751,7 @@ export default function App() {
     window.addEventListener('helistrike:upgrade-offer', handleUpgradeOffer as EventListener);
     window.addEventListener('helistrike:announce', handleAnnounce as EventListener);
     window.addEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
+    window.addEventListener('helistrike:damage', handleDamageDirection as EventListener);
 
     return () => {
       window.removeEventListener('helistrike:update', handleUpdate as EventListener);
@@ -1745,6 +1761,7 @@ export default function App() {
       window.removeEventListener('helistrike:upgrade-offer', handleUpgradeOffer as EventListener);
       window.removeEventListener('helistrike:announce', handleAnnounce as EventListener);
       window.removeEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
+      window.removeEventListener('helistrike:damage', handleDamageDirection as EventListener);
       engine.dispose();
       engineRef.current = null;
     };
@@ -1894,6 +1911,18 @@ export default function App() {
           boxShadow: 'inset 0 0 26px rgba(255,220,190,0.65)',
         }}
       />
+      {/* Directional damage indicators — red edge arcs marking where hits come from */}
+      {mode === 'playing' && damageArcs.length > 0 && (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          {damageArcs.map((arc) => (
+            <div
+              key={arc.id}
+              className="damage-arc"
+              style={{ '--arc-angle': `${arc.angle}deg` } as CSSProperties}
+            />
+          ))}
+        </div>
+      )}
 
       <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
         {/* ══ TOP-LEFT: tactical objectives checklist ══ */}

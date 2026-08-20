@@ -41,6 +41,45 @@ const RetroDitherShader = {
       gl_FragColor = vec4(col, c.a);
     }`,
 };
+
+/** Per-wave-theme color grade: tint multiply + exposure bias + saturation
+ *  shift. Sits BEFORE OutputPass so the grade happens in linear working
+ *  space, and eases toward its target (~1.5s) whenever the wave theme rolls.
+ *  FRENZY warms the frame into an orange haze; NIGHT_SURGE cools and
+ *  desaturates it into a steel-blue night. */
+const ThemeGradeShader = {
+  name: 'ThemeGradeShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    uTint: { value: new THREE.Color(1, 1, 1) },
+    uExposure: { value: 1 },
+    uSaturation: { value: 1 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec3 uTint;
+    uniform float uExposure;
+    uniform float uSaturation;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec3 col = c.rgb * uTint * uExposure;
+      float luma = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(vec3(luma), col, uSaturation);
+      gl_FragColor = vec4(col, c.a);
+    }`,
+};
+
+/** Neutral grade (no theme) — tint white, exposure/saturation untouched. */
+const NEUTRAL_GRADE = { r: 1, g: 1, b: 1, exposure: 1, saturation: 1 };
+
 import { AudioManager } from "../audio";
 import { createBlobShadow, createGlowMaterial, createSkyDome, disposeObject3D } from "./materials";
 import { Enemy, Helicopter, MOVEMENT_CONFIG, Objective, PowerUp, Projectile, ProjectilePool } from "./entities";
@@ -104,6 +143,9 @@ import {
   waveEnemyFireRate,
   waveEnemyPower,
   waveDuration,
+  waveThemeBanner,
+  waveThemeFor,
+  WAVE_THEMES,
   weaponLevelBonus,
   weaponLevelForXp,
   multikillTier,
@@ -118,6 +160,7 @@ import {
   canOfferExtraction,
   createQualityGovernor,
   defaultPerks,
+  enemyAimAccuracy,
   EXPLOSIVE_AFFIX_DAMAGE,
   EXPLOSIVE_AFFIX_RADIUS,
   EXTRACTION_HOLD_SECONDS,
@@ -138,7 +181,7 @@ import {
   updateQualityGovernor,
   VAMPIRIC_HEAL_FRACTION,
 } from "./logic";
-import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, UpgradeId, UpgradeOption } from "./logic";
+import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, UpgradeId, UpgradeOption, WaveThemeConfig } from "./logic";
 import { armorMitigation, resolvePlayerDamage, resolveRepair, type PlayerDamageType } from "./combat";
 import {
   CountermeasureState,
@@ -158,6 +201,11 @@ import {
 
 type DashState = "READY" | "DASHING" | "COOLDOWN";
 
+/** Circular deadzone for the touch virtual-left-stick (mirrors the gamepad's).
+ *  Below this travel magnitude no movement command is emitted, and response
+ *  above it follows a gentle power curve so small deflections feel deliberate. */
+const TOUCH_DEADZONE = 0.15;
+
 export class GameEngine {
   private static readonly MAX_SIMULATION_DT = 0.05;
 
@@ -165,10 +213,18 @@ export class GameEngine {
   camera: THREE.PerspectiveCamera;
   cameraLookAtTarget: THREE.Vector3 = new THREE.Vector3();
   skyDome: THREE.Mesh;
+  /** Layered sun disc (core + halo) used to frame the desert sun. */
+  sunDisc: THREE.Group;
   renderer: THREE.WebGLRenderer;
   composer: EffectComposer;
   bloomPass: UnrealBloomPass;
     retroPass: ShaderPass;
+  /** Wave-theme color grading pass (FRENZY warm haze, NIGHT_SURGE cool blue). */
+  gradePass: ShaderPass;
+  private gradeTarget = { ...NEUTRAL_GRADE };
+  private gradeCurrent = { ...NEUTRAL_GRADE };
+  /** Throttle for rotor-downwash dust spawning while hovering low. */
+  private downwashTimer: number = 0;
   world: CANNON.World;
   city: CityEnvironment;
   delivery: DeliverySystem;
@@ -256,10 +312,16 @@ export class GameEngine {
   private debris: DebrisSystem | null = null;
   private shockwaves: ShockwaveRings | null = null;
 
-  // Fake blob shadows (shadowMap stays disabled for perf): one decal under
-  // the player, one pooled per active enemy, faded out with altitude.
+  // Fake blob shadows (shadowMap stays disabled for perf): one decal under the
+  // player, one pooled per active enemy. They sit ALONG the sun's shadow axis
+  // (offset opposite the key light ~ (-48,86,54)) so they read as cast contact
+  // shadows that spread with altitude instead of static discs stuck underfoot.
   private playerShadow: THREE.Mesh;
   private enemyShadows = new Map<Enemy, THREE.Mesh>();
+  // Horizontal shadow-cast direction, normalized (the key light sits roughly SW
+  // of the scene, so cast shadows fall toward +x / -z).
+  private readonly sunShadowDir = new THREE.Vector3(0.66, 0, -0.75).normalize();
+  private readonly sunShadowOffsetPerU = 0.09;
 
   // A4: adaptive quality governor — degrades pixel ratio/bloom/particles in
   // 1.5s FPS windows, never above the user's chosen quality preset.
@@ -345,6 +407,10 @@ export class GameEngine {
   waveTransitionTimer: number = 3.0; // Wait 3s before starting wave 1
   waveTimer: number = 0; // Seconds elapsed in the current time-driven wave
   waveMessage: string = "GET READY";
+  /** Procedural theme ("hand") for the current non-milestone wave, or null on a
+   *  milestone (boss/miniboss) wave. Rolls in startNextWave and reshapes the
+   *  horde, hulls, cadence, elite chance, weather, and banner. */
+  currentWaveTheme: WaveThemeConfig | null = null;
   minibossSpawnedThisWave: boolean = false;
 
   // Phase 3: bounded spawn queue — horde bursts drain ONE enemy per cadence
@@ -593,6 +659,11 @@ export class GameEngine {
     this.bloomPass.enabled = this.settings.graphics === 'hd';
     this.composer.addPass(this.bloomPass);
 
+    // Wave-theme color grading — before OutputPass so it grades in linear
+    // space; targets are swapped in startNextWave and eased in updateThemeGrading.
+    this.gradePass = new ShaderPass(ThemeGradeShader);
+    this.composer.addPass(this.gradePass);
+
     const outputPass = new OutputPass();
     this.composer.addPass(outputPass);
 
@@ -623,28 +694,45 @@ export class GameEngine {
     this.keyLight = softKey;
     softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
-    softKey.shadow.camera.left = -180;
-    softKey.shadow.camera.right = 180;
-    softKey.shadow.camera.top = 180;
-    softKey.shadow.camera.bottom = -180;
+    // Player-only real shadows (HD preset): a tight frustum that trails the
+    // helicopter each frame (updateShadowRig) keeps the shadow pass covering
+    // just the patch of world around the player instead of the whole city.
+    softKey.shadow.camera.left = -42;
+    softKey.shadow.camera.right = 42;
+    softKey.shadow.camera.top = 42;
+    softKey.shadow.camera.bottom = -42;
     softKey.shadow.camera.near = 0.5;
-    softKey.shadow.camera.far = 340;
-    softKey.shadow.mapSize.width = 2048;
-    softKey.shadow.mapSize.height = 2048;
+    softKey.shadow.camera.far = 260;
+    softKey.shadow.mapSize.width = 1024;
+    softKey.shadow.mapSize.height = 1024;
     softKey.shadow.bias = -0.00018;
     this.scene.add(softKey);
+    // The target must live in the scene graph for lookAt-following in
+    // updateShadowRig to affect the light's shadow camera orientation.
+    this.scene.add(softKey.target);
 
     const rimLight = new THREE.DirectionalLight(0x9fc4e8, 0.4);
     rimLight.position.set(65, 50, -85);
     this.scene.add(rimLight);
 
+    // Layered sun disc: a tight white-hot core inside a wide soft haze so the
+    // desert sun reads as a light source instead of a flat dot. Both layers are
+    // plain glowing spheres (bloom will lift the core in HD).
+    this.sunDisc = new THREE.Group();
+    const sunPos = new THREE.Vector3(-116, 118, -178);
     const sunCore = new THREE.Mesh(
       new THREE.SphereGeometry(8, 10, 6),
-      createGlowMaterial(0xffdd7a, 0.58),
+      createGlowMaterial(0xfff4cf, 0.75),
     );
-    sunCore.position.set(-116, 118, -178);
-    sunCore.renderOrder = -2;
-    this.scene.add(sunCore);
+    const sunHalo = new THREE.Mesh(
+      new THREE.SphereGeometry(22, 14, 8),
+      createGlowMaterial(0xffc66d, 0.16),
+    );
+    sunHalo.renderOrder = -2;
+    sunCore.renderOrder = -3;
+    this.sunDisc.add(sunHalo, sunCore);
+    this.sunDisc.position.copy(sunPos);
+    this.scene.add(this.sunDisc);
 
     this.city = new CityEnvironment(this.scene, this.world);
     this.city.onHonk = () => {
@@ -1128,6 +1216,10 @@ export class GameEngine {
     this.debris?.dispose();
     this.debris = null;
     this.nightBeams = null;
+    if (this.sunDisc) {
+      disposeObject3D(this.sunDisc);
+      this.sunDisc.clear();
+    }
     disposeObject3D(this.scene);
     this.scene.clear();
     this.composer.dispose();
@@ -1243,6 +1335,10 @@ export class GameEngine {
     }
     // HD is a clean, modern render: skip the PS1 color quantizer/dither entirely.
     if (this.retroPass) this.retroPass.enabled = false;
+    // Player-only real shadows are an HD-preset feature (SP1 keeps the cheap
+    // blob decals). The frustum hugs the player — see updateShadowRig().
+    this.renderer.shadowMap.enabled = this.settings.graphics === 'hd';
+    this.renderer.shadowMap.needsUpdate = true;
     this.audio.setVolume(this.settings.volume);
   }
 
@@ -1250,6 +1346,11 @@ export class GameEngine {
     // Keep the horizon centered on the player so the dome never strands
     // behind the streaming city chunks.
     this.skyDome.position.set(this.camera.position.x, 0, this.camera.position.z);
+    // Feed the sky shader's slow halo breathe (safe no-op if the uniform is
+    // absent — the weather system owns horizonColor separately).
+    if (this.skyDome.material instanceof THREE.ShaderMaterial && this.skyDome.material.uniforms?.uTime) {
+      this.skyDome.material.uniforms.uTime.value += 0.016;
+    }
     if (this.settings.graphics === 'sp1') {
       this.renderer.render(this.scene, this.camera);
       return;
@@ -1264,10 +1365,18 @@ export class GameEngine {
     const groundY = this.helicopter.smoothedHoverFloor;
     const alt = Math.max(0, hp.y - groundY);
     const playerFade = THREE.MathUtils.clamp(1 - alt / 140, 0, 1);
-    this.playerShadow.visible = playerFade > 0.03;
-    (this.playerShadow.material as THREE.MeshBasicMaterial).opacity = 0.9 * playerFade;
-    this.playerShadow.scale.setScalar(1 + alt * 0.012);
-    this.playerShadow.position.set(hp.x, groundY + 0.08, hp.z);
+    // HD draws the player's real cast shadow, so hide the fake decal there to
+    // avoid a doubled shadow. Enemies keep their decals in both presets.
+    this.playerShadow.visible = playerFade > 0.03 && !this.renderer.shadowMap.enabled;
+    (this.playerShadow.material as THREE.MeshBasicMaterial).opacity = 0.85 * playerFade;
+    // Spread + drift the shadow along the sun's cast axis as altitude rises.
+    const spread = 1 + alt * 0.014;
+    this.playerShadow.scale.set(spread * 1.35, spread * 1.35, 1);
+    this.playerShadow.position.set(
+      hp.x + this.sunShadowDir.x * alt * this.sunShadowOffsetPerU,
+      groundY + 0.08,
+      hp.z + this.sunShadowDir.z * alt * this.sunShadowOffsetPerU,
+    );
 
     const seen = new Set<Enemy>();
     for (const e of this.enemies) {
@@ -1280,10 +1389,17 @@ export class GameEngine {
         this.scene.add(shadow);
       }
       const p = e.body.position;
-      const fade = THREE.MathUtils.clamp(1 - Math.max(0, p.y) / 120, 0, 1) * 0.85;
+      const eAlt = Math.max(0, p.y);
+      const fade = THREE.MathUtils.clamp(1 - eAlt / 120, 0, 1) * 0.8;
       shadow.visible = fade > 0.03;
       (shadow.material as THREE.MeshBasicMaterial).opacity = fade;
-      shadow.position.set(p.x, 0.06, p.z);
+      const eSpread = 1 + eAlt * 0.012;
+      shadow.scale.set(eSpread * 1.3, eSpread * 1.3, 1);
+      shadow.position.set(
+        p.x + this.sunShadowDir.x * eAlt * this.sunShadowOffsetPerU,
+        0.06,
+        p.z + this.sunShadowDir.z * eAlt * this.sunShadowOffsetPerU,
+      );
     }
     for (const [e, shadow] of this.enemyShadows) {
       if (seen.has(e)) continue;
@@ -1292,6 +1408,50 @@ export class GameEngine {
       (shadow.material as THREE.Material).dispose();
       this.enemyShadows.delete(e);
     }
+  }
+
+  /** HD-preset real shadows: drag the key light + its tight shadow frustum
+   *  along with the helicopter so the 1024px map only covers the patch of
+   *  world around the player. Only the player mesh casts (city/enemies keep
+   *  castShadow=false), so the pass stays dirt cheap. No-op in SP1. */
+  private updateShadowRig() {
+    if (!this.renderer.shadowMap.enabled) return;
+    const hp = this.helicopter.body.position;
+    if (!Number.isFinite(hp.x) || !Number.isFinite(hp.z)) return;
+    this.keyLight.position.set(hp.x - 48, hp.y + 86, hp.z + 54);
+    this.keyLight.target.position.set(hp.x, hp.y, hp.z);
+    this.keyLight.target.updateMatrixWorld();
+  }
+
+  /** Ease the grade pass toward the current wave theme's look. delta <= 0
+   *  only refreshes the target (wave start); the per-frame call blends. */
+  private updateThemeGrading(delta: number) {
+    if (!this.gradePass) return;
+    const theme = this.currentWaveTheme;
+    if (!theme) {
+      this.gradeTarget = NEUTRAL_GRADE;
+    } else if (theme.key === "FRENZY") {
+      // Hot orange haze — the frame itself feels aggro.
+      this.gradeTarget = { r: 1.12, g: 0.93, b: 0.72, exposure: 1.06, saturation: 1.14 };
+    } else if (theme.key === "NIGHT_SURGE") {
+      // Steel-blue night — complement (don't fight) the night-ops palette.
+      this.gradeTarget = { r: 0.78, g: 0.88, b: 1.18, exposure: 1.0, saturation: 0.82 };
+    } else {
+      this.gradeTarget = NEUTRAL_GRADE;
+    }
+    if (delta <= 0) return;
+    const k = 1 - Math.exp(-delta / 0.45);
+    const c = this.gradeCurrent;
+    const t = this.gradeTarget;
+    c.r += (t.r - c.r) * k;
+    c.g += (t.g - c.g) * k;
+    c.b += (t.b - c.b) * k;
+    c.exposure += (t.exposure - c.exposure) * k;
+    c.saturation += (t.saturation - c.saturation) * k;
+    const u = this.gradePass.uniforms;
+    (u.uTint.value as THREE.Color).setRGB(c.r, c.g, c.b);
+    u.uExposure.value = c.exposure;
+    u.uSaturation.value = c.saturation;
   }
 
   private getFallbackFireDirection() {
@@ -2102,6 +2262,10 @@ export class GameEngine {
     damageType: PlayerDamageType,
     time: number,
     feedback = true,
+    /** World-space XZ direction the hit came FROM — drives the screen-edge
+     *  damage arcs (helistrike:damage). Omitted for directionless sources
+     *  (fuel starvation, lightning EMP). */
+    fromDirection?: { x: number; z: number },
   ) {
     if (this.health <= 0 || this.gameOverDispatched) return 0;
     // B3: invulnerable during Devastation overcharge
@@ -2121,9 +2285,35 @@ export class GameEngine {
       window.dispatchEvent(new CustomEvent("helistrike:player-hit", {
         detail: { amount: result.applied, source, damageType },
       }));
+      if (fromDirection) {
+        window.dispatchEvent(new CustomEvent("helistrike:damage", {
+          detail: {
+            angle: this.screenAngleFromDirection(fromDirection),
+            amount: result.applied,
+          },
+        }));
+      }
     }
     this.updateUI(time);
     return result.applied;
+  }
+
+  /** Turn a world XZ direction (where the damage came from) into a
+   *  screen-space angle relative to the camera view: 0° = dead ahead,
+   *  +90° = right, ±180° = behind, -90° = left. The HUD rotates its edge
+   *  arcs by this angle. */
+  private screenAngleFromDirection(dir: { x: number; z: number }): number {
+    const fwd = this.camera.getWorldDirection(new THREE.Vector3());
+    const fLen = Math.hypot(fwd.x, fwd.z) || 1;
+    const fx = fwd.x / fLen;
+    const fz = fwd.z / fLen;
+    const dLen = Math.hypot(dir.x, dir.z) || 1;
+    const dx = dir.x / dLen;
+    const dz = dir.z / dLen;
+    // Screen-right = forward × up in a y-up world.
+    const forwardAmt = dx * fx + dz * fz;
+    const rightAmt = dx * -fz + dz * fx;
+    return Math.atan2(rightAmt, forwardAmt) * (180 / Math.PI);
   }
 
   onHelicopterCollide = (e: { body?: CANNON.Body; contact?: CANNON.ContactEquation }) => {
@@ -2768,11 +2958,14 @@ export class GameEngine {
         if (other.takeDamage(dmg, time) === "destroyed") this.onEnemyDestroyed(other, time);
       }
     }
-    const pd = Math.hypot(this.helicopter.body.position.x - x, this.helicopter.body.position.z - z);
+    const pdx = this.helicopter.body.position.x - x;
+    const pdz = this.helicopter.body.position.z - z;
+    const pd = Math.hypot(pdx, pdz);
     if (pd < EXPLOSIVE_AFFIX_RADIUS) {
       this.applyPlayerDamage(
         Math.round(EXPLOSIVE_AFFIX_DAMAGE * 0.5 * (1 - pd / EXPLOSIVE_AFFIX_RADIUS)),
-        "EXPLOSIVE AFFIX", "EXPLOSIVE", time,
+        "EXPLOSIVE AFFIX", "EXPLOSIVE", time, true,
+        pd > 0.001 ? { x: pdx / pd, z: pdz / pd } : undefined,
       );
     }
     this.city.damageNearby(x, z, EXPLOSIVE_AFFIX_RADIUS, 60);
@@ -3597,7 +3790,22 @@ export class GameEngine {
     this.waveThreatBudgetRemaining = Math.round(waveThreatBudget(this.currentWave, this.threatLevel) * this.difficulty.threatBudget);
     this.pendingVariantQueue.length = 0;
 
-    // Determine wave theme / message
+    // Roll this wave's procedural theme ("hand"). Milestone waves (boss +
+    // miniboss on every 5th) stay null so those battles read distinct; wave 3
+    // deliberately opens the first storm.
+    if (this.currentWave % 5 === 0) {
+      this.currentWaveTheme = null;
+    } else if (this.currentWave === 3) {
+      this.currentWaveTheme = WAVE_THEMES["STORM"];
+    } else {
+      this.currentWaveTheme = waveThemeFor(this.currentWave);
+    }
+    const theme = this.currentWaveTheme;
+    // Refresh the color-grade target; the per-frame pass eases toward it.
+    this.updateThemeGrading(0);
+
+    // Determine wave banner — milestones keep their iconic lines, the rest use
+    // the rolled theme so roguelite variety shows up on the screen.
     if (this.currentWave % 10 === 0) {
       this.waveMessage = `WAVE ${this.currentWave}\n⚠ BOSS BATTLE ⚠`;
     } else if (this.currentWave % 5 === 0) {
@@ -3606,12 +3814,12 @@ export class GameEngine {
       this.waveMessage = "WAVE 1\nENGAGE THE DRONES";
     } else if (this.currentWave === 3) {
       this.waveMessage = "WAVE 3\nSTORM INCOMING";
-    } else if (this.currentWave % 4 === 0) {
-      this.waveMessage = `WAVE ${this.currentWave}\nSWARM TACTICS`;
-      this.totalEnemiesInWave += 10; // Extra enemies on swarm waves
     } else {
-      this.waveMessage = `WAVE ${this.currentWave}`;
+      this.waveMessage = waveThemeBanner(theme, this.currentWave);
     }
+
+    // Theme reshapes the horde head-count for this wave.
+    if (theme) this.totalEnemiesInWave = Math.round(this.totalEnemiesInWave * theme.enemyCountMult);
 
     // Destroyable objectives: spawn on the battlefield (ahead of the player)
     const objectiveCount = Math.min(2, 1 + Math.floor(this.currentWave / 4));
@@ -3619,11 +3827,11 @@ export class GameEngine {
       this.spawnObjective();
     }
 
-    // Dynamic Weather based on wave
+    // Dynamic Weather based on wave + the wave's storm theme bonus.
     if (this.currentWave >= 3) {
       this.weather.targetIntensity = Math.min(
         1.0,
-        (this.currentWave - 2) * 0.25,
+        (this.currentWave - 2) * 0.25 + (theme?.stormBonus ?? 0),
       );
       this.rain.mesh.visible = true;
     }
@@ -4044,7 +4252,7 @@ export class GameEngine {
       spot.z,
       type,
       spot.y,
-      { modifier, pattern, variant, isElite: Math.random() < Math.max(0, 0.01 + directorConfig.eliteChanceBonus + this.difficulty.eliteChance) },
+      { modifier, pattern, variant, isElite: Math.random() < Math.max(0, 0.01 + directorConfig.eliteChanceBonus + this.difficulty.eliteChance + (this.currentWaveTheme?.eliteBonus ?? 0)) },
     );
     this.scaleEnemyForDifficulty(enemy);
     this.enemies.push(enemy);
@@ -4077,6 +4285,18 @@ export class GameEngine {
     // Wave-scaled enemy weapon damage (stored for the player-hit callback)
     enemy.waveDamageMult = waveEnemyDamage(this.currentWave);
     enemy.waveFireRateMult = waveEnemyFireRate(this.currentWave);
+    // Enemy aim skill tracks the wave: later waves land tighter shots.
+    enemy.aimAccuracy = enemyAimAccuracy(this.currentWave);
+    // The rolling wave theme can also thicken hulls (ARMORED / NIGHT_SURGE).
+    const themeHp = this.currentWaveTheme?.enemyHpMult ?? 1;
+    if (themeHp !== 1) {
+      enemy.maxHp = Math.max(5, Math.round(enemy.maxHp * themeHp));
+      enemy.hp = enemy.maxHp;
+      if (enemy.shieldMaxHp > 0) {
+        enemy.shieldMaxHp = Math.max(5, Math.round(enemy.shieldMaxHp * themeHp));
+        enemy.shieldHp = enemy.shieldMaxHp;
+      }
+    }
   }
 
   /** Spawn the elite miniboss for wave % 5 === 0 waves. */
@@ -4563,8 +4783,17 @@ export class GameEngine {
       moveZ += 1;
 
     if (this.leftStick.active) {
-      moveX += this.leftStick.x;
-      moveZ += this.leftStick.y;
+      // Touch left stick: apply the same circular deadzone + response curve the
+      // gamepad uses, so the virtual stick has a consistent, predictable feel
+      // instead of raw linear travel (small inputs are too twitchy to control).
+      let lx = THREE.MathUtils.clamp(this.leftStick.x, -1, 1);
+      let ly = THREE.MathUtils.clamp(this.leftStick.y, -1, 1);
+      const lMag = Math.sqrt(lx * lx + ly * ly);
+      if (lMag > TOUCH_DEADZONE) {
+        const curved = Math.pow((lMag - TOUCH_DEADZONE) / (1 - TOUCH_DEADZONE), 1.15);
+        moveX += (lx / lMag) * curved;
+        moveZ += (ly / lMag) * curved;
+      }
     }
     // Phase 2: route gamepad stick input into the same normalization pipeline.
     if (this.gamepadMove.x !== 0 || this.gamepadMove.z !== 0) {
@@ -4679,6 +4908,12 @@ export class GameEngine {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
       this.helicopter.animateRotors(0, 60, delta);
+      this.helicopter.updateNavLights(time);
+      // Hangar idle bob — presentation only; the physics body stays parked
+      // and reset() re-syncs the mesh before the next run.
+      this.helicopter.mesh.position.y =
+        this.helicopter.body.position.y + Math.sin(time * 1.6) * 0.22;
+      this.updateShadowRig();
       this.updateCamera(delta);
       this.syncBlobShadows();
       this.renderFrame();
@@ -5020,6 +5255,31 @@ export class GameEngine {
       },
     );
 
+    // Rotor downwash kicks dust when hovering low over the terrain — the
+    // idle hover visibly interacts with the ground instead of floating above
+    // it. Rate scales with proximity; high or fast flight stirs nothing.
+    this.downwashTimer += delta;
+    if (this.downwashTimer >= 0.06) {
+      this.downwashTimer = 0;
+      const heliAlt = hp.y - hoverFloor;
+      const hoverSpeed = Math.hypot(hv.x, hv.z);
+      if (this.health > 0 && heliAlt < 15 && hoverSpeed < 12) {
+        const strength = 1 - heliAlt / 15;
+        const puffs = heliAlt < 6 ? 3 : 2;
+        for (let i = 0; i < puffs; i++) {
+          if (Math.random() > strength + 0.25) continue;
+          const ang = Math.random() * Math.PI * 2;
+          const r = 4 + Math.random() * 4;
+          this.particles.spawnDust(
+            hp.x + Math.cos(ang) * r,
+            hoverFloor + 0.4,
+            hp.z + Math.sin(ang) * r,
+            time,
+          );
+        }
+      }
+    }
+
     // Aim pivots are now current, so machine-gun shots leave the live muzzle.
     if (
       (this.isFiringMouse || this.isFiringGamepad) &&
@@ -5188,7 +5448,15 @@ export class GameEngine {
         // Tanks do massive ram damage
         const dmg = e.type === EnemyType.TANK ? 30 : 10;
         if (this.dashActiveTimer <= 0) {
-          this.applyPlayerDamage(dmg, e.variant === EnemyVariant.KAMIKAZE_DRONE ? "KAMIKAZE" : "RAM", "COLLISION", time);
+          const rdx = this.helicopter.body.position.x - e.body.position.x;
+          const rdz = this.helicopter.body.position.z - e.body.position.z;
+          const rdl = Math.hypot(rdx, rdz);
+          this.applyPlayerDamage(
+            dmg,
+            e.variant === EnemyVariant.KAMIKAZE_DRONE ? "KAMIKAZE" : "RAM",
+            "COLLISION", time, true,
+            rdl > 0.001 ? { x: rdx / rdl, z: rdz / rdl } : undefined,
+          );
         }
         this.updateUI(time);
       }
@@ -5356,7 +5624,14 @@ export class GameEngine {
           const damageType: PlayerDamageType = proj.kind === "SAM_MISSILE"
             ? "MISSILE"
             : proj.blastRadius > 0 ? "EXPLOSIVE" : "BULLET";
-          const applied = this.applyPlayerDamage(dmg, proj.kind === "SAM_MISSILE" ? "SAM MISSILE" : "ENEMY PROJECTILE", damageType, time);
+          // The shot flies AT the player, so the shooter sits opposite its velocity.
+          const vLen = Math.hypot(proj.vel.x, proj.vel.z);
+          const applied = this.applyPlayerDamage(
+            dmg,
+            proj.kind === "SAM_MISSILE" ? "SAM MISSILE" : "ENEMY PROJECTILE",
+            damageType, time, true,
+            vLen > 0.001 ? { x: -proj.vel.x / vLen, z: -proj.vel.z / vLen } : undefined,
+          );
           // B2: vampiric enemies feed on confirmed damage
           if (applied > 0) this.healVampiricEnemies(applied, time);
           this.particles.spawnExplosion(
@@ -5462,10 +5737,12 @@ export class GameEngine {
     this.debris?.update(time);
     this.shockwaves?.update(time);
     this.updateNightOps(time, delta);
+    this.updateThemeGrading(delta);
 
     // Update UI every and radar every frame for smoothness
     this.updateUI(time);
 
+    this.updateShadowRig();
     this.updateCamera(delta);
 
     this.syncBlobShadows();

@@ -75,6 +75,15 @@ const tempColor = new THREE.Color();
 const tempVec3_1 = new CANNON.Vec3();
 const tempVec3_2 = new CANNON.Vec3();
 
+/** HD renders real shadows for the PLAYER only; every other entity clears
+ *  castShadow so it stays out of the caster pass. receiveShadow is left
+ *  intact so the player's shadow still lands on nearby surfaces. */
+function disableShadowCasting(root: THREE.Object3D) {
+  root.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) o.castShadow = false;
+  });
+}
+
 /**
  * Phase 2 — named, tunable arcade movement values. The helicopter is
  * velocity-controlled (not a position-target chase), so these are the single
@@ -531,6 +540,9 @@ export class Helicopter extends Entity {
     antenna.material = metalMat;
     antenna.position.set(0.7, 1.1, 0.6);
     baseGroup.add(navRed, navGreen, tailBeacon, antenna);
+    this.registerNavLight(navRed, false);
+    this.registerNavLight(navGreen, false);
+    this.registerNavLight(tailBeacon, true);
   }
 
   /** NIGHTHAWK — angular stealth gunship with twin tails and a dark fuselage. */
@@ -619,6 +631,10 @@ export class Helicopter extends Entity {
     antenna.material = metalMat;
     antenna.position.set(0, 1.0, 0.8);
     baseGroup.add(navRed, navGreen, beaconL, beaconR, antenna);
+    this.registerNavLight(navRed, false);
+    this.registerNavLight(navGreen, false);
+    this.registerNavLight(beaconL, true);
+    this.registerNavLight(beaconR, true);
   }
 
   /** WARLOCK — heavy gunship: bulky hull, wide wings, dual rotor mast, heavy ordnance. */
@@ -722,6 +738,9 @@ export class Helicopter extends Entity {
     antenna.material = metalMat;
     antenna.position.set(-0.8, 1.3, 0.7);
     baseGroup.add(intakeL, intakeR, navRed, navGreen, roofBeacon, antenna);
+    this.registerNavLight(navRed, false);
+    this.registerNavLight(navGreen, false);
+    this.registerNavLight(roofBeacon, true);
   }
 
   setTarget(x: number, y: number, z: number) {
@@ -918,6 +937,8 @@ export class Helicopter extends Entity {
     this.smoothedHoverFloor = 0;
     this.crashTiltTimer = 0;
     this.crashTiltStrength = 1;
+    this.idleBlend = 0;
+    this.idleBobY = 0;
     this.gunAimMode = false;
     this.terrainSafetyActive = false;
     this.trailEffectTimer = 0;
@@ -1170,6 +1191,10 @@ export class Helicopter extends Entity {
     }
 
     const isIdle = !hasInput && speed < 3.0; // Player resting?
+    // Idle hover: ease in/out of a breathing bob so a parked aircraft visibly
+    // "hangs" in its own rotor wash instead of freezing mid-air.
+    const idleTarget = isIdle ? 1 : 0;
+    this.idleBlend += (idleTarget - this.idleBlend) * (1 - Math.exp(-2.2 * delta));
     const inputAgility = Math.min(speed / 80.0, 1.0);
 
     // Body heading is movement-only. The nose NEVER turns toward the aim
@@ -1197,6 +1222,20 @@ export class Helicopter extends Entity {
 
     // Synchronize the visual root before converting world aim into turret-local space.
     copyPhysicsPos(this.mesh, this.body.position);
+
+    // Visual-only idle bob layered on top of the physics-synced position —
+    // two offset sines read as breathing, not a metronome. The physics body
+    // stays authoritative; collisions and aim never see this offset. The
+    // offset is cached so syncBodyTransform() can re-apply it after the
+    // post-physics re-sync would otherwise wipe it.
+    if (this.idleBlend > 0.001) {
+      const bobT = time * 1.9 + this.idlePhase;
+      this.idleBobY =
+        (Math.sin(bobT) * 0.42 + Math.sin(bobT * 0.53 + 1.7) * 0.13) * this.idleBlend;
+      this.mesh.position.y += this.idleBobY;
+    } else {
+      this.idleBobY = 0;
+    }
 
     // Rotating chin gun turret (separate yaw/pitch pivots) — tracks the auto-aim
     // target, or eases to neutral. ONLY the gun moves; the helicopter body stays
@@ -1282,7 +1321,7 @@ export class Helicopter extends Entity {
     // has a visible attitude, so the hull reads as flying a 3D vector instead
     // of a hovering turret on a flat plane.
     const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0011, -0.06, 0.06);
-    const targetTiltZ =
+    let targetTiltZ =
       -THREE.MathUtils.clamp(
         (localVx * 0.0046 +
           THREE.MathUtils.clamp(localAx * 0.00085, -0.16, 0.16)) *
@@ -1290,8 +1329,29 @@ export class Helicopter extends Entity {
         -ROLL_LIMIT,
         ROLL_LIMIT,
       );
+
+    // Anticipation roll: the moment the pilot commits a strafe input, the hull
+    // tips into the turn BEFORE velocity catches up (blends back as the lean-in
+    // from acceleration takes over). Reads as decisive, responsive control
+    // instead of lagging visually behind the physics.
+    const strafeInput = move?.x ?? 0;
+    if (Math.abs(strafeInput) > 0.01) {
+      const grip = THREE.MathUtils.clamp(0.55 + inputAgility * 0.45, 0.55, 1);
+      const anticipation = THREE.MathUtils.clamp(-strafeInput * 0.055 * grip, -0.09, 0.09);
+      targetTiltZ = THREE.MathUtils.clamp(targetTiltZ + anticipation, -ROLL_LIMIT, ROLL_LIMIT);
+    }
+    // Gentle figure-eight sway while hovering idle — the hull drifts a few
+    // degrees in roll/pitch like a real helicopter holding station.
+    if (this.idleBlend > 0.001) {
+      targetTiltZ = THREE.MathUtils.clamp(
+        targetTiltZ + Math.sin(time * 0.9 + this.idlePhase * 1.3) * 0.022 * this.idleBlend,
+        -ROLL_LIMIT,
+        ROLL_LIMIT,
+      );
+    }
     const targetPitch = THREE.MathUtils.clamp(
-      targetTiltX + climbPitch + this.firePitchImpulse,
+      targetTiltX + climbPitch + this.firePitchImpulse +
+        Math.sin(time * 0.7 + this.idlePhase) * 0.012 * this.idleBlend,
       -PITCH_LIMIT,
       PITCH_LIMIT,
     );
@@ -1312,11 +1372,38 @@ export class Helicopter extends Entity {
     this.mainRotor.position.y = 2.1;
 
     this.animateRotors(speed, 80, delta);
+    this.updateNavLights(time);
+  }
+
+  /**
+   * Detach a glow light from the shared material cache so its opacity can be
+   * pulsed without affecting other glow boxes of the same color.
+   */
+  private registerNavLight(mesh: THREE.Mesh, beacon: boolean) {
+    mesh.material = (mesh.material as THREE.Material).clone();
+    (beacon ? this.beaconMeshes : this.navLightMeshes).push(mesh);
+  }
+
+  /** Nav lights breathe softly; beacons fire a double-flash anti-collision strobe. */
+  updateNavLights(time: number) {
+    for (const light of this.navLightMeshes) {
+      const breathe = 0.5 + Math.sin(time * 2.4 + this.idlePhase) * 0.5;
+      (light.material as THREE.MeshBasicMaterial).opacity = 0.62 + breathe * 0.28;
+    }
+    for (const beacon of this.beaconMeshes) {
+      const cycle = (time * 1.25 + this.idlePhase * 0.15) % 1;
+      const flashing = cycle < 0.06 || (cycle > 0.14 && cycle < 0.2);
+      (beacon.material as THREE.MeshBasicMaterial).opacity = flashing ? 0.95 : 0.18;
+    }
   }
 
   /** Synchronize the presentation root after CANNON integrates the player body. */
   syncBodyTransform() {
-    if (this.active) copyPhysicsPos(this.mesh, this.body.position);
+    if (this.active) {
+      copyPhysicsPos(this.mesh, this.body.position);
+      // Restore the visual-only idle bob that the raw copy just erased.
+      if (this.idleBobY !== 0) this.mesh.position.y += this.idleBobY;
+    }
   }
 
   private updateAccelerationState(delta: number) {
@@ -1348,6 +1435,16 @@ export class Helicopter extends Entity {
   rotorSpeed: number = 0;
   crashTiltTimer: number = 0;
   crashTiltStrength: number = 1;
+
+  // Idle hover: blend factor eases the breathing bob in/out; the random phase
+  // keeps multiple lifetimes from bobbing in lockstep. idleBobY caches the
+  // last visual offset so post-physics re-syncs can re-apply it.
+  private idleBlend: number = 0;
+  private idleBobY: number = 0;
+  private readonly idlePhase: number = Math.random() * Math.PI * 2;
+  /** Wingtip nav lights (steady pulse) and anti-collision beacons (strobe). */
+  private navLightMeshes: THREE.Mesh[] = [];
+  private beaconMeshes: THREE.Mesh[] = [];
 
   animateRotors(forceMag: number, maxForce: number, delta: number) {
     const rotorEff = this.rotorHealth / 100;
@@ -1469,6 +1566,9 @@ export class Enemy extends Entity {
   // Procedural wave scaling (set by the engine at spawn)
   waveDamageMult: number = 1;
   waveFireRateMult: number = 1;
+  /** Aim skill 0..1 (set by the engine from enemyAimAccuracy(wave)); tighter
+   *  shot cones at higher waves. Default 1 keeps tests deterministic. */
+  aimAccuracy: number = 1;
 
   personalityOffset: number;
   evadeTimer: number = 0;
@@ -1937,6 +2037,8 @@ export class Enemy extends Entity {
       this.buildVariantTelegraph(accentHex);
     }
     this.buildThreatSignature(radius, accentHex, type);
+    // HD real shadows are player-only — keep enemy hulls out of the caster pass.
+    disableShadowCasting(this.mesh);
   }
 
   /**
@@ -2977,6 +3079,26 @@ export class Enemy extends Entity {
   }
 
   /**
+   * Angular aim error applied to an already-lead shot — the piece that makes
+   * enemy AI "more accurate" over time. High aimAccuracy (later waves / hard
+   * difficulty) collapses the cone so shots land tighter; early waves leave a
+   * readable spread so it isn't an aimbot. Shots also spread a little more at
+   * range (harder to hold a read on a distant target).
+   */
+  private applyAimError(aim: { x: number; z: number }, dist: number): { x: number; z: number } {
+    const skill = THREE.MathUtils.clamp(Number.isFinite(this.aimAccuracy) ? this.aimAccuracy : 1, 0, 1);
+    // ~0.09 rad (~5.2°) of sway at skill 0.6 → ~0.03 rad (~1.7°) at skill 1.
+    const baseRad = THREE.MathUtils.lerp(0.09, 0.03, skill);
+    const rangeScale = THREE.MathUtils.clamp(dist / 90, 0.8, 1.8);
+    let err = (Math.random() * 2 - 1) * baseRad * rangeScale;
+    // Slight counter-bias when leading fast targets so close-in shots feel fair.
+    err *= 0.88;
+    const c = Math.cos(err);
+    const s = Math.sin(err);
+    return { x: aim.x * c - aim.z * s, z: aim.x * s + aim.z * c };
+  }
+
+  /**
    * Line-of-sight: does a straight bullet line from the enemy to the target
    * pass through any standing building? Only blocks taller than the shooter
    * can occlude — rooftop gunners and high fliers shoot over buildings, which
@@ -3388,7 +3510,7 @@ export class Enemy extends Entity {
         );
       } else if (this.hasLineOfSight(city, targetPos)) {
         this.lastShotTime = time + Math.random() * 0.35;
-        const aim = this.leadAim(targetPos, targetVel, projectileSpeed);
+        const aim = this.applyAimError(this.leadAim(targetPos, targetVel, projectileSpeed), dist);
         enemyProjectilePool.spawn(
           this.body.position.x,
           this.body.position.y + 0.35,
@@ -3945,6 +4067,7 @@ export class PowerUp {
 
       this.mesh.position.copy(this.position);
       scene.add(this.mesh);
+      disableShadowCasting(this.mesh);
       return;
     }
 
@@ -3960,6 +4083,7 @@ export class PowerUp {
       this.mesh.add(halo);
       this.mesh.position.copy(this.position);
       scene.add(this.mesh);
+      disableShadowCasting(this.mesh);
       return;
     }
 
@@ -3999,6 +4123,7 @@ export class PowerUp {
 
     this.mesh.position.copy(this.position);
     scene.add(this.mesh);
+    disableShadowCasting(this.mesh);
   }
 
   update(time: number, delta: number) {
@@ -4452,6 +4577,8 @@ export class Objective {
 
     this.mesh.position.set(x, y, z);
     scene.add(this.mesh);
+    // HD real shadows are player-only — objectives only RECEIVE the shadow.
+    disableShadowCasting(this.mesh);
 
     this.body = new CANNON.Body({
       mass: 0,

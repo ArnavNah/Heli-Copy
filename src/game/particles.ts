@@ -317,6 +317,26 @@ export class GPUParticleSystem {
     this.updateAttrs();
   }
 
+  /** Rotor-downwash dust — smoke-type puffs kicked outward from the ground
+   *  so low hovers visibly stir the terrain. Outward velocity + the smoke
+   *  buoyancy term make them roll up and away like real wash. */
+  spawnDust(x: number, y: number, z: number, now: number) {
+    const idx = this.currentIndex;
+    const ang = Math.random() * Math.PI * 2;
+    const out = 6 + Math.random() * 7;
+    this.positionAttr.setXYZ(idx, x, y, z);
+    this.velocityAttr.setXYZ(
+      idx,
+      Math.cos(ang) * out,
+      1.2 + Math.random() * 2.2,
+      Math.sin(ang) * out,
+    );
+    this.startTimeAttr.setX(idx, now - Math.random() * 0.15);
+    this.pTypeAttr.setX(idx, 1.0); // Smoke type
+    this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    this.updateAttrs();
+  }
+
   spawnSparks(x: number, y: number, z: number, now: number, count = 3, speed = 15) {
     for (let i = 0; i < count; i++) {
       const idx = this.currentIndex;

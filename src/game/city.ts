@@ -191,6 +191,9 @@ export class CityEnvironment {
         const d = 10 + this.hash(i * 5 + p, 11) * 18;
         const h = 4 + this.hash(i * 7 + p, 13) * 4;
         const puff = createBox(w, h, d, 0xffffff);
+        // Clouds must never cast — HD's player-only shadow pass would
+        // otherwise paint roaming cloud shadows over the whole city.
+        puff.castShadow = false;
         const m = puff.material as THREE.MeshToonMaterial;
         m.opacity = 0.9;
         m.transparent = true;
@@ -901,6 +904,13 @@ export class CityEnvironment {
     if (Math.abs(id) % 5 === 2) this.addBridge(chunk, chunkCenterZ);
     if (Math.abs(id) % 7 === 4) this.addSmokeColumn(chunk, chunkCenterZ);
 
+    // HD renders real shadows for the PLAYER only. Clearing castShadow once
+    // per chunk keeps thousands of boxes out of the shadow caster pass while
+    // they keep receiving the helicopter's shadow.
+    chunk.group.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) o.castShadow = false;
+    });
+
     this.chunks.set(id, chunk);
   }
 
@@ -1562,6 +1572,8 @@ export class CityEnvironment {
     // Merge same-color core parts into one mesh (1 draw call instead of 2-6).
     const mergedCore = mergeBoxMeshes(coreParts);
     if (mergedCore) {
+      // Rooftops/facades are the main canvas for the player's HD shadow.
+      mergedCore.receiveShadow = true;
       chunk.group.add(mergedCore);
     } else {
       for (const part of coreParts) chunk.group.add(part);

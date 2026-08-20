@@ -193,9 +193,13 @@ export function createSkyDome() {
     uniforms: {
       // Desert dome: pale dry blue zenith fading to a dust haze horizon so the
       // scene reads as a bright desert day.
-      topColor: { value: new THREE.Color(0x7fa3c0) },
+      topColor: { value: new THREE.Color(0x6fa3c4) },
       horizonColor: { value: new THREE.Color(0xe6d3a2) },
       sunColor: { value: new THREE.Color(0xffd98f) },
+      // Warm glow pooled around the horizon line — the arcade sunrise feel.
+      glowColor: { value: new THREE.Color(0xffc986) },
+      // Seconds (scaled) — drives a slow halo breathe so the sky subtly moves.
+      uTime: { value: 0 },
     },
     vertexShader: `
       varying vec3 vWorldPosition;
@@ -209,14 +213,47 @@ export function createSkyDome() {
       uniform vec3 topColor;
       uniform vec3 horizonColor;
       uniform vec3 sunColor;
+      uniform vec3 glowColor;
+      uniform float uTime;
       varying vec3 vWorldPosition;
 
       void main() {
         vec3 dir = normalize(vWorldPosition);
+
+        // Zenith -> horizon gradient (bright dust-blue sky to warm sandy haze).
         float horizon = smoothstep(-0.12, 0.72, dir.y);
         vec3 color = mix(horizonColor, topColor, horizon);
-        float sun = pow(max(dot(dir, normalize(vec3(-0.38, 0.58, -0.72))), 0.0), 52.0);
-        color += sunColor * sun * 0.55;
+
+        // Warm band hugging the horizon line (above AND below it), so distant
+        // city silhouettes sit in a soft amber atmospheric pool.
+        float warmBand = pow(max(0.0, 1.0 - abs(dir.y) * 1.25), 9.0);
+        color += (horizonColor * 0.28 + glowColor * 0.5) * warmBand * 0.55;
+
+        // Sun direction (kept aligned with the engine's sun disc + key light).
+        vec3 sunDir = normalize(vec3(-0.38, 0.58, -0.72));
+        float sunDot = max(dot(dir, sunDir), 0.0);
+        // Layered halo: a tight bright core plus a wide, soft scattering pool.
+        float sunCore = pow(sunDot, 52.0);
+        float sunHalo = pow(sunDot, 9.0) * (0.85 + 0.15 * sin(uTime * 1.4));
+        color += sunColor * (sunCore * 0.55 + sunHalo * 0.16);
+
+        // A cool steel-blue band near the zenith top keeps the sky from reading
+        // as a single flat wash (subtle, never dusk).
+        float zenith = pow(max(0.0, dir.y), 3.0);
+        color += topColor * zenith * 0.06;
+
+        // Faint animated cirrus streaks high up — thin, banded, slowly drifting.
+        // Opacity is low so it reads as atmosphere, not painted clouds.
+        if (dir.y > 0.15) {
+          float drift = uTime * 0.02;
+          float streak = 0.5 + 0.5 * sin(
+            dir.y * 46.0 + (dir.x + dir.z) * 24.0 + drift
+          );
+          streak *= streak;
+          float h = smoothstep(0.15, 0.6, dir.y) * (1.0 - smoothstep(0.6, 1.0, dir.y));
+          color += vec3(1.0, 0.98, 0.94) * streak * h * 0.045;
+        }
+
         gl_FragColor = vec4(color, 1.0);
       }
     `,

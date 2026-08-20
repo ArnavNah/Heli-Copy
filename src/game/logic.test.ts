@@ -63,6 +63,7 @@ import {
   writePerkRank,
   writeWeaponMod,
   xpForEnemyType,
+  enemyAimAccuracy,
   waveEnemyCount,
   waveEnemyDamage,
   waveEnemyFireRate,
@@ -124,6 +125,15 @@ describe("procedural wave scaling", () => {
     expect(waveEnemyFireRate(10)).toBeCloseTo(0.64);
     expect(waveEnemyFireRate(20)).toBeCloseTo(0.45);
     expect(waveEnemyFireRate(100)).toBe(0.45);
+  });
+
+  it("enemyAimAccuracy tightens shot cones as waves rise, capped below 1", () => {
+    expect(enemyAimAccuracy(1)).toBeCloseTo(0.6);
+    expect(enemyAimAccuracy(5)).toBeCloseTo(0.72);
+    expect(enemyAimAccuracy(13)).toBeCloseTo(0.96);
+    expect(enemyAimAccuracy(30)).toBe(0.96); // capped
+    expect(enemyAimAccuracy(0)).toBe(0.6); // clamped to wave 1
+    expect(enemyAimAccuracy(NaN)).toBe(0.6); // non-finite guard
   });
 
   it("HP outpaces damage so later waves feel tankier but fair", () => {

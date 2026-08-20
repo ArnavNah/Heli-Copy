@@ -122,6 +122,80 @@ export function waveEnemyFireRate(wave: number): number {
 }
 
 /**
+ * Enemy aim skill 0..~0.96 — how tight each enemy's shot cone is. Enemies
+ * start loose and sloppy (~61% on wave 1) and sharpen as waves rise, so the
+ * battlefield grows measurably deadlier late-run without the shots becoming a
+ * perfect aimbot. This feeds the angular aim error in `Enemy.applyAimError`.
+ */
+export function enemyAimAccuracy(wave: number): number {
+  const w = Math.max(1, Math.floor(Number.isFinite(wave) ? wave : 1));
+  return Math.min(0.96, 0.6 + (w - 1) * 0.03);
+}
+
+// ---------------------------------------------------------------------------
+// Procedural wave themes ("hands") — roguelite variety on top of the ramp.
+// Every non-milestone wave rolls a theme that reshapes that wave's pressure:
+// swarms flood the field cheap, armor throws tougher hulls, frenzy speeds the
+// cadence, storm surge thickens the weather. The labels surface in the banner.
+// ---------------------------------------------------------------------------
+
+export type WaveThemeKey = "SWARM" | "ARMORED" | "FRENZY" | "STORM" | "NIGHT_SURGE";
+
+export interface WaveThemeConfig {
+  key: WaveThemeKey;
+  /** Banner title. */
+  label: string;
+  /** Extra horde head-count for this wave (×wave enemy budget). */
+  enemyCountMult: number;
+  /** Hull-HP multiplier applied to this wave's enemies. */
+  enemyHpMult: number;
+  /** Spawn-cadence gap multiplier (<1 = faster flooders). */
+  spawnGapMult: number;
+  /** Flat elite-probability bonus for this wave. */
+  eliteBonus: number;
+  /** Extra storm intensity pushed into this wave. */
+  stormBonus: number;
+}
+
+const WAVE_THEME_SUBS: Record<WaveThemeKey, string> = {
+  SWARM: "numbers over strength",
+  ARMORED: "thick hulls inbound",
+  FRENZY: "everything faster",
+  STORM: "weather rolls in",
+  NIGHT_SURGE: "darkness and speed",
+};
+
+export const WAVE_THEMES: Record<WaveThemeKey, WaveThemeConfig> = {
+  SWARM: { key: "SWARM", label: "SWARM TIDE", enemyCountMult: 1.6, enemyHpMult: 0.85, spawnGapMult: 0.85, eliteBonus: 0, stormBonus: 0 },
+  ARMORED: { key: "ARMORED", label: "ARMORED COLUMN", enemyCountMult: 0.85, enemyHpMult: 1.45, spawnGapMult: 0.95, eliteBonus: 0.05, stormBonus: 0 },
+  FRENZY: { key: "FRENZY", label: "FRENZY", enemyCountMult: 1.2, enemyHpMult: 1, spawnGapMult: 0.6, eliteBonus: 0.01, stormBonus: 0 },
+  STORM: { key: "STORM", label: "STORM SURGE", enemyCountMult: 1, enemyHpMult: 1, spawnGapMult: 0.9, eliteBonus: 0, stormBonus: 0.4 },
+  NIGHT_SURGE: { key: "NIGHT_SURGE", label: "NIGHT SURGE", enemyCountMult: 1.35, enemyHpMult: 1.18, spawnGapMult: 0.7, eliteBonus: 0.03, stormBonus: 0.15 },
+};
+
+/** Roll the procedural theme for a non-milestone wave. Milestone waves (%5 =
+ *  boss/miniboss) return null so those battles stay distinct. The pool skews
+ *  harder as waves rise (late runs can roll the tough NIGHT_SURGE/FRENZY). */
+export function waveThemeFor(wave: number, rng: () => number = Math.random): WaveThemeConfig | null {
+  const w = Math.max(1, Math.floor(Number.isFinite(wave) ? wave : 1));
+  if (w % 5 === 0) return null;
+  const roll = Math.max(0, Math.min(1, rng()));
+  const late = w >= 24;
+  const mid = w >= 10;
+  if (late && roll < 0.45) return WAVE_THEMES["NIGHT_SURGE"];
+  if (roll < 0.34) return WAVE_THEMES["SWARM"];
+  if (roll < 0.58) return WAVE_THEMES["STORM"];
+  if (roll < 0.76) return mid ? WAVE_THEMES["FRENZY"] : WAVE_THEMES["SWARM"];
+  return WAVE_THEMES["ARMORED"];
+}
+
+/** Banner text for a theme config (or a plain "WAVE n" for milestone/null). */
+export function waveThemeBanner(theme: WaveThemeConfig | null, wave: number): string {
+  if (!theme) return `WAVE ${wave}`;
+  return `WAVE ${wave}\n${theme.label}\n${WAVE_THEME_SUBS[theme.key]}`;
+}
+
+/**
  * Vampire Survivors-style time-driven waves: each wave lasts a fixed duration
  * (seconds) before the next milestone hits, regardless of how many enemies are
  * still alive. Shrinks from 45s toward a 30s floor so pressure keeps building.
