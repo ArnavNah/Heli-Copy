@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
-import { createBox, createGlowBox, disposeObject3D, getLowPolyMaterial, mergeBoxMeshes, ENV_PALETTE } from "./materials";
+import { createBox, createGlowBox, disposeObject3D, getLowPolyMaterial, mergeBoxMeshes, collapseStaticMeshes, ENV_PALETTE } from "./materials";
 import {
   addInstancedProps,
   barrierGeometry,
@@ -41,7 +41,7 @@ import type { BuildingArchetype, BuildingMassing, DistrictConfig, RooftopPropTyp
 
 /** Cached color for the building damage-darken lerp (Phase 3). */
 let tempDamageTint: THREE.Color | null = null;
-import { ObjectiveType } from "./types";
+import { COLLISION, ObjectiveType } from "./types";
 import type { CityBlock, RooftopSpot, WorldChunk } from "./types";
 import { depotHubForChunk } from "./delivery";
 import type { DepotHub } from "./delivery";
@@ -684,6 +684,8 @@ export class CityEnvironment {
   }
 
   private registerExplosiveProp(group: THREE.Group, x: number, z: number, hp: number) {
+    // Volatile prop stays a removable unit — never folded into the chunk mesh.
+    group.userData.keepSeparate = true;
     this.explosiveProps.push({ group, x, z, hp, dead: false });
   }
 
@@ -903,6 +905,13 @@ export class CityEnvironment {
 
     if (Math.abs(id) % 5 === 2) this.addBridge(chunk, chunkCenterZ);
     if (Math.abs(id) % 7 === 4) this.addSmokeColumn(chunk, chunkCenterZ);
+
+    // Perf pass: fold every remaining STATIC mesh (roads, sidewalks, ground
+    // dressing, street props, depot, parks, static landmark bits) into one
+    // opaque + one additive vertex-color mesh for the whole chunk. Dynamic
+    // subtrees (buildings, cars, billboards, turrets, explosive props,
+    // beacons) are tagged keepSeparate/isBeacon and stay out of the merge.
+    collapseStaticMeshes(chunk.group);
 
     // HD renders real shadows for the PLAYER only. Clearing castShadow once
     // per chunk keeps thousands of boxes out of the shadow caster pass while
@@ -1338,6 +1347,14 @@ export class CityEnvironment {
 
     const coreParts: THREE.Mesh[] = [];
     const extraMeshes: THREE.Mesh[] = [];
+    // Perf pass: every part of the building (core massing, spires, facade
+    // accents, rooftop props) collects in this group and is collapsed into
+    // 1-2 vertex-color meshes below. Pulsing beacons stay separate.
+    const partsGroup = new THREE.Group();
+    // Destructible: the chunk-level static collapse must not fold this
+    // building into the shared chunk mesh (damage/collapse operate on it).
+    partsGroup.userData.keepSeparate = true;
+    const buildingBeacons: THREE.Mesh[] = [];
 
     if (massing === 'podium') {
       // Wide street base + inset tower — the classic mid-rise silhouette.
@@ -1445,8 +1462,7 @@ export class CityEnvironment {
         // A thin lit band on each tier catches the eye at dusk
         const band = createGlowBox(tierWidth * 0.9, 0.3, tierDepth * 0.9, config.windowColor, 0.42);
         band.position.set(x, tierY + tierH - 0.1, z);
-        chunk.group.add(band);
-        extraMeshes.push(band);
+        partsGroup.add(band);
 
         tierY += tierH;
         tierWidth *= 0.78;
@@ -1457,15 +1473,14 @@ export class CityEnvironment {
       const spireH = this.snap(7 + seed * 9);
       const spire = createBox(0.6, spireH, 0.6, 0x151b2c);
       spire.position.set(x, tierY + spireH / 2, z);
-      chunk.group.add(spire);
-      extraMeshes.push(spire);
+      partsGroup.add(spire);
 
       const warnLight = createGlowBox(1.0, 0.4, 1.0, 0xff3344, 0.95);
       warnLight.position.set(x, tierY + spireH + 0.3, z);
       warnLight.userData.phase = seed * Math.PI * 2;
       chunk.group.add(warnLight);
       this.chunkBeacons.get(chunk.id)?.push(warnLight);
-      extraMeshes.push(warnLight);
+      buildingBeacons.push(warnLight);
     } else if (massing === 'mono' && archetype === 'office') {
       // Narrow office tower: a crown cap steps the head above the body.
       const crown = createBox(width * 0.8, 1.6, depth * 0.8, color);
@@ -1524,7 +1539,7 @@ export class CityEnvironment {
     }
     // 'plain' keeps exactly the old box + cap silhouette.
 
-    const facadeDetails = this.addBuildingFacadeDetails(
+        const [facadeDetails, facadeBeacons] = this.addBuildingFacadeDetails(
       chunk,
       config,
       x,
@@ -1536,6 +1551,8 @@ export class CityEnvironment {
       archetype,
       massing,
     );
+    for (const detail of facadeDetails) partsGroup.add(detail);
+    buildingBeacons.push(...facadeBeacons);
 
     // Rooftop props + turrets need a flat, unobstructed roof center. Archetypes
     // with raised structure (office crown, warehouse ridge, factory parapet,
@@ -1555,6 +1572,10 @@ export class CityEnvironment {
       seed > 1 - config.rooftopClutter && flatRoof && !skyscraper && Math.abs(x) > 34
         ? this.addRooftopDetail(chunk, config, x, z, height, width, depth, seed, turretHere)
         : [];
+    for (const rm of rooftopMeshes) {
+      if (rm.userData.isBeacon) buildingBeacons.push(rm);
+      else partsGroup.add(rm);
+    }
 
     const body = this.addStaticBox(
       world,
@@ -1569,15 +1590,17 @@ export class CityEnvironment {
     const maxHp = 45 + height * 2.0;
     chunk.bodies.push(body);
 
-    // Merge same-color core parts into one mesh (1 draw call instead of 2-6).
-    const mergedCore = mergeBoxMeshes(coreParts);
-    if (mergedCore) {
-      // Rooftops/facades are the main canvas for the player's HD shadow.
-      mergedCore.receiveShadow = true;
-      chunk.group.add(mergedCore);
-    } else {
-      for (const part of coreParts) chunk.group.add(part);
-    }
+    // Collapse the whole building into 1-2 vertex-color meshes (opaque body +
+    // additive glow accents) instead of one draw call per part. Collapse,
+    // damage darkening and occlusion ghosting all operate on block.meshes,
+    // which now holds the merged meshes + the separately pulsing beacons.
+    for (const part of coreParts) partsGroup.add(part);
+    for (const extra of extraMeshes) partsGroup.add(extra);
+    chunk.group.add(partsGroup);
+    // bakeGlow: facade glow accents fold into the opaque mesh as bright vertex
+    // colors — each building costs exactly ONE draw call (plus its beacons).
+    const buildingMeshes = collapseStaticMeshes(partsGroup, true);
+    for (const m of buildingMeshes) m.userData.baseColorHex = color;
 
     const block: CityBlock = {
       x,
@@ -1586,7 +1609,7 @@ export class CityEnvironment {
       depth: depth + 1.8,
       height: height + 1,
       chunkId: chunk.id,
-      meshes: [mergedCore ?? coreParts[0], ...extraMeshes, ...facadeDetails, ...rooftopMeshes],
+      meshes: [...buildingMeshes, ...buildingBeacons],
       body,
       hp: maxHp,
       maxHp,
@@ -1599,6 +1622,7 @@ export class CityEnvironment {
     // kept away from the flight corridor and tiered skyscrapers (would clip into the tiers).
     if (turretHere) {
       const turret = new Turret(chunk.group, x, height + 1.35, z, chunk.id, block);
+      turret.mesh.userData.keepSeparate = true; // animated — never merged
       this.chunkTurrets.get(chunk.id)?.push(turret);
     }
   }
@@ -1614,8 +1638,13 @@ export class CityEnvironment {
     seed: number,
     archetype: BuildingArchetype,
     massing: BuildingMassing,
-  ) {
+  ): [THREE.Mesh[], THREE.Mesh[]] {
+    // Perf pass: facade details are RETURNED unparented — the caller folds
+    // them into the building's partsGroup for the vertex-color collapse.
+    // Pulsing beacons stay separate: parented to the chunk directly and
+    // registered for the beacon animation pass, returned as the 2nd tuple.
     const details: THREE.Mesh[] = [];
+    const beacons: THREE.Mesh[] = [];
     const isLitZone = config.name !== 'desert' && config.name !== 'forest';
     const windowColor = config.windowColor;
     const trimColor = config.trimColor;
@@ -1639,7 +1668,6 @@ export class CityEnvironment {
 
       const front = createGlowBox(bandW, bandHeight, 0.08, materialColor, opacity);
       front.position.set(x, y, z + depth * 0.5 + 0.08);
-      chunk.group.add(front);
       details.push(front);
 
       // Side bands only off the corridor — less near-field clutter in the lane
@@ -1647,7 +1675,6 @@ export class CityEnvironment {
         const side = seed > 0.5 ? 1 : -1;
         const sideBand = createGlowBox(0.08, bandHeight, depth * 0.42, materialColor, opacity * 0.3);
         sideBand.position.set(x + side * (width * 0.5 + 0.08), y, z);
-        chunk.group.add(sideBand);
         details.push(sideBand);
       }
     }
@@ -1658,7 +1685,7 @@ export class CityEnvironment {
       beacon.userData.phase = seed * Math.PI * 2;
       chunk.group.add(beacon);
       this.chunkBeacons.get(chunk.id)?.push(beacon);
-      details.push(beacon);
+      beacons.push(beacon);
     }
 
     // Pass 10 facade variety: a street-level base band grounds the mass, and
@@ -1667,7 +1694,6 @@ export class CityEnvironment {
     if (height > 9 && Math.abs(x) > 34) {
       const base = createGlowBox(width * 0.96, 1.4, 0.08, trimColor, 0.25);
       base.position.set(x, 1.1, z + depth * 0.5 + 0.08);
-      chunk.group.add(base);
       details.push(base);
     }
     if (isLitZone && massing === 'mono' && height > 13 && Math.abs(x) > 34 && this.hash(chunk.id, detailSeed + 7) > 0.55) {
@@ -1675,7 +1701,6 @@ export class CityEnvironment {
       for (const px of [-1, 1]) {
         const pilaster = createGlowBox(0.3, pilH, 0.08, trimColor, 0.28);
         pilaster.position.set(x + px * width * 0.32, pilH / 2 + 1.2, z + depth * 0.5 + 0.08);
-        chunk.group.add(pilaster);
         details.push(pilaster);
       }
     }
@@ -1687,7 +1712,6 @@ export class CityEnvironment {
       // Signage panel high on the front face of office towers
       const sign = createGlowBox(width * 0.5, 1.1, 0.08, windowColor, 0.72);
       sign.position.set(x, height * 0.72, frontZ);
-      chunk.group.add(sign);
       details.push(sign);
     } else if (archetype === 'parking') {
       // Front floor bands read as parking ramps
@@ -1695,18 +1719,16 @@ export class CityEnvironment {
         const fy = 3.4 + i * (height / 3.6);
         const band = createGlowBox(width * 0.6, 0.26, 0.08, trimColor, 0.4);
         band.position.set(x, fy, frontZ);
-        chunk.group.add(band);
         details.push(band);
       }
     } else if (archetype === 'resBlock' && isLitZone) {
       // Balcony trim strips near the top of apartment blocks
       const trim = createGlowBox(width * 0.72, 0.3, depth * 0.72, trimColor, 0.35);
       trim.position.set(x, height - 0.6, z);
-      chunk.group.add(trim);
       details.push(trim);
     }
 
-    return details;
+    return [details, beacons];
   }
 
   private addRooftopDetail(
@@ -1745,18 +1767,25 @@ export class CityEnvironment {
     // Turrets own the roof center — offset the prop group so they never clip.
     const propX = x + (hasTurret ? width * 0.22 : 0);
     group.position.set(propX, height + 0.55, z);
-    chunk.group.add(group);
     // Real rooftop helipads double as extraction LZs — record the pad's world
     // position (roof surface + pad height) so the spawner can land on it.
     if (kind === "helipad") {
       chunk.spots.push({ x: propX, y: height + 0.8, z: chunk.id * this.chunkDepth + z, helipad: true });
     }
-    group.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return;
+    // Perf pass: meshes are RETURNED unparented for the building collapse —
+    // the group's offset is baked into each child's position. Pulsing beacon
+    // children (comm tower) stay separate: re-parented to the chunk at the
+    // same spot and registered for the beacon animation pass.
+    for (const child of [...group.children]) {
+      if (!(child instanceof THREE.Mesh)) continue;
+      group.remove(child);
+      child.position.add(group.position);
+      if (child.userData.isBeacon) {
+        chunk.group.add(child);
+        this.chunkBeacons.get(chunk.id)?.push(child);
+      }
       meshes.push(child);
-      child.userData.propGroup = group; // collapse animates the group as a unit
-      if (child.userData.isBeacon) this.chunkBeacons.get(chunk.id)?.push(child);
-    });
+    }
     return meshes;
   }
 
@@ -1927,6 +1956,9 @@ export class CityEnvironment {
     };
     chunk.blocks.push(block);
     this.landmarkSet.add(block);
+    // Destructible landmark meshes must survive the chunk-level static
+    // collapse (staged crumble + damage darkening operate on them).
+    for (const m of meshes) m.userData.keepSeparate = true;
     if (spotY !== undefined) chunk.spots.push({ x, y: spotY, z });
   }
 
@@ -2295,6 +2327,8 @@ export class CityEnvironment {
       smokeMat.transparent = true;
       smokeMat.opacity = 0.18;
       smoke.material = smokeMat;
+      // Translucent — merging would bake it opaque; keep it out of the fold.
+      smoke.userData.keepSeparate = true;
       smoke.position.set(-70 + i * 10, 5 + i * 5, z - 18 + i * 4);
       chunk.group.add(smoke);
     }
@@ -2867,6 +2901,7 @@ export class CityEnvironment {
     // moves a single group instead of four meshes (and saves ~45 draw calls
     // across the three live chunks).
     const carGroup = new THREE.Group();
+    carGroup.userData.keepSeparate = true; // moves every frame — never merged
     carGroup.position.set(carX, 0, carZ);
     const carBody = createBox(2.8, 1.2, 5.5, carColor);
     carBody.position.set(0, 0.6, 0);
@@ -2922,6 +2957,7 @@ export class CityEnvironment {
         chunkCenterZ - this.chunkDepth * 0.45 + this.hash(id, i * 139 + 71) * this.chunkDepth * 0.9;
 
       const group = new THREE.Group();
+      group.userData.keepSeparate = true; // animated ticker/glow — never merged
       const pole = createBox(0.45, 5.4, 0.45, 0x2c3642);
       pole.position.set(0, 2.7, 0);
       const signColor =
@@ -3064,10 +3100,12 @@ export class CityEnvironment {
       type: CANNON.Body.STATIC,
       position: new CANNON.Vec3(x, y, z),
       shape: new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)),
+      collisionFilterGroup: COLLISION.BUILDING,
+      collisionFilterMask: COLLISION.PLAYER_MASK | COLLISION.ENEMY_MASK,
     });
     body.collisionResponse = collisionResponse;
     if (!collisionResponse) {
-      body.collisionFilterGroup = 2;
+      body.collisionFilterGroup = 0;
       body.collisionFilterMask = 0;
     }
     world.addBody(body);
@@ -3172,12 +3210,17 @@ export class CityEnvironment {
     }
     // Physical debris chunks, tinted from the building's own palette color.
     if (this.debris) {
-      let tint = 0x6a625a;
-      const firstMat = block.meshes[0]?.material;
-      if (firstMat instanceof THREE.MeshLambertMaterial || firstMat instanceof THREE.MeshToonMaterial) {
-        const base = firstMat.userData.baseColor as THREE.Color | undefined;
-        if (base) tint = base.getHex();
-        else if (firstMat.color) tint = firstMat.color.getHex();
+      // Collapsed buildings carry their palette color on the merged mesh;
+      // legacy (landmark) meshes fall back to their material's base color.
+      let tint = (block.meshes[0]?.userData.baseColorHex as number | undefined) ?? 0;
+      if (!tint) {
+        tint = 0x6a625a;
+        const firstMat = block.meshes[0]?.material;
+        if (firstMat instanceof THREE.MeshLambertMaterial || firstMat instanceof THREE.MeshToonMaterial) {
+          const base = firstMat.userData.baseColor as THREE.Color | undefined;
+          if (base && base.getHex() !== 0xffffff) tint = base.getHex();
+          else if (firstMat.color) tint = firstMat.color.getHex();
+        }
       }
       const count = Math.min(12, 6 + Math.floor(Math.min(block.width, block.height) / 8));
       this.debris.spawn(block.x, block.height * 0.55, block.z, now, count, 18 + block.height * 0.35, tint, 0.8 + block.width * 0.04);

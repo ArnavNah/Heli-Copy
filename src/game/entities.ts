@@ -1,8 +1,10 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
 import { createBox, createGlowBox, createGlowMaterial, createLowPolyMaterial, disposeObject3D } from "./materials";
 import {
   AttackPattern,
+  COLLISION,
   copyPhysicsPos,
   EnemyLock,
   EnemyModifier,
@@ -94,20 +96,20 @@ function disableShadowCasting(root: THREE.Object3D) {
 export const MOVEMENT_CONFIG = {
   /** Normal cruise speed cap (u/s). */
   maxHorizontalSpeed: 68,
-  /** Time-to-cruise is about 0.27s before the subtle speed response scale. */
-  horizontalAcceleration: 250,
-  /** Release-to-hover is about 0.34s from normal cruise. */
-  horizontalBraking: 200,
-  /** Strong counter-steering without an instantaneous velocity flip. */
-  reverseAcceleration: 360,
+  /** Snappy acceleration — reaches cruise in ~0.24s. */
+  horizontalAcceleration: 290,
+  /** Strong braking — release-to-hover in ~0.30s from cruise. */
+  horizontalBraking: 230,
+  /** Aggressive counter-steering for responsive combat reversal. */
+  reverseAcceleration: 400,
   /** Strong low-speed authority, with only a small amount of high-speed inertia. */
   lateralResponse: 1.08,
   highSpeedResponse: 0.92,
   /** Vertical flight is deliberately a little heavier than horizontal flight. */
   maxVerticalSpeed: 32,
-  verticalAcceleration: 100,
-  verticalBraking: 92,
-  verticalReverseAcceleration: 135,
+  verticalAcceleration: 125,
+  verticalBraking: 115,
+  verticalReverseAcceleration: 150,
   /** Double-tap dash is a short bounded burst, never a velocity multiplier. */
   dashSpeed: 150,
   dashDuration: 0.22,
@@ -398,6 +400,8 @@ export class Helicopter extends Entity {
       position: new CANNON.Vec3(0, 26, 0),
       linearDamping: 0, // The arcade controller is the sole owner of linear damping.
       angularDamping: 0.9,
+      collisionFilterGroup: COLLISION.PLAYER,
+      collisionFilterMask: COLLISION.PLAYER_MASK,
     });
 
     // Core hitbox
@@ -1569,6 +1573,9 @@ export class Enemy extends Entity {
   /** Aim skill 0..1 (set by the engine from enemyAimAccuracy(wave)); tighter
    *  shot cones at higher waves. Default 1 keeps tests deterministic. */
   aimAccuracy: number = 1;
+  /** Difficulty multipliers (set by the engine at spawn). */
+  projSpeedMult: number = 1;
+  homingMult: number = 1;
 
   personalityOffset: number;
   evadeTimer: number = 0;
@@ -2024,6 +2031,8 @@ export class Enemy extends Entity {
       mass: type === EnemyType.TANK ? 100 : 0,
       type: CANNON.Body.KINEMATIC,
       position: new CANNON.Vec3(x, y, z),
+      collisionFilterGroup: COLLISION.ENEMY,
+      collisionFilterMask: COLLISION.ENEMY_MASK,
     });
 
     const shape = new CANNON.Box(
@@ -2594,12 +2603,12 @@ export class Enemy extends Entity {
             dirX,
             dirZ,
             time,
-            130,
+            130 * this.projSpeedMult,
             Math.round(12 * v.damageMult * this.waveDamageMult),
             6,
             0xffc23f,
             playerBody ? { body: playerBody, active: true } : null,
-            2.5,
+            2.5 * this.homingMult,
             0,
             0,
             this.waveDamageMult,
@@ -2750,7 +2759,7 @@ export class Enemy extends Entity {
             11, // proximity blast radius
             0xff44aa,
             playerBody ? { body: playerBody, active: true } : null,
-            1.1, // gentle homing
+            1.1 * this.homingMult, // gentle homing
             0,
             0,
             this.waveDamageMult,
@@ -3403,7 +3412,7 @@ export class Enemy extends Entity {
           aim.x,
           aim.z,
           time,
-          160,
+          160 * this.projSpeedMult,
           5,
           0,
           0xffd92e,
@@ -3486,7 +3495,7 @@ export class Enemy extends Entity {
           ? 3.5
           : 2.4;
     if (dist < fireRange && time - this.lastShotTime > fireRate * fireRateMult) {
-      const projectileSpeed = this.type === EnemyType.TANK ? 95 : 130;
+      const projectileSpeed = (this.type === EnemyType.TANK ? 95 : 130) * this.projSpeedMult;
       if (this.pattern === AttackPattern.ARTILLERY) {
         // Arcing artillery shell: high lob that reaches player altitude,
         // then lands with a visible splash. Lobs over buildings — no LOS.
@@ -3498,7 +3507,7 @@ export class Enemy extends Entity {
           dirX,
           dirZ,
           time,
-          150,
+          150 * this.projSpeedMult,
           16,
           0,
           0xffaa44,
@@ -3690,9 +3699,59 @@ export class Enemy extends Entity {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Instanced projectile rendering: every pool draws its whole bullet set with
+// three InstancedMeshes (tracer core, additive glow, SAM fins) instead of one
+// mesh group per bullet. Projectile instances are sim-state only.
+// ---------------------------------------------------------------------------
+let projectileCoreGeom: THREE.BufferGeometry | null = null;
+let projectileGlowGeom: THREE.BufferGeometry | null = null;
+let projectileFinsGeom: THREE.BufferGeometry | null = null;
+
+function getProjectileCoreGeometry(): THREE.BufferGeometry {
+  if (!projectileCoreGeom) {
+    const g = new THREE.CylinderGeometry(0.035, 0.32, 8.8, 6).toNonIndexed();
+    g.rotateX(Math.PI / 2); // Align with Z axis
+    g.computeVertexNormals();
+    projectileCoreGeom = g;
+  }
+  return projectileCoreGeom;
+}
+
+function getProjectileGlowGeometry(): THREE.BufferGeometry {
+  if (!projectileGlowGeom) {
+    const g = new THREE.CylinderGeometry(0.2, 0.82, 11.6, 6).toNonIndexed();
+    g.rotateX(Math.PI / 2);
+    g.computeVertexNormals();
+    projectileGlowGeom = g;
+  }
+  return projectileGlowGeom;
+}
+
+function getProjectileFinsGeometry(): THREE.BufferGeometry {
+  if (!projectileFinsGeom) {
+    const parts: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < 4; i++) {
+      const fin = new THREE.BoxGeometry(0.08, 0.75, 1.15);
+      fin.rotateZ((i * Math.PI) / 2);
+      fin.translate(0, 0, 2.8);
+      parts.push(fin);
+    }
+    projectileFinsGeom = mergeGeometries(parts) ?? parts[0];
+  }
+  return projectileFinsGeom;
+}
+
+const _projEuler = new THREE.Euler();
+const _projQuat = new THREE.Quaternion();
+const _projPos = new THREE.Vector3();
+const _projScale = new THREE.Vector3();
+const _projMatrix = new THREE.Matrix4();
+const _projHiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+const _projColor = new THREE.Color();
+
 export class Projectile {
   active = false;
-  mesh: THREE.Mesh;
   pos: CANNON.Vec3 = new CANNON.Vec3();
   prevPos: CANNON.Vec3 = new CANNON.Vec3();
   vel: CANNON.Vec3 = new CANNON.Vec3();
@@ -3717,48 +3776,15 @@ export class Projectile {
   sourceObjective: Objective | null = null;
   acceleration = 0;
   maxSpeed = Infinity;
-  private samFins: THREE.Group;
+  /** Rendering color; written into the pool's instanceColor on spawn. */
+  colorHex: number;
 
-  constructor(scene: THREE.Scene, colorHex: number) {
-    let geom = new THREE.CylinderGeometry(0.035, 0.32, 8.8, 6).toNonIndexed();
-    geom.rotateX(Math.PI / 2); // Align with Z axis
-    geom.computeVertexNormals();
-
-    const mat = new THREE.MeshBasicMaterial({
-      color: colorHex,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      opacity: 0.95,
-    });
-    this.mesh = new THREE.Mesh(geom, mat);
-
-    const glowGeom = new THREE.CylinderGeometry(0.2, 0.82, 11.6, 6).toNonIndexed();
-    glowGeom.rotateX(Math.PI / 2);
-    glowGeom.computeVertexNormals();
-
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: colorHex,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      opacity: 0.3,
-      depthWrite: false,
-    });
-    const glow = new THREE.Mesh(glowGeom, glowMat);
-    this.mesh.add(glow);
-
-    this.samFins = new THREE.Group();
-    for (let i = 0; i < 4; i++) {
-      const fin = createBox(0.08, 0.75, 1.15, 0x3a4248);
-      fin.position.z = 2.8;
-      fin.rotation.z = i * Math.PI / 2;
-      this.samFins.add(fin);
-    }
-    this.samFins.visible = false;
-    this.mesh.add(this.samFins);
-
-    this.mesh.matrixAutoUpdate = false;
-    this.mesh.visible = false;
-    scene.add(this.mesh);
+  constructor(
+    private pool: ProjectilePool,
+    readonly index: number,
+    colorHex: number,
+  ) {
+    this.colorHex = colorHex;
   }
 
   spawn(
@@ -3779,7 +3805,6 @@ export class Projectile {
     waveDamageMult: number = 1,
   ) {
     this.active = true;
-    this.mesh.visible = true;
     this.pos.set(x, y, z);
     this.prevPos.copy(this.pos);
 
@@ -3802,20 +3827,10 @@ export class Projectile {
     this.sourceObjective = null;
     this.acceleration = 0;
     this.maxSpeed = Infinity;
-    this.samFins.visible = false;
     this.lifetime = Math.max(1.1, Math.min(2.2, 390 / Math.max(speed, 1)));
 
-    if (color !== undefined) {
-      this.mesh.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-          child.material.color.setHex(color);
-        }
-      });
-    }
-
-    const angle = Math.atan2(dx, dz);
-    this.mesh.rotation.y = angle;
-    this.mesh.rotation.x = -Math.atan2(vy, Math.max(0.001, Math.hypot(this.vel.x, this.vel.z)));
+    if (color !== undefined) this.colorHex = color;
+    this.pool.setInstanceColor(this.index, this.colorHex);
   }
 
   configureSamMissile(source: Objective) {
@@ -3824,8 +3839,6 @@ export class Projectile {
     this.lifetime = SAM_MISSILE_LIFETIME;
     this.acceleration = 48;
     this.maxSpeed = 178;
-    this.samFins.visible = true;
-    this.mesh.scale.setScalar(0.52);
   }
 
   retargetToDecoy(decoy: EnemyLock) {
@@ -3902,21 +3915,6 @@ export class Projectile {
       }
     }
 
-    this.mesh.position.set(this.pos.x, this.pos.y, this.pos.z);
-    this.mesh.rotation.y = Math.atan2(this.vel.x, this.vel.z);
-    this.mesh.rotation.x = -Math.atan2(this.vel.y, Math.max(0.001, Math.hypot(this.vel.x, this.vel.z)));
-    this.mesh.updateMatrix();
-
-    // Dynamic fade-out over lifetime
-    const age = now - this.spawnTime;
-    const lifeRatio = age / this.lifetime;
-    this.mesh.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-        const baseOpacity = child === this.mesh ? 0.95 : 0.3;
-        child.material.opacity = baseOpacity * Math.max(0, 1.0 - lifeRatio);
-      }
-    });
-
     if (now - this.spawnTime > this.lifetime) {
       this.deactivate();
     }
@@ -3926,8 +3924,8 @@ export class Projectile {
     this.active = false;
     this.target = null;
     this.targetType = "NONE";
-    this.mesh.visible = false;
-    this.mesh.scale.setScalar(1);
+    this.kind = "STANDARD";
+    this.pool.hideInstance(this.index);
   }
 }
 
@@ -4193,12 +4191,64 @@ export class PowerUp {
 
 export class ProjectilePool {
   pool: Projectile[] = [];
+  private coreMesh: THREE.InstancedMesh;
+  private glowMesh: THREE.InstancedMesh;
+  private finsMesh: THREE.InstancedMesh;
 
   constructor(scene: THREE.Scene, count: number, colorHex: number = 0x55ff55) {
-    for (let i = 0; i < count; i++) {
-      const p = new Projectile(scene, colorHex);
-      this.pool.push(p);
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0.95,
+    });
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+    });
+    const finsMat = new THREE.MeshLambertMaterial({ color: 0x3a4248 });
+
+    this.coreMesh = new THREE.InstancedMesh(getProjectileCoreGeometry(), coreMat, count);
+    this.glowMesh = new THREE.InstancedMesh(getProjectileGlowGeometry(), glowMat, count);
+    this.finsMesh = new THREE.InstancedMesh(getProjectileFinsGeometry(), finsMat, count);
+    for (const mesh of [this.coreMesh, this.glowMesh, this.finsMesh]) {
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.frustumCulled = false; // bullets span the whole battlefield
     }
+    this.finsMesh.visible = false;
+
+    for (let i = 0; i < count; i++) {
+      this.pool.push(new Projectile(this, i, colorHex));
+      this.coreMesh.setMatrixAt(i, _projHiddenMatrix);
+      this.glowMesh.setMatrixAt(i, _projHiddenMatrix);
+      this.finsMesh.setMatrixAt(i, _projHiddenMatrix);
+      _projColor.setHex(colorHex);
+      this.coreMesh.setColorAt(i, _projColor);
+      this.glowMesh.setColorAt(i, _projColor);
+    }
+    scene.add(this.coreMesh, this.glowMesh, this.finsMesh);
+  }
+
+  /** Write a spawn color into the per-instance color buffers. */
+  setInstanceColor(index: number, hex: number) {
+    _projColor.setHex(hex);
+    this.coreMesh.setColorAt(index, _projColor);
+    this.glowMesh.setColorAt(index, _projColor);
+    if (this.coreMesh.instanceColor) this.coreMesh.instanceColor.needsUpdate = true;
+    if (this.glowMesh.instanceColor) this.glowMesh.instanceColor.needsUpdate = true;
+  }
+
+  /** Immediately zero-scale an instance (called on deactivate). */
+  hideInstance(index: number) {
+    this.coreMesh.setMatrixAt(index, _projHiddenMatrix);
+    this.glowMesh.setMatrixAt(index, _projHiddenMatrix);
+    this.finsMesh.setMatrixAt(index, _projHiddenMatrix);
+    this.coreMesh.instanceMatrix.needsUpdate = true;
+    this.glowMesh.instanceMatrix.needsUpdate = true;
+    this.finsMesh.instanceMatrix.needsUpdate = true;
   }
 
   spawn(
@@ -4233,9 +4283,41 @@ export class ProjectilePool {
   }
 
   updatePositions(now: number, delta: number, particles?: GPUParticleSystem) {
+    let anyFins = false;
     for (const p of this.pool) {
-      if (p.active) p.update(now, delta, particles);
+      if (p.active) {
+        p.update(now, delta, particles);
+      }
+      if (p.active) {
+        const rotY = Math.atan2(p.vel.x, p.vel.z);
+        const rotX = -Math.atan2(p.vel.y, Math.max(0.001, Math.hypot(p.vel.x, p.vel.z)));
+        let scale = p.kind === "SAM_MISSILE" ? 0.52 : 1;
+        // Lifetime taper over the final 15% (replaces per-material opacity fade).
+        const lifeRatio = (now - p.spawnTime) / p.lifetime;
+        if (lifeRatio > 0.85) scale *= Math.max(0, (1 - lifeRatio) / 0.15);
+        _projEuler.set(rotX, rotY, 0);
+        _projQuat.setFromEuler(_projEuler);
+        _projPos.set(p.pos.x, p.pos.y, p.pos.z);
+        _projScale.setScalar(scale);
+        _projMatrix.compose(_projPos, _projQuat, _projScale);
+        this.coreMesh.setMatrixAt(p.index, _projMatrix);
+        this.glowMesh.setMatrixAt(p.index, _projMatrix);
+        if (p.kind === "SAM_MISSILE") {
+          anyFins = true;
+          this.finsMesh.setMatrixAt(p.index, _projMatrix);
+        } else {
+          this.finsMesh.setMatrixAt(p.index, _projHiddenMatrix);
+        }
+      } else {
+        this.coreMesh.setMatrixAt(p.index, _projHiddenMatrix);
+        this.glowMesh.setMatrixAt(p.index, _projHiddenMatrix);
+        this.finsMesh.setMatrixAt(p.index, _projHiddenMatrix);
+      }
     }
+    this.coreMesh.instanceMatrix.needsUpdate = true;
+    this.glowMesh.instanceMatrix.needsUpdate = true;
+    this.finsMesh.instanceMatrix.needsUpdate = true;
+    this.finsMesh.visible = anyFins;
   }
 
   /**

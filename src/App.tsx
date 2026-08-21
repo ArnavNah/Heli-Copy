@@ -6,6 +6,7 @@ import {
   HANGAR_UPGRADE_INFO,
   HelicopterModel,
   buyHangarUpgrade,
+  countermeasureConfig,
   readDeliveryCredits,
   readHangarUpgrades,
 } from './game';
@@ -26,17 +27,23 @@ import {
   PERK_INFO,
   readMastery,
   readPerks,
+  readProgress,
   readRunHistory,
   readWeaponMods,
+  STARTER_CREDITS,
   SUPER_MAX_CHARGE,
   WEAPON_MODS,
   writePerkRank,
+  writeProgress,
   writeWeaponMod,
 } from './game/logic';
 import type { PerkId, PerkRanks, RunRecord } from './game/logic';
 import { Bomb, Cog, Flame, Fuel, Rocket, Shield, Skull, Sparkles, Zap } from 'lucide-react';
 
 type GameMode = 'menu' | 'playing' | 'paused' | 'gameover';
+
+type OpeningState = { phase: 'countdown' | 'grace' | 'live'; count?: number; remaining?: number };
+type TutorialState = { active: boolean; index?: number; total?: number; id?: string; title?: string; desc?: string };
 
 type RunStats = {
   time: number;
@@ -55,17 +62,31 @@ type RunStats = {
   salvage?: number;
   lostUnsecured?: number;
   securedThreatBonus?: number;
+  causeOfDeath?: string;
+  credits?: number;
+  combatPay?: number;
+  achievementCredits?: number;
+  achievementLabels?: string[];
 };
 
 type PerfStats = {
   fps: number;
+  avgFrameMs: number;
+  p95FrameMs: number;
+  worstFrameMs: number;
   drawCalls: number;
   triangles: number;
   geometries: number;
   textures: number;
   programs: number;
   graphics: string;
+  governorLevel: number;
   enemies: number;
+  playerProjectiles: number;
+  enemyProjectiles: number;
+  particles: number;
+  physicsBodies: number;
+  sceneObjects: number;
   powerups: number;
   objectives: number;
 };
@@ -78,9 +99,15 @@ const DEFAULT_SETTINGS: GameSettings = {
   quality: 'low',
   graphics: 'sp1',
   volume: 0.8,
+  musicVolume: 0.8,
+  sfxVolume: 1,
   touchMode: false,
   difficulty: 'normal',
   autoAim: false,
+  movement: 'arcade',
+  screenShake: 'full',
+  reduceFlash: false,
+  adaptiveQuality: true,
 };
 
 function clampPercent(value: number) {
@@ -91,6 +118,39 @@ function readHighScore() {
   const stored = Number(window.localStorage.getItem('helistrike:highScore') ?? 0);
   return Number.isFinite(stored) ? stored : 0;
 }
+
+/** One-time starter credit grant for brand-new profiles — paid before the
+ *  engine reads the credit bank so the very first Hangar visit can buy. */
+function grantStarterCreditsOnce(): number {
+  const base = readDeliveryCredits();
+  try {
+    const progress = readProgress();
+    if (progress.starterGranted) return base;
+    progress.starterGranted = true;
+    writeProgress(progress);
+    const next = base + STARTER_CREDITS;
+    window.localStorage.setItem('helistrike:credits', String(next));
+    return next;
+  } catch {
+    return base;
+  }
+}
+
+/** Difficulty copy must match the final balance in DIFFICULTIES. */
+const DIFFICULTY_INFO: Record<'casual' | 'normal' | 'hard', { name: string; desc: string }> = {
+  casual: {
+    name: 'Casual',
+    desc: 'Softer enemies, slower fire, lighter collisions — plus an emergency hull repair when you flatline. Best for learning the ropes.',
+  },
+  normal: {
+    name: 'Normal',
+    desc: 'The intended experience: full threat director, standard enemy aggression and rewards.',
+  },
+  hard: {
+    name: 'Hard',
+    desc: 'Enemies hit 25% harder, fire faster and swarm denser. No emergency repair — but rewards scale up.',
+  },
+};
 
 function readSettings(): GameSettings {
   try {
@@ -174,9 +234,9 @@ function KeyCap({ children }: { children: ReactNode }) {
 
 const CONTROL_HINTS: { keys: string; label: string }[] = [
   { keys: 'W A S D', label: 'Move' },
+  { keys: 'HOLD LEFT MOUSE', label: 'Fire Machine Gun' },
   { keys: 'SPACE / ALT', label: 'Climb / Descend' },
   { keys: 'SHIFT', label: 'Afterburner' },
-  { keys: 'HOLD FIRE', label: 'Shoot' },
   { keys: 'C', label: 'Deploy Flares' },
   { keys: 'E', label: 'Devastation' },
 ];
@@ -782,6 +842,21 @@ function MenuButton({
   );
 }
 
+function DifficultyChip({ difficulty }: { difficulty: GameSettings['difficulty'] }) {
+  const info = DIFFICULTY_INFO[difficulty];
+  const tone =
+    difficulty === 'casual'
+      ? 'border-[#55f2a2]/60 text-[#8df5c8]'
+      : difficulty === 'hard'
+        ? 'border-[#ff3344]/60 text-[#ff9aa4]'
+        : 'border-[#ffd35c]/60 text-[#ffe392]';
+  return (
+    <span className={`border bg-black/30 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] ${tone}`}>
+      {info.name}
+    </span>
+  );
+}
+
 function ThreeDMenu({
   mode,
   score,
@@ -790,9 +865,15 @@ function ThreeDMenu({
   isNewBest,
   stats,
   history,
+  difficulty,
+  credits,
+  isNewPilot,
   onStart,
   onSettings,
   onHangar,
+  onHelp,
+  onMenu,
+  onUiSound,
 }: {
   mode: GameMode;
   score: number;
@@ -801,142 +882,283 @@ function ThreeDMenu({
   isNewBest: boolean;
   stats: RunStats | null;
   history: RunRecord[];
+  difficulty: GameSettings['difficulty'];
+  credits: number;
+  isNewPilot: boolean;
   onStart: () => void;
   onSettings: () => void;
   onHangar: () => void;
+  onHelp: () => void;
+  onMenu: () => void;
+  onUiSound: () => void;
 }) {
   const isGameOver = mode === 'gameover';
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
+  const [showDetails, setShowDetails] = useState(false);
 
-  // C7: shareable scorecard — latest run to the clipboard.
+  // C7: shareable scorecard — latest run to the clipboard, with a visible
+  // non-blocking error when the browser refuses clipboard access.
   const copyScorecard = async () => {
     const latest = history[0];
     if (!latest) return;
     try {
       await navigator.clipboard.writeText(formatScorecard(latest, highScore));
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      setCopied('ok');
     } catch {
-      // clipboard unavailable — ignore
+      setCopied('err');
     }
+    window.setTimeout(() => setCopied('idle'), 2400);
   };
 
+  const runRewards = (stats?.combatPay ?? 0) + (stats?.achievementCredits ?? 0);
+
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/60 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/60 px-3 py-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
-          <div className="menu-card">
-            <div className="menu-title-slab">
-              <span>{isGameOver ? (stats?.status === 'EXTRACTED' ? 'Run Complete — Extracted' : 'Aircraft Destroyed') : 'Heli-Strike'}</span>
-            </div>
+          {!isGameOver ? (
+            <div className="menu-card">
+              <div className="menu-title-slab">
+                <span>Heli-Strike</span>
+              </div>
+              <div className="mt-2 text-center text-[10px] font-black uppercase tracking-[0.26em] text-[#9bf1ff]/70">
+                Urban gunship · endless waves
+              </div>
 
-            <div className="mt-5 grid grid-cols-3 gap-3 text-center">
-              <div className="menu-stat">
-                <span>Score</span>
-                <strong>{score.toLocaleString()}</strong>
+              <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+                <div className="menu-stat">
+                  <span>Best</span>
+                  <strong>{highScore.toLocaleString()}</strong>
+                </div>
+                <div className="menu-stat">
+                  <span>Credits</span>
+                  <strong>{credits.toLocaleString()}</strong>
+                </div>
+                <div className="menu-stat">
+                  <span>Last Wave</span>
+                  <strong>{wave || '—'}</strong>
+                </div>
               </div>
-              <div className="menu-stat">
-                <span>Best</span>
-                <strong>{highScore.toLocaleString()}</strong>
+
+              {isNewPilot && (
+                <div className="mt-3 border border-[#55f2a2]/50 bg-[#0c3a2a]/45 px-3 py-1.5 text-center text-[10px] font-black uppercase tracking-[0.16em] text-[#8df5c8]">
+                  Starter credits granted — open the Hangar for your first upgrade
+                </div>
+              )}
+
+              <div className="mt-5 flex flex-col items-center gap-3">
+                <MenuButton onClick={() => { onUiSound(); onStart(); }}>Start Run</MenuButton>
+                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-white/55">
+                  Difficulty <DifficultyChip difficulty={difficulty} />
+                  <span className="text-white/35">· change in Settings</span>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2.5">
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>Hangar</MenuButton>
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onSettings(); }}>Settings</MenuButton>
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHelp(); }}>How to Play</MenuButton>
+                </div>
               </div>
-              <div className="menu-stat">
-                <span>Stage</span>
-                <strong>{wave || '-'}</strong>
+
+              <div className="mt-4 border-t border-white/12 pt-3 text-center">
+                <div className="text-[10px] font-bold uppercase leading-relaxed tracking-[0.16em] text-white/60">
+                  WASD move · Hold Left Mouse to fire · Space/Alt climb
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { onUiSound(); onHelp(); }}
+                  className="mt-1 text-[10px] font-black uppercase tracking-[0.2em] text-[#7df9ff]/85 underline-offset-2 transition hover:text-[#7df9ff] hover:underline"
+                >
+                  Full controls — How to Play
+                </button>
               </div>
             </div>
+          ) : (
+            <div className="menu-card">
+              <div className="menu-title-slab">
+                <span>{stats?.status === 'EXTRACTED' ? 'Run Complete — Extracted' : 'Aircraft Destroyed'}</span>
+              </div>
 
-            {isGameOver && stats && (
-              <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                <div className="run-stat">
+              {stats?.status === 'EXTRACTED' ? (
+                <div className="mt-3 border border-[#55f2a2]/55 bg-[#0c3a2a]/40 px-3 py-1.5 text-center text-[11px] font-black uppercase tracking-[0.18em] text-[#8df5c8]">
+                  Clean extraction — all rewards secured
+                </div>
+              ) : stats?.causeOfDeath ? (
+                <div className="mt-3 border border-[#ff3344]/60 bg-[#4a0710]/45 px-3 py-1.5 text-center">
+                  <span className="text-[10px] font-black uppercase tracking-[0.24em] text-white/55">Destroyed by · </span>
+                  <span className="text-sm font-black uppercase tracking-[0.12em] text-[#ff8b96]">{stats.causeOfDeath}</span>
+                </div>
+              ) : null}
+
+              <div className="mt-3 text-center">
+                <div className="text-[9px] font-black uppercase tracking-[0.28em] text-white/50">Final Score</div>
+                <div className="font-display mt-1 text-3xl text-[#ffe66d]">{score.toLocaleString()}</div>
+              </div>
+
+              {isNewBest && (
+                <div className="mt-2 border border-[#ff4fd8]/80 bg-[#ff4fd8]/15 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ff9bf0] shadow-[0_3px_0_rgba(0,0,0,0.35),0_0_18px_rgba(255,77,216,0.35)]">
+                  ★ New Personal Best ★
+                </div>
+              )}
+
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                <div className="menu-stat">
+                  <span>Wave</span>
+                  <strong>{stats?.wave ?? wave}</strong>
+                </div>
+                <div className="menu-stat">
                   <span>Time</span>
-                  <strong>{formatDuration(stats.time)}</strong>
+                  <strong>{formatDuration(stats?.time ?? 0)}</strong>
                 </div>
-                <div className="run-stat">
-                  <span>Kills</span>
-                  <strong>{stats.kills}</strong>
-                </div>
-                <div className="run-stat">
-                  <span>Max Combo</span>
-                  <strong>{stats.maxCombo}x</strong>
-                </div>
-                <div className="run-stat">
-                  <span>Accuracy</span>
-                  <strong>{Math.round(stats.accuracy * 100)}%</strong>
-                </div>
-                <div className="run-stat"><span>Threat</span><strong>{stats.threatLevel ?? 1}</strong></div>
-                <div className="run-stat"><span>Deliveries</span><strong>{stats.deliveries ?? 0}</strong></div>
-                <div className="run-stat"><span>SAM Sites</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
-                <div className="run-stat"><span>Radar</span><strong>{stats.radarSitesDestroyed ?? 0}</strong></div>
-                <div className="run-stat"><span>Bosses</span><strong>{stats.bossesDestroyed ?? 0}</strong></div>
-                <div className="run-stat"><span>Missions</span><strong>{stats.missionsCompleted ?? 0}</strong></div>
-                <div className="run-stat"><span>Bonuses</span><strong>{stats.missionBonusesCompleted ?? 0}</strong></div>
-                <div className="run-stat"><span>Salvage</span><strong>{stats.salvage ?? 0}</strong></div>
-                <div className="run-stat">
-                  <span>{stats.status === 'EXTRACTED' ? 'Bonus Secured' : 'Bonus Lost'}</span>
-                  <strong>{stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR</strong>
+                <div className="menu-stat">
+                  <span>Credits</span>
+                  <strong>{(stats?.credits ?? credits).toLocaleString()}</strong>
                 </div>
               </div>
-            )}
 
-            {isNewBest && (
-              <div className="mt-3 border border-[#ff4fd8]/80 bg-[#ff4fd8]/15 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ff9bf0] shadow-[0_3px_0_rgba(0,0,0,0.35),0_0_18px_rgba(255,77,216,0.35)]">
-                New High Score
-              </div>
-            )}
-
-            {/* C7: recent run history + shareable scorecard */}
-            {isGameOver && history.length > 0 && (
-              <div className="mt-3 border border-white/15 bg-black/25 px-3 py-2">
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-[9px] font-black uppercase tracking-[0.24em] text-white/50">Recent Runs</span>
-                  <button
-                    type="button"
-                    onClick={copyScorecard}
-                    className="border border-[#50ebff]/60 bg-[#50ebff]/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.18em] text-[#9bf1ff] transition hover:bg-[#50ebff]/25"
-                  >
-                    {copied ? 'Copied!' : 'Copy Scorecard'}
-                  </button>
+              {stats && runRewards > 0 && (
+                <div className="mt-3 border border-[#ffe66d]/40 bg-[#3d2f05]/35 px-3 py-2">
+                  <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.2em] text-[#ffe66d]">
+                    <span>Run Rewards</span>
+                    <span>+{runRewards} CR</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-bold uppercase tracking-wider text-white/65">
+                    <span>Combat pay +{stats.combatPay ?? 0}</span>
+                    {(stats.achievementLabels ?? []).map((a) => (
+                      <span key={a} className="text-[#8df5c8]">★ {a}</span>
+                    ))}
+                  </div>
                 </div>
-                <div className="grid grid-cols-1 gap-1">
-                  {history.slice(0, 5).map((run) => (
-                    <div key={run.at} className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
-                      <span className={run.victory ? 'text-[#55f2c2]' : 'text-white/55'}>{run.victory ? '✔ EXT' : '✖ KIA'}</span>
-                      <span className="text-[#ffe66d]">{run.score.toLocaleString()}</span>
-                      <span>W{run.wave}</span>
-                      <span>{run.kills} K</span>
-                      <span>{Math.round(run.accuracy * 100)}%</span>
-                      <span>{formatDuration(run.survivalTime)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-wrap justify-center gap-3">
-              <MenuButton size={isGameOver ? 'md' : 'sm'} onClick={onStart}>
-                {isGameOver ? 'Restart' : 'Start'}
-              </MenuButton>
-              {!isGameOver && (
-                <MenuButton size="sm" secondary onClick={onSettings}>
-                  Settings
-                </MenuButton>
               )}
-              {!isGameOver && (
-                <MenuButton size="sm" secondary onClick={onHangar}>
-                  Hangar
-                </MenuButton>
+
+              <div className="mt-4 flex justify-center">
+                <MenuButton onClick={() => { onUiSound(); onStart(); }}>Restart (Enter)</MenuButton>
+              </div>
+              <div className="mt-2.5 flex flex-wrap justify-center gap-2.5">
+                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>Hangar</MenuButton>
+                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onMenu(); }}>Main Menu</MenuButton>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => { onUiSound(); setShowDetails((v) => !v); }}
+                aria-expanded={showDetails}
+                className="mt-4 w-full border border-white/15 bg-black/25 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-white/65 transition hover:border-[#50ebff]/50 hover:text-[#9bf1ff]"
+              >
+                {showDetails ? 'Hide Detailed Statistics ▲' : 'Detailed Statistics ▼'}
+              </button>
+
+              {showDetails && stats && (
+                <div className="mt-2">
+                  <div className="grid grid-cols-3 gap-1.5 text-center sm:grid-cols-4">
+                    <div className="run-stat"><span>Kills</span><strong>{stats.kills}</strong></div>
+                    <div className="run-stat"><span>Accuracy</span><strong>{Math.round(stats.accuracy * 100)}%</strong></div>
+                    <div className="run-stat"><span>Max Combo</span><strong>{stats.maxCombo}x</strong></div>
+                    <div className="run-stat"><span>Threat</span><strong>{stats.threatLevel ?? 1}</strong></div>
+                    <div className="run-stat"><span>Deliveries</span><strong>{stats.deliveries ?? 0}</strong></div>
+                    <div className="run-stat"><span>SAM Sites</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>Radar</span><strong>{stats.radarSitesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>Bosses</span><strong>{stats.bossesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>Missions</span><strong>{stats.missionsCompleted ?? 0}</strong></div>
+                    <div className="run-stat"><span>Bonuses</span><strong>{stats.missionBonusesCompleted ?? 0}</strong></div>
+                    <div className="run-stat"><span>Salvage</span><strong>{stats.salvage ?? 0}</strong></div>
+                    <div className="run-stat">
+                      <span>{stats.status === 'EXTRACTED' ? 'Bonus Secured' : 'Bonus Lost'}</span>
+                      <strong>{stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR</strong>
+                    </div>
+                  </div>
+
+                  {history.length > 0 && (
+                    <div className="mt-2 border border-white/15 bg-black/25 px-3 py-2">
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <span className="text-[9px] font-black uppercase tracking-[0.24em] text-white/50">Recent Runs</span>
+                        <button
+                          type="button"
+                          onClick={copyScorecard}
+                          className="border border-[#50ebff]/60 bg-[#50ebff]/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.18em] text-[#9bf1ff] transition hover:bg-[#50ebff]/25"
+                        >
+                          {copied === 'ok' ? 'Copied!' : 'Copy Scorecard'}
+                        </button>
+                      </div>
+                      {copied === 'err' && (
+                        <div role="status" className="mb-1 text-[9px] font-bold uppercase tracking-wider text-[#ff9aa4]">
+                          Clipboard unavailable — the browser blocked the copy
+                        </div>
+                      )}
+                      <div className="grid grid-cols-1 gap-1">
+                        {history.slice(0, 5).map((run) => (
+                          <div key={run.at} className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
+                            <span className={run.victory ? 'text-[#55f2c2]' : 'text-white/55'}>{run.victory ? '✔ EXT' : '✖ KIA'}</span>
+                            <span className="text-[#ffe66d]">{run.score.toLocaleString()}</span>
+                            <span>W{run.wave}</span>
+                            <span>{run.kills} K</span>
+                            <span>{Math.round(run.accuracy * 100)}%</span>
+                            <span>{formatDuration(run.survivalTime)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-            <div className="mt-4 grid grid-cols-2 gap-3 text-sm font-black uppercase tracking-[0.12em] text-white/95">
-              <div className="menu-chip">WASD Move</div>
-              <div className="menu-chip">Mouse Aim</div>
-              <div className="menu-chip">Space Climb</div>
-              <div className="menu-chip">Alt Descend</div>
-              <div className="menu-chip col-span-2 text-center border-[#ff3344]/55 py-1.5 text-[#ff8b96]">Q / R-Click Lock Salvo</div>
-              <div className="menu-chip col-span-2 text-center text-[#ffd35c]">C Deploy Flares</div>
-              <div className="menu-chip col-span-2 text-center text-[#ff8f6b]">E Devastation</div>
-              <div className="menu-chip col-span-2 text-center border-[#50ebff]/35 py-1.5">ESC / P Pause</div>
+const HOW_TO_PLAY_CONTROLS: { keys: string; label: string }[] = [
+  { keys: 'W A S D', label: 'Move the helicopter' },
+  { keys: 'MOUSE', label: 'Aim' },
+  { keys: 'HOLD LEFT MOUSE', label: 'Fire the machine gun' },
+  { keys: 'SPACE / ALT', label: 'Climb / Descend' },
+  { keys: 'SHIFT', label: 'Afterburner — extra speed, burns fuel' },
+  { keys: 'HOLD Q / RIGHT MOUSE', label: 'Lock Salvo — paint targets, release to launch' },
+  { keys: 'C', label: 'Flares — break incoming missile locks' },
+  { keys: 'E', label: 'Devastation — press when the meter is full' },
+  { keys: '1–4 / WHEEL', label: 'Switch weapons' },
+  { keys: 'ESC / P', label: 'Pause' },
+  { keys: 'ENTER', label: 'Quick restart from the results screen' },
+];
+
+function HowToPlayScreen({ touchDevice, onClose }: { touchDevice: boolean; onClose: () => void }) {
+  return (
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-3 py-4 backdrop-blur-[1px]">
+      <div className="menu-perspective">
+        <div className="menu-rig">
+          <div className="menu-card max-h-[86vh] w-[min(560px,calc(100vw-24px))] overflow-y-auto">
+            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
+              How to Play
+            </div>
+
+            <div className="mt-4 text-[10px] font-black uppercase tracking-[0.24em] text-[#ffd35c]">Flight Controls</div>
+            <div className="mt-2 flex flex-col gap-1.5">
+              {HOW_TO_PLAY_CONTROLS.map((c) => (
+                <div key={c.keys} className="flex items-center gap-3 border border-white/12 bg-black/25 px-3 py-1.5">
+                  <KeyCap>{c.keys}</KeyCap>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-white/85">{c.label}</span>
+                </div>
+              ))}
+            </div>
+
+            {touchDevice && (
+              <div className="mt-2 border border-[#50ebff]/35 bg-[#101a4a]/80 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[#9bf1ff]">
+                Touch: left stick moves · right stick aims · FIRE button shoots · on-screen Flares & Super buttons
+              </div>
+            )}
+
+            <div className="mt-4 text-[10px] font-black uppercase tracking-[0.24em] text-[#ffd35c]">Survival Basics</div>
+            <ul className="mt-2 flex flex-col gap-1 text-[11px] font-semibold leading-relaxed text-white/80">
+              <li>· Enemies attack in waves — the opening countdown is completely safe.</li>
+              <li>· Watch Hull and Fuel: fuel pickups keep you airborne, depots repair and rearm you.</li>
+              <li>· Earned credits stay unsecured until you extract — dying drops them.</li>
+              <li>· Destroy SAM sites before they lock on; flares break active missile locks.</li>
+              <li>· Spend credits in the Hangar on permanent systems, pilot perks and weapon mods.</li>
+            </ul>
+
+            <div className="mt-5 flex justify-center">
+              <MenuButton onClick={onClose}>Back</MenuButton>
             </div>
           </div>
         </div>
@@ -1068,35 +1290,64 @@ function SettingsPanel({
   settings,
   onChange,
   onClose,
+  onReplayTutorial,
+  onUiSound,
 }: {
   settings: GameSettings;
   onChange: (patch: Partial<GameSettings>) => void;
   onClose: () => void;
+  onReplayTutorial?: () => void;
+  onUiSound: () => void;
 }) {
+  const [confirmReset, setConfirmReset] = useState(false);
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-3 py-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
         <div className="menu-rig">
-          <div className="menu-card w-[min(460px,calc(100vw-32px))]">
+          <div className="menu-card max-h-[88vh] w-[min(480px,calc(100vw-24px))] overflow-y-auto">
             <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Settings
             </div>
+            <div className="mt-1 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/45">
+              Changes save automatically and apply instantly
+            </div>
 
-            <div className="mt-6 flex flex-col gap-5">
+            <div className="mt-5 flex flex-col gap-5">
               <div className="setting-row">
                 <div>
                   <div className="setting-label">Difficulty</div>
-                  <div className="setting-desc">Enemy HP, damage & swarm density</div>
+                  <div className="setting-desc">{DIFFICULTY_INFO[settings.difficulty].desc}</div>
                 </div>
                 <div className="flex gap-2">
                   {(['casual', 'normal', 'hard'] as const).map((d) => (
                     <button
                       key={d}
                       type="button"
-                      onClick={() => onChange({ difficulty: d })}
+                      onClick={() => { onUiSound(); onChange({ difficulty: d }); }}
+                      aria-pressed={settings.difficulty === d}
                       className={`seg-btn ${settings.difficulty === d ? 'seg-on' : ''}`}
                     >
-                      {d === 'casual' ? 'Casual' : d === 'normal' ? 'Normal' : 'Hard'}
+                      {DIFFICULTY_INFO[d].name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Movement Preset</div>
+                  <div className="setting-desc">Arcade = instant response · Simulation = weighty inertia on the flight stick</div>
+                </div>
+                <div className="flex gap-2">
+                  {(['arcade', 'simulation'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => { onUiSound(); onChange({ movement: m }); }}
+                      aria-pressed={settings.movement === m}
+                      className={`seg-btn ${settings.movement === m ? 'seg-on' : ''}`}
+                    >
+                      {m === 'arcade' ? 'Arcade' : 'Simulation'}
                     </button>
                   ))}
                 </div>
@@ -1107,7 +1358,7 @@ function SettingsPanel({
                   <div className="setting-label">Invert Y-Axis</div>
                   <div className="setting-desc">Flips gamepad / touch aim direction</div>
                 </div>
-                <Toggle checked={settings.invertedY} onChange={(v) => onChange({ invertedY: v })} />
+                <Toggle checked={settings.invertedY} onChange={(v) => { onUiSound(); onChange({ invertedY: v }); }} />
               </div>
 
               <div className="setting-row">
@@ -1115,7 +1366,7 @@ function SettingsPanel({
                   <div className="setting-label">Auto-Aim</div>
                   <div className="setting-desc">Locks guns onto the nearest enemy — the gun turret tracks the target while the helicopter flies on course</div>
                 </div>
-                <Toggle checked={settings.autoAim} onChange={(v) => onChange({ autoAim: v })} />
+                <Toggle checked={settings.autoAim} onChange={(v) => { onUiSound(); onChange({ autoAim: v }); }} />
               </div>
 
               <div className="setting-row">
@@ -1133,6 +1384,7 @@ function SettingsPanel({
                     value={settings.gamepadSensitivity}
                     onChange={(e) => onChange({ gamepadSensitivity: Number(e.target.value) })}
                     className="slider-arcade w-32"
+                    aria-label="Stick sensitivity"
                   />
                 </div>
               </div>
@@ -1147,7 +1399,8 @@ function SettingsPanel({
                     <button
                       key={g}
                       type="button"
-                      onClick={() => onChange({ graphics: g, quality: g === 'hd' ? 'high' : 'low' })}
+                      onClick={() => { onUiSound(); onChange({ graphics: g, quality: g === 'hd' ? 'high' : 'low' }); }}
+                      aria-pressed={settings.graphics === g}
                       className={`seg-btn ${settings.graphics === g ? 'seg-on' : ''}`}
                     >
                       {g === 'sp1' ? 'SP1' : 'HD'}
@@ -1158,8 +1411,44 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Volume</div>
-                  <div className="setting-desc">Master sound & music level</div>
+                  <div className="setting-label">Adaptive Quality</div>
+                  <div className="setting-desc">Automatically tunes effects to hold a smooth frame rate</div>
+                </div>
+                <Toggle checked={settings.adaptiveQuality} onChange={(v) => { onUiSound(); onChange({ adaptiveQuality: v }); }} />
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Screen Shake</div>
+                  <div className="setting-desc">Camera impact feedback from explosions and damage</div>
+                </div>
+                <div className="flex gap-2">
+                  {(['off', 'low', 'full'] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => { onUiSound(); onChange({ screenShake: s }); }}
+                      aria-pressed={settings.screenShake === s}
+                      className={`seg-btn ${settings.screenShake === s ? 'seg-on' : ''}`}
+                    >
+                      {s === 'off' ? 'Off' : s === 'low' ? 'Low' : 'Full'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Reduce Flashing</div>
+                  <div className="setting-desc">Softens hit flashes and bright screen effects</div>
+                </div>
+                <Toggle checked={settings.reduceFlash} onChange={(v) => { onUiSound(); onChange({ reduceFlash: v }); }} />
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Master Volume</div>
+                  <div className="setting-desc">Overall loudness</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="setting-value">{Math.round(settings.volume * 100)}%</span>
@@ -1171,13 +1460,91 @@ function SettingsPanel({
                     value={settings.volume}
                     onChange={(e) => onChange({ volume: Number(e.target.value) })}
                     className="slider-arcade w-32"
+                    aria-label="Master volume"
                   />
                 </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Music Volume</div>
+                  <div className="setting-desc">Combat soundtrack level</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="setting-value">{Math.round(settings.musicVolume * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={settings.musicVolume}
+                    onChange={(e) => onChange({ musicVolume: Number(e.target.value) })}
+                    className="slider-arcade w-32"
+                    aria-label="Music volume"
+                  />
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">SFX Volume</div>
+                  <div className="setting-desc">Weapons, explosions and interface sounds</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="setting-value">{Math.round(settings.sfxVolume * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={settings.sfxVolume}
+                    onChange={(e) => onChange({ sfxVolume: Number(e.target.value) })}
+                    className="slider-arcade w-32"
+                    aria-label="SFX volume"
+                  />
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Tutorial</div>
+                  <div className="setting-desc">Replay the first-run flight briefing from the start</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { onUiSound(); onReplayTutorial?.(); }}
+                  className="seg-btn"
+                >
+                  Replay
+                </button>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">Reset Settings</div>
+                  <div className="setting-desc">Restores every option to its default value</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onUiSound();
+                    if (confirmReset) {
+                      onChange({ ...DEFAULT_SETTINGS });
+                      setConfirmReset(false);
+                    } else {
+                      setConfirmReset(true);
+                      window.setTimeout(() => setConfirmReset(false), 3000);
+                    }
+                  }}
+                  className={`seg-btn ${confirmReset ? 'border-[#ff3344] text-[#ff8b96]' : ''}`}
+                >
+                  {confirmReset ? 'Confirm?' : 'Reset'}
+                </button>
               </div>
             </div>
 
             <div className="mt-6 flex justify-center">
-              <MenuButton onClick={onClose}>Done</MenuButton>
+              <MenuButton onClick={() => { onUiSound(); onClose(); }}>Done</MenuButton>
             </div>
           </div>
         </div>
@@ -1248,6 +1615,36 @@ function HelicopterCard({
   );
 }
 
+type HangarTab = 'aircraft' | 'systems' | 'weapons' | 'mods' | 'perks';
+
+const HANGAR_TABS: { id: HangarTab; label: string }[] = [
+  { id: 'aircraft', label: 'Aircraft' },
+  { id: 'systems', label: 'Systems' },
+  { id: 'weapons', label: 'Mastery' },
+  { id: 'mods', label: 'Mods' },
+  { id: 'perks', label: 'Perks' },
+];
+
+/** Numeric current → next preview for each permanent system rank. */
+function upgradePreview(id: HangarUpgradeId, rank: number): string {
+  const next = rank + 1;
+  switch (id) {
+    case 'armor': return `Hull ${100 + rank * 10} → ${100 + next * 10}`;
+    case 'fuel': return `Fuel tank ${100 + rank * 4} → ${100 + next * 4}`;
+    case 'engine': return `Fuel burn −${(rank * 2.4).toFixed(1)}% → −${(next * 2.4).toFixed(1)}%`;
+    case 'rotor': return `Vertical thrust +${(rank * 2.5).toFixed(1)}% → +${(next * 2.5).toFixed(1)}%`;
+    case 'targeting': return `Aim range +${rank * 10}m → +${next * 10}m`;
+    case 'weaponSystem': return `Ammo capacity +${(rank * 4.5).toFixed(1)}% → +${(next * 4.5).toFixed(1)}%`;
+    case 'countermeasures': {
+      const cur = countermeasureConfig(rank);
+      const nxt = countermeasureConfig(next);
+      return `${cur.maxCharges} → ${nxt.maxCharges} flares · ${cur.cooldown}s → ${nxt.cooldown}s reload`;
+    }
+    case 'airframe': return `Rank ${rank} → ${next} — steadier cargo flight`;
+    default: return `Rank ${rank} → ${next}`;
+  }
+}
+
 function HangarScreen({
   mastery,
   playerModel,
@@ -1255,11 +1652,13 @@ function HangarScreen({
   hangarUpgrades,
   perks,
   weaponMods,
+  isNewPilot,
   onSelectModel,
   onBuyUpgrade,
   onBuyPerk,
   onSelectMod,
   onBack,
+  onUiSound,
 }: {
   mastery: number[];
   playerModel: HelicopterModel;
@@ -1267,22 +1666,22 @@ function HangarScreen({
   hangarUpgrades: HangarUpgrades;
   perks: PerkRanks;
   weaponMods: number[];
+  isNewPilot: boolean;
   onSelectModel: (m: HelicopterModel) => void;
   onBuyUpgrade: (id: HangarUpgradeId) => void;
   onBuyPerk: (id: PerkId) => void;
   onSelectMod: (weaponIndex: number, choice: number) => void;
   onBack: () => void;
+  onUiSound: () => void;
 }) {
+  const [tab, setTab] = useState<HangarTab>('aircraft');
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/75 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/75 px-3 py-4 backdrop-blur-[1px]">
       <div className="menu-perspective">
-        <div className="menu-rig max-h-[88vh] overflow-y-auto">
-          <div className="menu-card w-[min(620px,calc(100vw-32px))]">
+        <div className="menu-rig max-h-[92vh] overflow-y-auto">
+          <div className="menu-card w-[min(640px,calc(100vw-24px))]">
             <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
               Hangar
-            </div>
-            <div className="mt-1 text-center text-xs font-bold uppercase tracking-[0.18em] text-[#9bf1ff]/75">
-              Aircraft, weapon mastery, and permanent systems
             </div>
 
             <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-none border border-[#ffe66d]/75 bg-[#ffe66d]/12 px-3 py-1.5 shadow-[0_0_16px_rgba(255,230,109,0.25)]">
@@ -1290,193 +1689,233 @@ function HangarScreen({
               <span className="text-xl font-black text-[#ffe66d]">{credits.toLocaleString()} CREDITS</span>
             </div>
 
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
-              Permanent Systems
-            </div>
-            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-              {(Object.entries(HANGAR_UPGRADE_INFO) as [HangarUpgradeId, (typeof HANGAR_UPGRADE_INFO)[HangarUpgradeId]][]).map(([id, info]) => {
-                const rank = hangarUpgrades[id];
-                const cost = info.costs[rank];
-                const maxed = cost === undefined;
-                const affordable = !maxed && credits >= cost;
-                return (
-                  <div key={id} className="flex flex-col border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(80,235,255,0.05)]">
-                    <div className="text-xs font-black uppercase tracking-wide text-[#9bf1ff]">{info.name}</div>
-                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#9bf1ff]/70">Rank {rank} / {info.costs.length}</div>
-                    <div className="mt-2 flex justify-center gap-1">
-                      {info.costs.map((_, index) => index + 1).map((level) => (
-                        <span key={level} className={`h-1.5 w-8 ${level <= rank ? 'bg-[#ffe66d] shadow-[0_0_6px_rgba(255,230,109,0.6)]' : 'bg-[#50ebff]/15'}`} />
-                      ))}
-                    </div>
-                    <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#9bf1ff]/65">{info.description}</div>
-                    <button
-                      type="button"
-                      disabled={!affordable}
-                      onClick={() => onBuyUpgrade(id)}
-                      className={`mt-3 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
-                        affordable
-                          ? 'border-[#7df9ff]/85 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_3px_0_#06505f,0_0_12px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4]'
-                          : 'cursor-not-allowed border-[#50ebff]/15 bg-black/25 text-[#50ebff]/35'
-                      }`}
-                    >
-                      {maxed ? 'Max Rank' : `${cost} Credits`}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Player aircraft selector */}
-            <div className="mt-4 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
-              Aircraft
-            </div>
-            <div className="mt-2 grid grid-cols-3 gap-2.5">
-              {HELICOPTER_MODEL_INFO.map((m) => (
-                <Fragment key={m.id}>
-                  <HelicopterCard
-                    name={m.name}
-                    desc={m.desc}
-                    color={m.color}
-                    dark={m.dark}
-                    selected={playerModel === m.id}
-                    onSelect={() => onSelectModel(m.id)}
-                  />
-                </Fragment>
+            <div className="mt-4 flex flex-wrap justify-center gap-1.5" role="tablist" aria-label="Hangar sections">
+              {HANGAR_TABS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t.id}
+                  onClick={() => { onUiSound(); setTab(t.id); }}
+                  className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition ${
+                    tab === t.id
+                      ? 'border-[#7df9ff] bg-[#22b8d8]/25 text-[#7df9ff]'
+                      : 'border-white/15 bg-black/25 text-white/60 hover:border-[#50ebff]/50 hover:text-[#9bf1ff]'
+                  }`}
+                >
+                  {t.label}
+                </button>
               ))}
             </div>
 
-            {/* Weapon mastery */}
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
-              Weapons
-            </div>
-            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-              Max rank unlocks a signature alt-fire
-            </div>
+            {isNewPilot && (
+              <div className="mt-3 border border-[#55f2a2]/50 bg-[#0c3a2a]/40 px-3 py-2 text-center text-[10px] font-black uppercase leading-relaxed tracking-[0.14em] text-[#8df5c8]">
+                New pilot — your starter credits are ready. A cheap perk (from 100 CR) or Countermeasures I (170 CR) is a great first buy.
+              </div>
+            )}
 
-            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              {WEAPON_MASTERY_INFO.map((w, i) => {
-                const lvl = mastery[i] ?? 0;
-                const maxed = lvl >= 5;
-                return (
-                  <div
-                    key={w.name}
-                    className="flex items-center gap-3 border bg-[#0e1644]/95 px-4 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]"
-                    style={{ borderColor: maxed ? w.color : 'rgba(80,235,255,0.3)' }}
-                  >
-                    <div
-                      className="flex h-10 w-10 shrink-0 items-center justify-center text-lg font-black"
-                      style={{ background: `${w.color}26`, color: w.color, border: `1px solid ${w.color}66` }}
-                    >
-                      {i + 1}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-black uppercase tracking-wide text-[#9bf1ff]">{w.name}</span>
-                        <span className="text-xs font-black text-[#ffe66d]">LV.{lvl}</span>
-                      </div>
-                      <div className="mt-1 flex gap-1">
-                        {[1, 2, 3, 4, 5].map((n) => (
-                          <div
-                            key={n}
-                            className="h-1.5 flex-1 rounded-full"
-                            style={{
-                              background: n <= lvl ? w.color : 'rgba(255,255,255,0.12)',
-                            }}
-                          />
-                        ))}
-                      </div>
-                      <div className="mt-1.5 text-[11px] font-semibold leading-snug text-white/70">
-                        {maxed ? <span className="text-[#ffe66d]">★ {w.altFire}</span> : 'Kill with this weapon to earn XP'}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            {tab === 'aircraft' && (
+              <>
+                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/60">
+                  All aircraft are free and unlocked — cosmetic variants with identical performance.
+                  Your pick is saved and flies on the next run.
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                  {HELICOPTER_MODEL_INFO.map((m) => (
+                    <Fragment key={m.id}>
+                      <HelicopterCard
+                        name={m.name}
+                        desc={m.desc}
+                        color={m.color}
+                        dark={m.dark}
+                        selected={playerModel === m.id}
+                        onSelect={() => { onUiSound(); onSelectModel(m.id); }}
+                      />
+                    </Fragment>
+                  ))}
+                </div>
+              </>
+            )}
 
-            {/* C6: Weapon mods — one free loadout choice per weapon */}
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
-              Weapon Mods
-            </div>
-            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-              Pick one mod per weapon — applied next run
-            </div>
-            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              {WEAPON_MASTERY_INFO.map((w, i) => {
-                const mods = WEAPON_MODS[i];
-                const current = weaponMods[i] ?? 0;
-                if (!mods) return null;
-                const choices = [{ name: 'Factory', desc: 'Standard issue, no modifiers' }, ...mods];
-                return (
-                  <div key={`mod-${w.name}`} className="border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]">
-                    <div className="mb-2 text-xs font-black uppercase tracking-wide" style={{ color: w.color }}>{w.name}</div>
-                    <div className="flex flex-col gap-1.5">
-                      {choices.map((choice, ci) => (
+            {tab === 'systems' && (
+              <>
+                <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
+                  Permanent airframe systems — bought with credits, kept forever
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                  {(Object.entries(HANGAR_UPGRADE_INFO) as [HangarUpgradeId, (typeof HANGAR_UPGRADE_INFO)[HangarUpgradeId]][]).map(([id, info]) => {
+                    const rank = hangarUpgrades[id];
+                    const cost = info.costs[rank];
+                    const maxed = cost === undefined;
+                    const affordable = !maxed && credits >= cost;
+                    return (
+                      <div key={id} className="flex flex-col border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(80,235,255,0.05)]">
+                        <div className="text-xs font-black uppercase tracking-wide text-[#9bf1ff]">{info.name}</div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#9bf1ff]/70">Rank {rank} / {info.costs.length}</div>
+                        <div className="mt-2 flex justify-center gap-1">
+                          {info.costs.map((_, index) => index + 1).map((level) => (
+                            <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ffe66d] shadow-[0_0_6px_rgba(255,230,109,0.6)]' : 'bg-[#50ebff]/15'}`} />
+                          ))}
+                        </div>
+                        <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#9bf1ff]/65">{info.description}</div>
+                        <div className="mt-1 min-h-4 text-[10px] font-black uppercase tracking-wide text-[#ffe66d]/90">
+                          {maxed ? 'Fully upgraded' : upgradePreview(id, rank)}
+                        </div>
                         <button
-                          key={choice.name}
                           type="button"
-                          onClick={() => onSelectMod(i, ci)}
-                          className={`border px-2 py-1.5 text-left transition ${
-                            current === ci
-                              ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_0_10px_rgba(255,230,109,0.25)]'
-                              : 'border-white/15 bg-black/20 hover:border-[#50ebff]/60'
+                          disabled={!affordable}
+                          onClick={() => onBuyUpgrade(id)}
+                          aria-label={maxed ? `${info.name} is at max rank` : affordable ? `Upgrade ${info.name} for ${cost} credits` : `Upgrade ${info.name} — need ${cost - credits} more credits`}
+                          className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
+                            affordable
+                              ? 'border-[#7df9ff]/85 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_3px_0_#06505f,0_0_12px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4]'
+                              : 'cursor-not-allowed border-white/20 bg-black/30 text-white/55'
                           }`}
                         >
-                          <div className={`text-[11px] font-black uppercase tracking-wide ${current === ci ? 'text-[#ffe66d]' : 'text-white/85'}`}>
-                            {choice.name}{current === ci ? ' ✓' : ''}
-                          </div>
-                          <div className="text-[10px] font-semibold leading-snug text-white/55">{choice.desc}</div>
+                          {maxed ? 'Max Rank' : affordable ? `Upgrade — ${cost} CR` : `Need ${(cost ?? 0) - credits} more CR`}
                         </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
 
-            {/* C5: Pilot perk tree — permanent, bought rank by rank */}
-            <div className="mt-5 text-center text-sm font-black uppercase tracking-[0.2em] text-[#9bf1ff]/90">
-              Pilot Perks
-            </div>
-            <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-              Permanent pilot training — 3 ranks each
-            </div>
-            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-4">
-              {(Object.keys(PERK_INFO) as PerkId[]).map((id) => {
-                const info = PERK_INFO[id];
-                const rank = perks[id];
-                const cost = info.costs[rank];
-                const maxed = cost === undefined;
-                const affordable = !maxed && credits >= cost;
-                return (
-                  <div key={`perk-${id}`} className="flex flex-col border border-[#ff9b3d]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(255,155,61,0.05)]">
-                    <div className="text-xs font-black uppercase tracking-wide text-[#ffc37a]">{info.name}</div>
-                    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-white/50">Rank {rank} / {MAX_PERK_RANK}</div>
-                    <div className="mt-2 flex justify-center gap-1">
-                      {[1, 2, 3].map((level) => (
-                        <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ff9b3d] shadow-[0_0_6px_rgba(255,155,61,0.6)]' : 'bg-white/10'}`} />
-                      ))}
-                    </div>
-                    <div className="mt-2 min-h-10 text-[10px] font-semibold leading-snug text-white/60">{info.desc}</div>
-                    <button
-                      type="button"
-                      disabled={!affordable}
-                      onClick={() => onBuyPerk(id)}
-                      className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
-                        affordable
-                          ? 'border-[#ffbd3f]/85 bg-gradient-to-b from-[#d18a24] to-[#8a5410] text-white shadow-[0_3px_0_#5c3608,0_0_12px_rgba(255,189,63,0.35)] hover:from-[#e29a30] hover:to-[#9c6216]'
-                          : 'cursor-not-allowed border-white/10 bg-black/25 text-white/30'
-                      }`}
-                    >
-                      {maxed ? 'Max Rank' : `${cost} Credits`}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
+            {tab === 'weapons' && (
+              <>
+                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/55">
+                  Kills earn weapon XP. Each rank adds +18% damage; reaching LV.5 unlocks the signature alt-fire and +10 Hull.
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  {WEAPON_MASTERY_INFO.map((w, i) => {
+                    const lvl = mastery[i] ?? 1;
+                    const maxed = lvl >= 5;
+                    return (
+                      <div
+                        key={w.name}
+                        className="flex items-center gap-3 border bg-[#0e1644]/95 px-4 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]"
+                        style={{ borderColor: maxed ? w.color : 'rgba(80,235,255,0.3)' }}
+                      >
+                        <div
+                          className="flex h-10 w-10 shrink-0 items-center justify-center text-lg font-black"
+                          style={{ background: `${w.color}26`, color: w.color, border: `1px solid ${w.color}66` }}
+                        >
+                          {i + 1}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-black uppercase tracking-wide text-[#9bf1ff]">{w.name}</span>
+                            <span className="text-xs font-black text-[#ffe66d]">LV.{lvl} / 5</span>
+                          </div>
+                          <div className="mt-1 flex gap-1">
+                            {[1, 2, 3, 4, 5].map((n) => (
+                              <div
+                                key={n}
+                                className="h-1.5 flex-1 rounded-full"
+                                style={{ background: n <= lvl ? w.color : 'rgba(255,255,255,0.12)' }}
+                              />
+                            ))}
+                          </div>
+                          <div className="mt-1.5 text-[11px] font-semibold leading-snug text-white/70">
+                            {maxed ? (
+                              <span className="text-[#ffe66d]">★ {w.altFire}</span>
+                            ) : (
+                              <>+{(lvl - 1) * 18}% damage · kill with this weapon to reach LV.{lvl + 1}</>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {tab === 'mods' && (
+              <>
+                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/55">
+                  Equip one mod per weapon — saved automatically and applied at the start of your next run.
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  {WEAPON_MASTERY_INFO.map((w, i) => {
+                    const mods = WEAPON_MODS[i];
+                    const current = weaponMods[i] ?? 0;
+                    if (!mods) return null;
+                    const choices = [{ name: 'Factory', desc: 'Standard issue, no modifiers' }, ...mods];
+                    return (
+                      <div key={`mod-${w.name}`} className="border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]">
+                        <div className="mb-2 text-xs font-black uppercase tracking-wide" style={{ color: w.color }}>{w.name}</div>
+                        <div className="flex flex-col gap-1.5">
+                          {choices.map((choice, ci) => (
+                            <button
+                              key={choice.name}
+                              type="button"
+                              aria-pressed={current === ci}
+                              onClick={() => { onUiSound(); onSelectMod(i, ci); }}
+                              className={`border px-2 py-1.5 text-left transition ${
+                                current === ci
+                                  ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_0_10px_rgba(255,230,109,0.25)]'
+                                  : 'border-white/15 bg-black/20 hover:border-[#50ebff]/60'
+                              }`}
+                            >
+                              <div className={`text-[11px] font-black uppercase tracking-wide ${current === ci ? 'text-[#ffe66d]' : 'text-white/85'}`}>
+                                {choice.name}{current === ci ? ' · Equipped ✓' : ''}
+                              </div>
+                              <div className="text-[10px] font-semibold leading-snug text-white/55">{choice.desc}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {tab === 'perks' && (
+              <>
+                <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
+                  Permanent pilot training — 3 ranks each, bought with credits
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                  {(Object.keys(PERK_INFO) as PerkId[]).map((id) => {
+                    const info = PERK_INFO[id];
+                    const rank = perks[id];
+                    const cost = info.costs[rank];
+                    const maxed = cost === undefined;
+                    const affordable = !maxed && credits >= cost;
+                    return (
+                      <div key={`perk-${id}`} className="flex flex-col border border-[#ff9b3d]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(255,155,61,0.05)]">
+                        <div className="text-xs font-black uppercase tracking-wide text-[#ffc37a]">{info.name}</div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-white/50">Rank {rank} / {MAX_PERK_RANK}</div>
+                        <div className="mt-2 flex justify-center gap-1">
+                          {[1, 2, 3].map((level) => (
+                            <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ff9b3d] shadow-[0_0_6px_rgba(255,155,61,0.6)]' : 'bg-white/10'}`} />
+                          ))}
+                        </div>
+                        <div className="mt-2 min-h-10 text-[10px] font-semibold leading-snug text-white/60">{info.desc}</div>
+                        <button
+                          type="button"
+                          disabled={!affordable}
+                          onClick={() => onBuyPerk(id)}
+                          aria-label={maxed ? `${info.name} is at max rank` : affordable ? `Train ${info.name} rank ${rank + 1} for ${cost} credits` : `Train ${info.name} — need ${cost - credits} more credits`}
+                          className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
+                            affordable
+                              ? 'border-[#ffbd3f]/85 bg-gradient-to-b from-[#d18a24] to-[#8a5410] text-white shadow-[0_3px_0_#5c3608,0_0_12px_rgba(255,189,63,0.35)] hover:from-[#e29a30] hover:to-[#9c6216]'
+                              : 'cursor-not-allowed border-white/20 bg-black/30 text-white/55'
+                          }`}
+                        >
+                          {maxed ? 'Max Rank' : affordable ? `Train — ${cost} CR` : `Need ${cost - credits} more CR`}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
 
             <div className="mt-6 flex justify-center">
-              <MenuButton onClick={onBack}>Back</MenuButton>
+              <MenuButton onClick={() => { onUiSound(); onBack(); }}>Back</MenuButton>
             </div>
           </div>
         </div>
@@ -1493,8 +1932,9 @@ export default function App() {
   const [hintsKey, setHintsKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showHangar, setShowHangar] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [mastery, setMastery] = useState<number[]>(() => readMastery());
-  const [credits, setCredits] = useState(() => readDeliveryCredits());
+  const [credits, setCredits] = useState(() => grantStarterCreditsOnce());
   const [hangarUpgrades, setHangarUpgrades] = useState<HangarUpgrades>(() => readHangarUpgrades());
   const [playerModel, setPlayerModel] = useState<HelicopterModel>(() => {
     try {
@@ -1508,7 +1948,9 @@ export default function App() {
   const [touchDevice, setTouchDevice] = useState(false);
   const [score, setScore] = useState(0);
   const [health, setHealth] = useState(100);
+  const [maxHealth, setMaxHealth] = useState(100);
   const [fuel, setFuel] = useState(100);
+  const [maxFuel, setMaxFuel] = useState(100);
   const [wave, setWave] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [runLevel, setRunLevel] = useState(1);
@@ -1549,6 +1991,13 @@ export default function App() {
   const [countermeasureInfo, setCountermeasureInfo] = useState<{
     charges: number; maxCharges: number; cooldown: number; ready: boolean;
   } | null>(null);
+  const [opening, setOpening] = useState<OpeningState | null>(null);
+  const openingPhaseRef = useRef<OpeningState['phase']>('live');
+  const [goFlash, setGoFlash] = useState(0);
+  const [tutorial, setTutorial] = useState<TutorialState | null>(null);
+  const [devDamage, setDevDamage] = useState<{
+    source: string; damageType: string; amount: number; time: number; x: number; y: number; z: number;
+  } | null>(null);
   const [threatInfo, setThreatInfo] = useState<{
     points: number; level: number; name: string; rewardMultiplier: number;
   } | null>(null);
@@ -1586,8 +2035,15 @@ export default function App() {
   const [delivery, setDelivery] = useState<DeliveryHudSnapshot | null>(null);
   const [mission, setMission] = useState<MissionHudSnapshot | null>(null);
   const [radarLinked, setRadarLinked] = useState(false);
+  // Dev/debug-only perf overlay: poll engine renderer stats ~4x per second
+  // (never per frame, no React churn during normal play). F2 toggles it, but
+  // only in dev builds (or with localStorage 'helistrike:perf' = '1' for QA
+  // on production bundles). Hidden entirely from the normal production UI.
+  const perfAllowed = import.meta.env.DEV ||
+    (typeof localStorage !== 'undefined' && localStorage.getItem('helistrike:perf') === '1');
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
-  const [showPerf, setShowPerf] = useState(() => import.meta.env.DEV);
+  // Debug overlay starts hidden everywhere — F2 (dev / QA flag) reveals it.
+  const [showPerf, setShowPerf] = useState(false);
   const [hitFlash, setHitFlash] = useState(0);
   // Directional damage indicators: red edge arcs pointing toward the threat.
   const [damageArcs, setDamageArcs] = useState<{ id: number; angle: number }[]>([]);
@@ -1598,6 +2054,21 @@ export default function App() {
     window.localStorage.setItem('helistrike:settings', JSON.stringify(next));
     window.dispatchEvent(new CustomEvent('helistrike:settings', { detail: next }));
   };
+
+  // UI feedback sounds — routed through the engine's SFX bus.
+  const uiClick = () => engineRef.current?.audio.playClick();
+  const uiError = () => engineRef.current?.audio.playError();
+  const uiPurchase = () => engineRef.current?.audio.playPurchase();
+
+  // Guided first purchase: a pilot with nothing bought yet is still new.
+  const isNewPilot =
+    Object.values(hangarUpgrades).every((v) => v === 0) &&
+    Object.values(perks).every((v) => v === 0);
+
+  // The loadout ability-card strip only earns its screen space once the
+  // player has invested in at least one permanent upgrade or weapon rank.
+  const hasLoadoutUpgrades =
+    Object.values(hangarUpgrades).some((v) => Number(v) > 0) || (weaponInfo?.level ?? 1) > 1;
 
   const dispatchStick = (name: string) => (value: StickPayload) => {
     window.dispatchEvent(new CustomEvent(name, { detail: value }));
@@ -1623,6 +2094,8 @@ export default function App() {
     if (!canvasRef.current) return;
     const engine = new GameEngine(canvasRef.current);
     engineRef.current = engine;
+    // Dev-only probe hook — stripped from production builds.
+    if (import.meta.env.DEV) (window as unknown as { __engine: GameEngine | null }).__engine = engine;
 
     // Apply persisted settings + auto-detect touch
     const persisted = readSettings();
@@ -1637,6 +2110,7 @@ export default function App() {
       const nextScore = e.detail.score;
       setScore(nextScore);
       setWave(e.detail.wave);
+      setMaxHealth(e.detail.maxHealth ?? 100);
       setElapsed(e.detail.elapsed ?? 0);
       setRunLevel(e.detail.runLevel ?? 1);
       setRunXpProgress(e.detail.runXpProgress ?? 0);
@@ -1704,6 +2178,11 @@ export default function App() {
         salvage: e.detail.salvage ?? 0,
         lostUnsecured: e.detail.lostUnsecured ?? 0,
         securedThreatBonus: e.detail.securedThreatBonus ?? 0,
+        causeOfDeath: e.detail.causeOfDeath ?? '',
+        credits: e.detail.credits ?? 0,
+        combatPay: e.detail.combatPay ?? 0,
+        achievementCredits: e.detail.achievementCredits ?? 0,
+        achievementLabels: e.detail.achievementLabels ?? [],
       });
 
       const storedHighScore = readHighScore();
@@ -1711,12 +2190,14 @@ export default function App() {
       if (finalScore > storedHighScore) {
         window.localStorage.setItem('helistrike:highScore', String(finalScore));
         setHighScore(finalScore);
+        engineRef.current?.audio.playNewBest();
       }
     };
 
     const handleStats = (e: CustomEvent) => {
       setHealth(e.detail.currentHealth);
       setFuel(e.detail.currentFuel);
+      if (Number.isFinite(e.detail.maxFuel)) setMaxFuel(e.detail.maxFuel);
     };
 
     const handleAutoPause = () => {
@@ -1744,6 +2225,21 @@ export default function App() {
       }, 700);
     };
 
+    // Opening sequence: GET READY 3-2-1 → GO → spawn-shield countdown.
+    const handleOpening = (e: CustomEvent) => {
+      const d = (e.detail ?? {}) as OpeningState;
+      if (d.phase === 'grace' && openingPhaseRef.current === 'countdown') {
+        setGoFlash(Date.now());
+        window.setTimeout(() => setGoFlash(0), 1000);
+      }
+      openingPhaseRef.current = d.phase ?? 'live';
+      setOpening(d);
+    };
+
+    const handleTutorialEvent = (e: CustomEvent) => {
+      setTutorial((e.detail ?? { active: false }) as TutorialState);
+    };
+
     window.addEventListener('helistrike:update', handleUpdate as EventListener);
     window.addEventListener('helistrike:stats', handleStats as EventListener);
     window.addEventListener('helistrike:gameover', handleGameOver as EventListener);
@@ -1752,6 +2248,8 @@ export default function App() {
     window.addEventListener('helistrike:announce', handleAnnounce as EventListener);
     window.addEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
     window.addEventListener('helistrike:damage', handleDamageDirection as EventListener);
+    window.addEventListener('helistrike:opening', handleOpening as EventListener);
+    window.addEventListener('helistrike:tutorial', handleTutorialEvent as EventListener);
 
     return () => {
       window.removeEventListener('helistrike:update', handleUpdate as EventListener);
@@ -1762,8 +2260,11 @@ export default function App() {
       window.removeEventListener('helistrike:announce', handleAnnounce as EventListener);
       window.removeEventListener('helistrike:player-hit', handlePlayerHit as EventListener);
       window.removeEventListener('helistrike:damage', handleDamageDirection as EventListener);
+      window.removeEventListener('helistrike:opening', handleOpening as EventListener);
+      window.removeEventListener('helistrike:tutorial', handleTutorialEvent as EventListener);
       engine.dispose();
       engineRef.current = null;
+      if (import.meta.env.DEV) (window as unknown as { __engine: GameEngine | null }).__engine = null;
     };
   }, []);
 
@@ -1777,9 +2278,9 @@ export default function App() {
       const engine = engineRef.current;
       if (!engine) return;
       setPerfStats(engine.getPerfStats());
-    }, 500);
+    }, 250);
     const onPerfKey = (e: KeyboardEvent) => {
-      if (e.key === 'F2') {
+      if (e.key === 'F2' && perfAllowed) {
         e.preventDefault();
         setShowPerf((v) => !v);
       }
@@ -1809,6 +2310,7 @@ export default function App() {
     setRunStats(null);
     setIsNewBest(false);
     setShowHangar(false);
+    setShowHelp(false);
     setHintsKey((k) => k + 1);
     engineRef.current?.startGame();
   };
@@ -1818,8 +2320,18 @@ export default function App() {
     setRunStats(null);
     setIsNewBest(false);
     setShowHangar(false);
+    setShowHelp(false);
     setHintsKey((k) => k + 1);
     engineRef.current?.startGame();
+  };
+
+  // Settings > Replay Tutorial: clear the completion flag so the next run
+  // starts with the interactive briefing again.
+  const replayTutorial = () => {
+    try { window.localStorage.removeItem('helistrike:tutorialDone'); } catch { /* storage unavailable */ }
+    setShowSettings(false);
+    setShowHangar(false);
+    restartRun();
   };
 
   const quitToMenu = () => {
@@ -1828,6 +2340,7 @@ export default function App() {
     setIsNewBest(false);
     setShowSettings(false);
     setShowHangar(false);
+    setShowHelp(false);
     setUpgradeOffer(null);
     engineRef.current?.setPaused(true);
   };
@@ -1845,7 +2358,11 @@ export default function App() {
 
   const purchaseHangarUpgrade = (id: HangarUpgradeId) => {
     const result = buyHangarUpgrade(credits, hangarUpgrades, id);
-    if (!result.purchased) return;
+    if (!result.purchased) {
+      uiError();
+      return;
+    }
+    uiPurchase();
     setCredits(result.credits);
     setHangarUpgrades(result.upgrades);
   };
@@ -1855,8 +2372,12 @@ export default function App() {
     const rank = perks[id];
     if (rank >= MAX_PERK_RANK) return;
     const cost = PERK_INFO[id].costs[rank];
-    if (credits < cost) return;
+    if (credits < cost) {
+      uiError();
+      return;
+    }
     const next = credits - cost;
+    uiPurchase();
     setCredits(next);
     window.localStorage.setItem('helistrike:credits', String(next));
     setPerks(writePerkRank(id, rank + 1));
@@ -1869,6 +2390,11 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Quick restart from the game-over screen.
+      if (e.key === 'Enter' && mode === 'gameover') {
+        restartRun();
+        return;
+      }
       if (e.key !== 'Escape' && e.key.toLowerCase() !== 'p') return;
       if (showSettings) {
         setShowSettings(false);
@@ -1880,7 +2406,18 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, showSettings, upgradeOffer]);
+
+  // DEV-only damage diagnostics: poll the engine's last recorded hit so the
+  // on-screen overlay always reflects the newest damage event.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const id = window.setInterval(() => {
+      setDevDamage(engineRef.current?.lastDamageInfo ?? null);
+    }, 400);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Readability pass: heavier drop shadow so white numbers read clean over
   // the bright low-poly sky instead of washing out.
@@ -1925,117 +2462,127 @@ export default function App() {
       )}
 
       <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
-        {/* ══ TOP-LEFT: tactical objectives checklist ══ */}
+        {/* ══ TOP-LEFT: wave, objectives, mission, progression — one column */}
         {mode === 'playing' && (
-          <div className="hud-panel absolute left-3 top-2.5 flex flex-col gap-1.5 px-2.5 py-1.5 sm:left-4 sm:top-4">
-            <div className="hud-label text-[#ffd35c]">◆ Objectives</div>
-            {objectives && objectives.count > 0 ? (
-              <>
+          <div className="pointer-events-none absolute left-3 top-2.5 flex w-[min(232px,44vw)] flex-col items-start gap-1.5 sm:left-4 sm:top-4">
+            {/* Compact wave + run timer */}
+            <div className="hud-wave-banner flex w-full items-center justify-between gap-2 px-2.5 py-1">
+              <span className="font-display text-[9px] uppercase tracking-[0.16em] text-white" style={textShadow}>
+                Wave {wave}
+              </span>
+              <span className="flex items-center gap-0.5 leading-none">
+                {Array.from({ length: 5 }).map((_, i) =>
+                  i < Math.min(wave, 5) ? (
+                    <Skull key={i} size={10} className="text-[#ff3344] drop-shadow-[0_0_4px_rgba(239,35,60,0.95)]" />
+                  ) : (
+                    <Skull key={i} size={10} className="text-white/40 opacity-40" />
+                  ),
+                )}
+              </span>
+              <span className="font-ui text-xs font-bold tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
+                {formatDuration(elapsed)}
+              </span>
+            </div>
+
+            {/* Tactical objectives checklist */}
+            <div className="hud-panel flex w-full flex-col gap-1.5 px-2.5 py-1.5">
+              <div className="hud-label text-[#ffd35c]">◆ Objectives</div>
+              {objectives && objectives.count > 0 ? (
+                <>
+                  <div className="hud-objective-row">
+                    <span className={`hud-obj-check ${!objectives.sam ? 'is-done' : ''}`}>{!objectives.sam ? '✓' : ''}</span>
+                    <span className={objectives.sam ? '' : 'text-white/40'}>Destroy SAMs</span>
+                    <span className="hud-obj-count">{objectives.sam ? 'ACTIVE' : 'DONE'}</span>
+                  </div>
+                  <div className="hud-objective-row">
+                    <span className={`hud-obj-check ${!objectives.radar ? 'is-done' : ''}`}>{!objectives.radar ? '✓' : ''}</span>
+                    <span className={objectives.radar ? '' : 'text-white/40'}>Destroy Radar</span>
+                    <span className="hud-obj-count">{objectives.radar ? 'ACTIVE' : 'DONE'}</span>
+                  </div>
+                  <div className="hud-objective-row">
+                    <span className={`hud-obj-check ${!objectives.depot ? 'is-done' : ''}`}>{!objectives.depot ? '✓' : ''}</span>
+                    <span className={objectives.depot ? '' : 'text-white/40'}>Destroy Depot</span>
+                    <span className="hud-obj-count">{objectives.depot ? 'ACTIVE' : 'DONE'}</span>
+                  </div>
+                </>
+              ) : (
                 <div className="hud-objective-row">
-                  <span className={`hud-obj-check ${!objectives.sam ? 'is-done' : ''}`}>{!objectives.sam ? '✓' : ''}</span>
-                  <span className={objectives.sam ? '' : 'text-white/40'}>Destroy SAMs</span>
-                  <span className="hud-obj-count">{objectives.sam ? 'ACTIVE' : 'DONE'}</span>
+                  <span className="hud-obj-check is-done">✓</span>
+                  <span className="text-[#55f2a2]">Sector Secured</span>
                 </div>
-                <div className="hud-objective-row">
-                  <span className={`hud-obj-check ${!objectives.radar ? 'is-done' : ''}`}>{!objectives.radar ? '✓' : ''}</span>
-                  <span className={objectives.radar ? '' : 'text-white/40'}>Destroy Radar</span>
-                  <span className="hud-obj-count">{objectives.radar ? 'ACTIVE' : 'DONE'}</span>
+              )}
+            </div>
+
+            {/* Active mission */}
+            {mission && (
+              <div className="hud-panel w-full border-[#50ebff]/55 px-2.5 py-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="hud-label text-[#50ebff]">◆ Mission</span>
+                  <span className="text-[9px] font-black uppercase tracking-wider text-[#ffe66d]">
+                    {mission.rewardCredits} CR · {mission.rewardSalvage} salvage
+                  </span>
                 </div>
-                <div className="hud-objective-row">
-                  <span className={`hud-obj-check ${!objectives.depot ? 'is-done' : ''}`}>{!objectives.depot ? '✓' : ''}</span>
-                  <span className={objectives.depot ? '' : 'text-white/40'}>Destroy Depot</span>
-                  <span className="hud-obj-count">{objectives.depot ? 'ACTIVE' : 'DONE'}</span>
+                <div className="mt-0.5 truncate text-[11px] font-black uppercase tracking-wide text-white" style={textShadow}>
+                  {mission.title}
                 </div>
-              </>
-            ) : (
-              <div className="hud-objective-row">
-                <span className="hud-obj-check is-done">✓</span>
-                <span className="text-[#55f2a2]">Sector Secured</span>
+                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
+                  <div className="h-full bg-[#50ebff] transition-[width] duration-150" style={{ width: `${clampPercent((mission.progress / Math.max(1, mission.targetProgress)) * 100)}%` }} />
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-2 text-[9px] font-black uppercase tracking-wider">
+                  <span className={mission.bonus?.state === 'FAILED' ? 'text-[#ff6f7e]' : mission.bonus?.state === 'COMPLETE' ? 'text-[#55f2a2]' : 'text-white/65'}>
+                    {mission.bonus ? `Bonus: ${mission.bonus.label}${mission.bonus.state === 'FAILED' ? ' — missed' : ''}` : 'Primary objective'}
+                  </span>
+                  <span className="text-white/70">{Math.min(mission.progress, mission.targetProgress)}/{mission.targetProgress}</span>
+                </div>
+                {radarLinked && <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-[#ff9b3d]">Radar link · SAM tracking boosted</div>}
               </div>
             )}
-          </div>
-        )}
 
-        {/* ══ TOP-CENTER: wave banner + run timer ══ */}
-        <div className="pointer-events-none absolute left-1/2 top-3 flex -translate-x-1/2 flex-col items-center gap-1.5 sm:top-5">
-          <div className="hud-wave-banner flex items-center gap-2.5 px-4 py-1.5">
-            <span className="font-display text-[10px] uppercase tracking-[0.18em] text-white" style={textShadow}>
-              Wave {wave}
-            </span>
-            <span className="flex items-center gap-0.5 leading-none">
-              {Array.from({ length: 5 }).map((_, i) =>
-                i < Math.min(wave, 5) ? (
-                  <Skull key={i} size={13} className="text-[#ff3344] drop-shadow-[0_0_5px_rgba(239,35,60,0.95)]" />
-                ) : (
-                  <Skull key={i} size={13} className="text-white/40 opacity-40" />
-                ),
-              )}
-            </span>
-            <span className="font-ui border-l border-white/25 pl-3 text-lg font-bold tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
-              {formatDuration(elapsed)}
-            </span>
-          </div>
-        </div>
-
-        {/* Center stack: Threat, objectives, SAM banner flow top-down with a
-            fixed gap — nothing can collide (combo + boss live below it). */}
-        <div className="pointer-events-none absolute left-1/2 top-[4.6rem] flex -translate-x-1/2 flex-col items-center gap-1.5">
-        {threatInfo && mode === 'playing' && (
-          <div className="hud-panel px-3 py-1 text-center">
-            <div className="hud-label">Threat {'█'.repeat(threatInfo.level)}{'░'.repeat(5 - threatInfo.level)}</div>
-            <div className={`text-[11px] font-black uppercase ${threatInfo.level >= 4 ? 'text-[#ff5566]' : threatInfo.level >= 2 ? 'text-[#ffbd3f]' : 'text-[#bfeeff]'}`}>
-              {threatInfo.name} · x{threatInfo.rewardMultiplier.toFixed(2)} reward
-            </div>
-          </div>
-        )}
-
-        {samThreat && mode === 'playing' && (
-          <div className="w-[min(290px,70vw)] text-center">
-            <div className={`rounded-md border px-3 py-1.5 backdrop-blur-sm ${
-              samThreat.state === 'INBOUND'
-                ? 'border-[#ff3344] bg-[#4a0710]/85 text-[#ff8b96]'
-                : samThreat.state === 'LOCKING'
-                  ? 'border-[#ff9b3d]/80 bg-[#3e2108]/75 text-[#ffc16f]'
-                  : 'border-[#ffd35c]/45 bg-[#352b0b]/55 text-[#ffe392]'
-            }`}>
-              <div className="flex items-center justify-center gap-2 text-xs font-black uppercase tracking-[0.2em]" style={textShadow}>
-                <span style={{ transform: `rotate(${samThreat.bearing}deg)` }}>▲</span>
-                <span>{samThreat.state === 'INBOUND' ? 'Missile inbound' : samThreat.state === 'LOCKING' ? 'SAM lock' : 'SAM tracking'}</span>
-                <span className="text-white/70">{samThreat.distance}m</span>
+            {/* Compact score + credits + XP strip */}
+            <div className="hud-panel w-full px-2.5 py-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="hud-label">Score</span>
+                <span className="font-ui text-sm font-bold" style={textShadow}>{score.toLocaleString()}</span>
               </div>
-              {samThreat.state === 'LOCKING' && (
-                <div className="mt-1 h-1 overflow-hidden rounded-full bg-black/50">
-                  <div className="h-full bg-[#ff9b3d]" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
+              <div className="mt-0.5 flex items-center justify-between gap-2">
+                <span className="hud-label">Credits</span>
+                <span className="flex items-center gap-1 text-sm font-bold text-[#ffe66d]" style={textShadow}>
+                  <CoinIcon />{credits.toLocaleString()}
+                </span>
+              </div>
+              {unsecuredCredits > 0 && (
+                <div className="text-right text-[9px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>
+                  Unsecured +{unsecuredCredits.toLocaleString()}
                 </div>
               )}
-              {samThreat.state === 'INBOUND' && countermeasureInfo?.ready && (
-                <div className="mt-1 text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]">[C] Flares ready</div>
+              {salvage > 0 && (
+                <div className="text-right text-[9px] font-black uppercase tracking-wider text-[#55f2c2]" style={textShadow}>
+                  Salvage {salvage.toLocaleString()} → {salvageCredits.toLocaleString()} CR
+                </div>
               )}
+              <div className="mt-0.5 flex items-center justify-between gap-2">
+                <span className="hud-label">XP · LV{runLevel}</span>
+                <span className="text-[10px] font-black text-white/70">{Math.round(runXpProgress * 100)}%</span>
+              </div>
+              <div className="mt-0.5 h-1 w-full overflow-hidden rounded-[2px] bg-black/40">
+                <div
+                  className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
+                  style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
+                />
+              </div>
             </div>
           </div>
         )}
 
-        {mission && mode === 'playing' && (
-          <div className="hud-panel w-[min(310px,74vw)] border-[#50ebff]/55 px-3 py-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="hud-label text-[#50ebff]">◆ Mission</span>
-              <span className="text-[10px] font-black uppercase tracking-wider text-[#ffe66d]">
-                {mission.rewardCredits} CR · {mission.rewardSalvage} salvage
-              </span>
+        {/* Center stack: only temporary state — spawn shield countdown.
+            Threat/SAM live in the right column, mission in the top-left. */}
+        <div className="pointer-events-none absolute left-1/2 top-[4.6rem] flex -translate-x-1/2 flex-col items-center gap-1.5">
+        {/* Spawn protection — visible shield countdown during the post-GO grace */}
+        {mode === 'playing' && opening?.phase === 'grace' && (
+          <div className="hud-panel border-[#50ebff]/70 px-3 py-1 text-center shadow-[0_0_16px_rgba(80,235,255,0.35)]">
+            <div className="text-[11px] font-black uppercase tracking-[0.2em] text-[#7df9ff]" style={textShadow}>
+              Shield · Invulnerable {Math.max(0, opening.remaining ?? 0).toFixed(1)}s
             </div>
-            <div className="mt-0.5 truncate text-xs font-black uppercase tracking-wide text-white" style={textShadow}>
-              {mission.title}
-            </div>
-            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
-              <div className="h-full bg-[#50ebff] transition-[width] duration-150" style={{ width: `${clampPercent((mission.progress / Math.max(1, mission.targetProgress)) * 100)}%` }} />
-            </div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-[9px] font-black uppercase tracking-wider">
-              <span className={mission.bonus?.state === 'FAILED' ? 'text-[#ff6f7e]' : mission.bonus?.state === 'COMPLETE' ? 'text-[#55f2a2]' : 'text-white/65'}>
-                {mission.bonus ? `Bonus: ${mission.bonus.label}${mission.bonus.state === 'FAILED' ? ' — missed' : ''}` : 'Primary objective'}
-              </span>
-              <span className="text-white/70">{Math.min(mission.progress, mission.targetProgress)}/{mission.targetProgress}</span>
-            </div>
-            {radarLinked && <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-[#ff9b3d]">Radar link · SAM tracking boosted</div>}
           </div>
         )}
         </div>
@@ -2055,6 +2602,40 @@ export default function App() {
               Pause
             </button>
           )}
+
+          {/* Threat level — lives top-right per the HUD hierarchy */}
+          {threatInfo && mode === 'playing' && (
+            <div className={`hud-panel w-[min(212px,40vw)] px-2.5 py-1.5 ${threatInfo.level >= 3 ? 'border-[#ff3344]/70' : ''}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="hud-label text-[#ff6f7e]">▲ Threat</span>
+                <span className="text-[9px] font-black uppercase tracking-wider text-white/70">LV {threatInfo.level}</span>
+              </div>
+              <div className="mt-0.5 truncate text-[11px] font-black uppercase tracking-wide text-white" style={textShadow}>
+                {threatInfo.name}
+              </div>
+              <div className="mt-0.5 flex items-center justify-between text-[9px] font-black uppercase tracking-wider">
+                <span className="text-[#ffbd3f]">Reward x{threatInfo.rewardMultiplier.toFixed(2)}</span>
+                <span className="text-white/55">{Math.round(threatInfo.points)} pts</span>
+              </div>
+            </div>
+          )}
+
+          {/* Incoming SAM missile warning — highest-priority alert */}
+          {samThreat && mode === 'playing' && (
+            <div className={`hud-panel w-[min(212px,40vw)] border-[#ff3344]/70 px-2.5 py-1.5 ${samThreat.state === 'INBOUND' ? 'animate-pulse' : ''}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="hud-label text-[#ff5d5d]">⚠ SAM {samThreat.state}</span>
+                <span className="text-[9px] font-black text-white/70">{samThreat.distance}m</span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
+                <div className="h-full bg-[#ff3344] transition-[width] duration-100" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
+              </div>
+              {samThreat.state === 'INBOUND' && (
+                <div className="mt-0.5 text-[9px] font-black uppercase tracking-widest text-[#ffd3d7]" style={textShadow}>Missile inbound — deploy flares (C)</div>
+              )}
+            </div>
+          )}
+
         {extraction && mode === 'playing' && (
           <div className="pointer-events-none w-[min(212px,40vw)]">
             <div className="hud-panel border-[#55f2a2]/60 px-2.5 py-1.5">
@@ -2180,104 +2761,53 @@ export default function App() {
           </div>
         )}
 
-        {/* LEFT COLUMN: systems, weapon, salvo, flares — one auto-stack so
-            panels never collide as content grows (LV badges, reloading). */}
-        <div className="pointer-events-none absolute left-3 top-[7.5rem] flex flex-col items-start gap-1.5 sm:left-4 sm:top-[8rem]">
-          <div className={`hud-panel flex flex-col gap-1 px-2.5 py-1.5 ${health <= 30 ? 'hud-danger' : ''}`}>
-            <div className="hud-label">Systems</div>
+        {/* BOTTOM-LEFT: Hull, Fuel, flares and defensive states. Values read
+            as current/max so a bare number never masquerades as a percentage. */}
+        <div className={`pointer-events-none absolute left-3 flex flex-col items-start gap-1.5 sm:left-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
+          <div className={`hud-panel flex w-[min(230px,42vw)] flex-col gap-1 px-2.5 py-1.5 ${health <= maxHealth * 0.3 ? 'hud-danger' : ''}`}>
+            <div className="hud-label">Hull</div>
             <div className="flex items-center gap-2">
               <HeartIcon />
-              <Meter value={health} color={health > 30 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
-              <span className="font-ui font-bold min-w-10 text-xl leading-none" style={textShadow}>{Math.round(health)}</span>
+              <Meter value={(health / Math.max(1, maxHealth)) * 100} color={health > maxHealth * 0.3 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
+              <span className="font-ui text-base font-bold leading-none tabular-nums" style={textShadow}>
+                {Math.round(health)}<span className="text-[10px] text-white/45"> / {Math.round(maxHealth)}</span>
+              </span>
             </div>
+            <div className="hud-label mt-0.5">Fuel</div>
             <div className="flex items-center gap-2">
               <GasIcon />
-              <Meter value={fuel} color={fuel > 20 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
-              <span className="font-ui font-bold min-w-10 text-xl leading-none" style={textShadow}>{Math.round(fuel)}%</span>
+              <Meter value={(fuel / Math.max(1, maxFuel)) * 100} color={fuel > maxFuel * 0.2 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
+              <span className="font-ui text-base font-bold leading-none tabular-nums" style={textShadow}>
+                {Math.round(fuel)}<span className="text-[10px] text-white/45"> / {Math.round(maxFuel)}</span>
+              </span>
             </div>
           </div>
-
-          {weaponInfo && mode === 'playing' && (
-            <div className="hud-panel px-2.5 py-1.5">
-              <div className="flex items-center gap-2">
-                <BulletIcon />
-                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>
-                  {weaponInfo.name}
-                </span>
-                {(weaponInfo.level ?? 1) > 1 && (
-                  <span className="rounded-[3px] border border-[#ffe66d]/70 bg-[#3d2f05]/70 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d] shadow-[0_0_8px_rgba(255,230,109,0.3)]">
-                    LV.{weaponInfo.level}
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 flex items-center gap-2">
-                {weaponInfo.reloading ? (
-                  <span className="text-sm font-black text-yellow-300" style={textShadow}>
-                    RELOADING... {Math.ceil(weaponInfo.reloadTimer)}s
-                  </span>
-                ) : (
-                  <span className="text-sm font-black" style={textShadow}>
-                    {weaponInfo.ammo} / {weaponInfo.maxAmmo}
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {salvoInfo && mode === 'playing' && (
-            <div className="hud-panel px-3 py-2">
-              <div className="flex items-center gap-2">
-                <TargetIcon />
-                <span className="text-sm font-black uppercase tracking-wider" style={textShadow}>
-                  Multi-Salvo
-                </span>
-              </div>
-              <div className="mt-1 flex items-center gap-2">
-                {salvoInfo.isPainting ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-black text-red-400 animate-pulse uppercase" style={textShadow}>
-                      Locking:
-                    </span>
-                    <div className="flex gap-0.5">
-                      {[0, 1, 2, 3, 4, 5].map((idx) => {
-                        const active = idx < salvoInfo.locks;
-                        return (
-                          <div
-                            key={idx}
-                            className={`h-4.5 w-3.5 border border-black/45 rounded-[2px] transition-all duration-150 ${active ? 'bg-[#ff3344] shadow-[0_0_8px_#ff3344] border-red-300' : 'bg-black/40'}`}
-                          />
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : salvoInfo.cooldown > 0 ? (
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-black text-white/50" style={textShadow}>
-                      COOLDOWN
-                    </span>
-                    <div className="h-2 w-20 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
-                      <div className="h-full bg-red-400/50 transition-all duration-300" style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }} />
-                    </div>
-                    <span className="text-xs font-black text-white/60" style={textShadow}>
-                      {salvoInfo.cooldown}s
-                    </span>
-                  </div>
-                ) : (
-                  <span className="text-xs font-extrabold text-[#35e66d] animate-pulse" style={textShadow}>
-                    READY (HOLD Q / R-CLICK)
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
 
           {countermeasureInfo && mode === 'playing' && (
             <div className="hud-panel px-2.5 py-1.5">
               <div className="hud-label text-[#ffbd3f]">Flares · C</div>
               <div className="mt-0.5 text-sm tracking-[0.18em] text-[#ffbd3f]">
-                {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(countermeasureInfo.maxCharges - countermeasureInfo.charges)}</span>
+                {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(Math.max(0, countermeasureInfo.maxCharges - countermeasureInfo.charges))}</span>
               </div>
               {countermeasureInfo.cooldown > 0 && <div className="text-[10px] font-black text-white/65">{countermeasureInfo.cooldown.toFixed(1)}s</div>}
+            </div>
+          )}
+
+          {/* Defensive / boost states — icon + label, never color alone */}
+          {statusInfo && mode === 'playing' && (statusInfo.shield > 0 || statusInfo.damageBoost > 0 || statusInfo.speedBoost > 0 || statusInfo.afterburner) && (
+            <div className="flex flex-col items-start gap-1">
+              {statusInfo.shield > 0 && (
+                <div className="hud-status flex items-center gap-1 border-[#80d8ff]/50 text-[#bfeeff]" style={textShadow}><Shield size={11} /> Shield {Math.ceil(statusInfo.shield)}s</div>
+              )}
+              {statusInfo.damageBoost > 0 && (
+                <div className="hud-status flex items-center gap-1 border-[#ffe66d]/50 text-[#ffe66d]" style={textShadow}><Bomb size={11} /> Damage {Math.ceil(statusInfo.damageBoost)}s</div>
+              )}
+              {statusInfo.speedBoost > 0 && (
+                <div className="hud-status flex items-center gap-1 border-[#ff88ff]/50 text-[#ffd0ff]" style={textShadow}><Sparkles size={11} /> Boost {Math.ceil(statusInfo.speedBoost)}s</div>
+              )}
+              {statusInfo.afterburner && (
+                <div className="hud-status flex items-center gap-1 animate-pulse border-[#ff7722]/60 text-[#ffb066]" style={textShadow}><Flame size={11} /> Afterburner</div>
+              )}
             </div>
           )}
         </div>
@@ -2301,105 +2831,89 @@ export default function App() {
           </div>
         )}
 
-        {/* ══ BOTTOM-RIGHT: credits + score + XP ══ */}
-        <div className="hud-panel pointer-events-none absolute right-3 bottom-20 w-[min(200px,36vw)] px-2.5 py-1.5 sm:right-4">
-          <div className="flex items-center justify-between gap-2">
-            <span className="hud-label">Credits</span>
-            <span className="font-ui font-bold flex items-center gap-1.5 text-xl" style={textShadow}>
-              <CoinIcon />{credits.toLocaleString()}
-            </span>
-          </div>
-          {unsecuredCredits > 0 && (
-            <div className="text-right text-[10px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>
-              Unsecured +{unsecuredCredits.toLocaleString()}
+        {/* BOTTOM-RIGHT: weapon, ammo/reload, salvo, Devastation. Credits,
+            score and XP now live in the top-left column. */}
+        <div className={`pointer-events-none absolute right-3 flex w-[min(230px,42vw)] flex-col items-end gap-1.5 sm:right-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
+          {weaponInfo && mode === 'playing' && (
+            <div className="hud-panel w-full px-2.5 py-1.5">
+              <div className="flex items-center gap-2">
+                <BulletIcon />
+                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>{weaponInfo.name}</span>
+                {(weaponInfo.level ?? 1) > 1 && (
+                  <span className="rounded-[3px] border border-[#ffe66d]/70 bg-[#3d2f05]/70 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d]">LV.{weaponInfo.level}</span>
+                )}
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                {weaponInfo.reloading ? (
+                  <span className="text-sm font-black text-yellow-300" style={textShadow}>RELOADING… {Math.ceil(weaponInfo.reloadTimer)}s</span>
+                ) : (
+                  <span className="text-sm font-black tabular-nums" style={textShadow}>{weaponInfo.ammo} / {weaponInfo.maxAmmo}</span>
+                )}
+              </div>
             </div>
           )}
-          {salvage > 0 && (
-            <div className="text-right text-[10px] font-black uppercase tracking-wider text-[#55f2c2]" style={textShadow}>
-              Salvage {salvage.toLocaleString()} → {salvageCredits.toLocaleString()} CR
+
+          {salvoInfo && mode === 'playing' && (
+            <div className="hud-panel w-full px-2.5 py-1.5">
+              <div className="flex items-center gap-2">
+                <TargetIcon />
+                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>Multi-Salvo</span>
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                {salvoInfo.isPainting ? (
+                  <div className="flex items-center gap-2">
+                    <span className="animate-pulse text-xs font-black uppercase text-red-400" style={textShadow}>Locking:</span>
+                    <div className="flex gap-0.5">
+                      {[0, 1, 2, 3, 4, 5].map((idx) => (
+                        <div key={idx} className={`h-4 w-3 rounded-[2px] border transition-all duration-150 ${idx < salvoInfo.locks ? 'border-red-300 bg-[#ff3344]' : 'border-black/45 bg-black/40'}`} />
+                      ))}
+                    </div>
+                  </div>
+                ) : salvoInfo.cooldown > 0 ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-black text-white/50" style={textShadow}>COOLDOWN</span>
+                    <div className="h-2 w-16 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
+                      <div className="h-full bg-red-400/50" style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }} />
+                    </div>
+                    <span className="text-xs font-black text-white/60" style={textShadow}>{salvoInfo.cooldown}s</span>
+                  </div>
+                ) : (
+                  <span className="animate-pulse text-xs font-extrabold text-[#35e66d]" style={textShadow}>READY (HOLD Q / R-CLICK)</span>
+                )}
+              </div>
             </div>
           )}
-          <div className="mt-1 flex items-center justify-between gap-2">
-            <span className="hud-label">Score</span>
-            <span className="font-ui font-bold text-lg" style={textShadow}>{score.toLocaleString()}</span>
-          </div>
-          <div className="mt-1 flex items-center justify-between gap-2">
-            <span className="hud-label">XP · LV{runLevel}</span>
-            <span className="text-xs font-black text-white/70">{Math.round(runXpProgress * 100)}%</span>
-          </div>
-          <div className="mt-1 h-1.5 w-full overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
-            <div
-              className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
-              style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
-            />
-          </div>
+
+          {/* Devastation super meter */}
+          {superInfo && mode === 'playing' && (
+            <div className="w-full">
+              <div className="mb-1 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.22em]">
+                <span className={superInfo.ready ? 'text-[#ff5d3a]' : 'text-white/55'} style={textShadow}>
+                  {superInfo.activeRemaining > 0 ? 'OVERCHARGE' : superInfo.cooldownRemaining > 0 ? 'DEV RECHARGING' : 'Devastation'}
+                </span>
+                {superInfo.ready && <span className="animate-pulse text-[#ffb199]" style={textShadow}>Press E</span>}
+                {superInfo.activeRemaining > 0 && <span className="text-[#ff8f6b]" style={textShadow}>{superInfo.activeRemaining.toFixed(1)}s</span>}
+                {superInfo.cooldownRemaining > 0 && superInfo.activeRemaining <= 0 && <span className="text-white/45" style={textShadow}>{Math.ceil(superInfo.cooldownRemaining)}s</span>}
+              </div>
+              <div className="h-2.5 w-full overflow-hidden border border-white/25 bg-black/45">
+                <div
+                  className={`h-full transition-[width] duration-150 ${superInfo.ready ? 'animate-pulse' : ''}`}
+                  style={{
+                    width: `${Math.min(100, (superInfo.charge / SUPER_MAX_CHARGE) * 100)}%`,
+                    background: superInfo.activeRemaining > 0
+                      ? 'linear-gradient(90deg,#ff5d3a,#ffd35c)'
+                      : superInfo.ready
+                        ? 'linear-gradient(90deg,#ff9b3d,#ff5d3a)'
+                        : 'linear-gradient(90deg,#7a3b2e,#ff9b3d)',
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
-        {statusInfo && mode === 'playing' && (
-          <div className={`pointer-events-none absolute left-1/2 bottom-40 flex -translate-x-1/2 flex-col items-center gap-1 text-[11px] font-black uppercase tracking-[0.12em] opacity-80`}>
-            {statusInfo.threat > 0.68 && (
-              <div className="hud-status border-[#ff3344]/60 text-[#ffd3d7]" style={textShadow}>
-                Threat High
-              </div>
-            )}
-            {statusInfo.afterburner && (
-              <div className="hud-status flex items-center gap-1 border-[#ff7722]/60 text-[#ffb066] animate-pulse" style={textShadow}>
-                <Flame size={11} /> Afterburner
-              </div>
-            )}
-            {statusInfo.risk && statusInfo.risk > 1 && (
-              <div className="hud-status border-[#ff3344]/60 text-[#ff8899]" style={textShadow}>
-                RISK x{statusInfo.risk.toFixed(2)}
-              </div>
-            )}
-            {statusInfo.damageBoost > 0 && (
-              <div className="hud-status border-[#ffe66d]/50 text-[#ffe66d]" style={textShadow}>
-                Damage {Math.ceil(statusInfo.damageBoost)}s
-              </div>
-            )}
-            {statusInfo.shield > 0 && (
-              <div className="hud-status border-[#80d8ff]/50 text-[#bfeeff]" style={textShadow}>
-                Shield {Math.ceil(statusInfo.shield)}s
-              </div>
-            )}
-            {statusInfo.speedBoost > 0 && (
-              <div className="hud-status border-[#ff88ff]/50 text-[#ffd0ff]" style={textShadow}>
-                Boost {Math.ceil(statusInfo.speedBoost)}s
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ══ B3: Devastation super meter ══ */}
-        {mode === 'playing' && superInfo && (
-          <div className="pointer-events-none absolute bottom-[7.2rem] left-1/2 w-72 -translate-x-1/2">
-            <div className="mb-1 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.22em]">
-              <span className={superInfo.ready ? 'text-[#ff5d3a] drop-shadow-[0_0_6px_rgba(255,93,58,0.8)]' : 'text-white/55'}>
-                {superInfo.activeRemaining > 0 ? 'OVERCHARGE' : superInfo.cooldownRemaining > 0 ? 'DEVASTATION RECHARGING' : 'Devastation'}
-              </span>
-              {superInfo.ready && <span className="animate-pulse text-[#ffb199]">Press E</span>}
-              {superInfo.activeRemaining > 0 && <span className="text-[#ff8f6b]">{superInfo.activeRemaining.toFixed(1)}s</span>}
-              {superInfo.cooldownRemaining > 0 && superInfo.activeRemaining <= 0 && <span className="text-white/45">{Math.ceil(superInfo.cooldownRemaining)}s</span>}
-            </div>
-            <div className="h-2.5 w-full overflow-hidden border border-white/25 bg-black/45 shadow-[0_2px_8px_rgba(0,0,0,0.4)]">
-              <div
-                className={`h-full transition-[width] duration-150 ${superInfo.ready ? 'animate-pulse' : ''}`}
-                style={{
-                  width: `${Math.min(100, (superInfo.charge / SUPER_MAX_CHARGE) * 100)}%`,
-                  background: superInfo.activeRemaining > 0
-                    ? 'linear-gradient(90deg,#ff5d3a,#ffd35c)'
-                    : superInfo.ready
-                      ? 'linear-gradient(90deg,#ff9b3d,#ff5d3a)'
-                      : 'linear-gradient(90deg,#7a3b2e,#ff9b3d)',
-                  boxShadow: superInfo.ready || superInfo.activeRemaining > 0 ? '0 0 12px rgba(255,93,58,0.7)' : 'none',
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* ══ BOTTOM-CENTER: loadout ability cards ══ */}
-        {mode === 'playing' && (
+        {/* BOTTOM-CENTER: loadout ability cards — hidden until upgrades exist */}
+        {mode === 'playing' && hasLoadoutUpgrades && (
           <div className="pointer-events-none absolute bottom-5 left-1/2 flex -translate-x-1/2 items-end gap-1.5">
             {[
               { icon: <Rocket size={15} />, name: weaponInfo?.name ?? 'Gun', lv: weaponInfo?.level ?? 1, accent: '#3ae06b' },
@@ -2435,6 +2949,54 @@ export default function App() {
           <h2 className="font-display whitespace-pre-line text-center text-3xl uppercase tracking-widest text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.55)] sm:text-4xl">
             {waveMessage}
           </h2>
+        </div>
+      )}
+
+      {/* Opening countdown: GET READY 3-2-1 — hidden while the tutorial runs */}
+      {mode === 'playing' && !tutorial?.active && opening?.phase === 'countdown' && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-1">
+          <div className="font-display text-xl uppercase tracking-[0.34em] text-[#9bf1ff] sm:text-2xl" style={textShadow}>
+            Get Ready — {opening.count ?? 3}
+          </div>
+          <div className="mt-1 text-[11px] font-black uppercase tracking-[0.24em] text-[#7df9ff]" style={textShadow}>
+            Shield active · you cannot be hurt
+          </div>
+        </div>
+      )}
+      {mode === 'playing' && goFlash > 0 && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+          <div className="font-display text-8xl text-[#55f2a2] drop-shadow-[0_5px_0_rgba(0,0,0,0.6)]">GO</div>
+        </div>
+      )}
+
+      {/* First-run interactive tutorial card */}
+      {mode === 'playing' && tutorial?.active && (
+        <div className="absolute bottom-24 left-1/2 z-30 w-[min(430px,88vw)] -translate-x-1/2">
+          <div className="hud-panel border-[#ffe66d]/60 px-4 py-3 text-center shadow-[0_0_22px_rgba(255,230,109,0.25)]">
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] font-black uppercase tracking-[0.24em] text-[#ffe66d]/80">
+                Tutorial {(tutorial.index ?? 0) + 1}/{tutorial.total ?? 0}
+              </span>
+              <button
+                type="button"
+                onClick={() => engineRef.current?.skipTutorial()}
+                className="pointer-events-auto text-[9px] font-black uppercase tracking-[0.18em] text-white/55 underline-offset-2 transition hover:text-white hover:underline"
+              >
+                Skip Tutorial
+              </button>
+            </div>
+            <div className="font-display mt-1 text-lg uppercase tracking-[0.14em] text-white" style={textShadow}>
+              {tutorial.title}
+            </div>
+            <div className="mt-0.5 text-xs font-bold text-[#bfeeff]" style={textShadow}>
+              {tutorial.desc}
+            </div>
+            <div className="mt-2 flex gap-1">
+              {Array.from({ length: tutorial.total ?? 0 }).map((_, i) => (
+                <div key={i} className={`h-1 flex-1 rounded-full ${i <= (tutorial.index ?? 0) ? 'bg-[#ffe66d]' : 'bg-white/20'}`} />
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -2519,7 +3081,15 @@ export default function App() {
         </div>
       )}
 
-      {showSettings && <SettingsPanel settings={settings} onChange={applySettings} onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          onChange={applySettings}
+          onClose={() => setShowSettings(false)}
+          onReplayTutorial={replayTutorial}
+          onUiSound={uiClick}
+        />
+      )}
 
       {showHangar && mode === 'menu' && (
         <HangarScreen
@@ -2529,11 +3099,13 @@ export default function App() {
           hangarUpgrades={hangarUpgrades}
           perks={perks}
           weaponMods={weaponMods}
+          isNewPilot={isNewPilot}
           onSelectModel={selectPlayerModel}
           onBuyUpgrade={purchaseHangarUpgrade}
           onBuyPerk={purchasePerk}
           onSelectMod={selectWeaponMod}
           onBack={() => setShowHangar(false)}
+          onUiSound={uiClick}
         />
       )}
 
@@ -2546,21 +3118,36 @@ export default function App() {
           isNewBest={isNewBest}
           stats={runStats}
           history={runHistory}
+          difficulty={settings.difficulty}
+          credits={credits}
+          isNewPilot={isNewPilot}
           onStart={startRun}
           onSettings={() => setShowSettings(true)}
           onHangar={() => setShowHangar(true)}
+          onHelp={() => setShowHelp(true)}
+          onMenu={quitToMenu}
+          onUiSound={uiClick}
         />
       )}
 
+      {/* DEV-only damage diagnostics — last hit source, amount, time & position */}
+      {import.meta.env.DEV && devDamage && mode === 'playing' && (
+        <div className="pointer-events-none absolute bottom-2 right-2 z-30 rounded-[5px] border border-[#ff9b3d]/50 bg-black/60 px-2 py-1 font-mono text-[10px] font-bold leading-tight text-[#ffbd3f] shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+          <div>LAST DMG: {devDamage.source} · {devDamage.damageType} · {devDamage.amount.toFixed(1)}</div>
+          <div>t={devDamage.time.toFixed(1)}s · pos ({devDamage.x.toFixed(0)}, {devDamage.y.toFixed(0)}, {devDamage.z.toFixed(0)})</div>
+        </div>
+      )}
+
       {/* On-screen perf overlay (dev aid) — F2 toggles, hidden on touch devices */}
-      {showPerf && !touchDevice && perfStats && (
+      {showPerf && perfAllowed && !touchDevice && perfStats && (
         <div className="pointer-events-none absolute bottom-2 left-2 z-30 select-none rounded-[5px] border border-white/20 bg-black/55 px-2 py-1 font-mono text-[10px] font-bold leading-tight text-[#ffe66d] shadow-[0_2px_8px_rgba(0,0,0,0.35)]" style={textShadow}>
-          <div>{perfStats.fps} FPS · {perfStats.drawCalls} DC · {(perfStats.triangles / 1000).toFixed(1)}k TRI</div>
+          <div>{perfStats.fps} FPS · {perfStats.avgFrameMs}ms avg · {perfStats.p95FrameMs}ms p95 · {perfStats.worstFrameMs}ms max</div>
+          <div>{perfStats.drawCalls} DC · {(perfStats.triangles / 1000).toFixed(1)}k TRI · {perfStats.graphics.toUpperCase()}{perfStats.governorLevel > 0 ? ` · G${perfStats.governorLevel}` : ''}</div>
           <div className="text-white/75">
-            {perfStats.geometries} GEO · {perfStats.textures} TEX · {perfStats.programs} PROG
+            {perfStats.geometries} GEO · {perfStats.textures} TEX · {perfStats.programs} PROG · {perfStats.sceneObjects} OBJ
           </div>
           <div className="text-[#ffe66d]">
-            {perfStats.enemies} EN · {perfStats.powerups} PU · {perfStats.objectives} OBJ · {perfStats.graphics.toUpperCase()}
+            {perfStats.enemies} EN · {perfStats.playerProjectiles}+{perfStats.enemyProjectiles} PROJ · {perfStats.particles} PART · {perfStats.physicsBodies} BOD
           </div>
         </div>
       )}

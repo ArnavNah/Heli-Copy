@@ -115,42 +115,42 @@ export const HANGAR_UPGRADE_INFO: Record<
   engine: {
     name: "Engine",
     description: "Improves speed and afterburner efficiency",
-    costs: [230, 500, 850, 1280, 1780],
+    costs: [190, 460, 810, 1240, 1740],
   },
   rotor: {
     name: "Rotor",
     description: "Improves climb and vertical acceleration",
-    costs: [220, 480, 820, 1220, 1700],
+    costs: [180, 440, 780, 1180, 1660],
   },
   armor: {
     name: "Armor",
     description: "+10 maximum hull integrity per rank",
-    costs: [260, 560, 930, 1380, 1900],
+    costs: [210, 510, 880, 1330, 1850],
   },
   airframe: {
     name: "Airframe",
     description: "Improves stability, cargo handling, and collision resilience",
-    costs: [240, 520, 880, 1320, 1820],
+    costs: [195, 480, 840, 1280, 1780],
   },
   fuel: {
     name: "Fuel",
     description: "6% lower fuel consumption per rank",
-    costs: [250, 540, 900, 1340, 1840],
+    costs: [200, 490, 860, 1300, 1800],
   },
   targeting: {
     name: "Targeting",
     description: "Improves gun tracking and auto-aim range",
-    costs: [240, 530, 900, 1360, 1880],
+    costs: [195, 480, 860, 1320, 1840],
   },
   weaponSystem: {
     name: "Weapon System",
     description: "Improves ammo reserves, reloads, and handling",
-    costs: [270, 590, 980, 1450, 1980],
+    costs: [220, 540, 930, 1400, 1930],
   },
   countermeasures: {
     name: "Countermeasures",
     description: "Improves flare capacity, cooldown, and decoy effectiveness",
-    costs: [220, 450, 800, 1250, 1850],
+    costs: [170, 430, 780, 1230, 1830],
   },
 };
 

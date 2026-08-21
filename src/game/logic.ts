@@ -30,13 +30,35 @@ export interface DifficultyConfig {
   samLock: number;
   /** Extraction hold-time multiplier (>1 = more forgiving). */
   extractionHold: number;
+  /** Enemy projectile speed multiplier (<1 = slower, easier to read). */
+  enemyProjectileSpeed: number;
+  /** Enemy fire-interval multiplier (>1 = fires less often). */
+  enemyFireInterval: number;
+  /** Collision/building damage multiplier taken by the player. */
+  collisionDamage: number;
+  /** Homing strength multiplier for enemy missiles. */
+  homingStrength: number;
+  /** One automatic emergency repair when hull first drops to critical. */
+  emergencyRepair: boolean;
+  /** Seconds of post-GO spawn protection. */
+  openingGraceSeconds: number;
 }
 
 export const DIFFICULTIES: Record<Difficulty, DifficultyConfig> = {
-  casual: { enemyHp: 0.75, enemyDamage: 0.7, spawnRate: 0.8, maxRisk: 0.5, objectiveHp: 0.8, threatBudget: 0.82, eliteChance: -0.015, specialChance: -0.04, samLock: 1.18, extractionHold: 1.18 },
-  normal: { enemyHp: 1, enemyDamage: 1, spawnRate: 1, maxRisk: 0.75, objectiveHp: 1, threatBudget: 1, eliteChance: 0, specialChance: 0, samLock: 1, extractionHold: 1 },
-  hard: { enemyHp: 1.25, enemyDamage: 1.25, spawnRate: 1.12, maxRisk: 1.0, objectiveHp: 1.2, threatBudget: 1.24, eliteChance: 0.035, specialChance: 0.06, samLock: 0.88, extractionHold: 0.94 },
+  casual: { enemyHp: 0.75, enemyDamage: 0.45, spawnRate: 0.65, maxRisk: 0.5, objectiveHp: 0.8, threatBudget: 0.75, eliteChance: -0.02, specialChance: -0.05, samLock: 1.3, extractionHold: 1.18, enemyProjectileSpeed: 0.78, enemyFireInterval: 1.45, collisionDamage: 0.25, homingStrength: 0.7, emergencyRepair: true, openingGraceSeconds: 2.5 },
+  normal: { enemyHp: 1, enemyDamage: 1, spawnRate: 1, maxRisk: 0.75, objectiveHp: 1, threatBudget: 1, eliteChance: 0, specialChance: 0, samLock: 1, extractionHold: 1, enemyProjectileSpeed: 1, enemyFireInterval: 1, collisionDamage: 1, homingStrength: 1, emergencyRepair: false, openingGraceSeconds: 2 },
+  hard: { enemyHp: 1.25, enemyDamage: 1.25, spawnRate: 1.12, maxRisk: 1.0, objectiveHp: 1.2, threatBudget: 1.24, eliteChance: 0.035, specialChance: 0.06, samLock: 0.88, extractionHold: 0.94, enemyProjectileSpeed: 1.1, enemyFireInterval: 0.9, collisionDamage: 1, homingStrength: 1.08, emergencyRepair: false, openingGraceSeconds: 1.5 },
 };
+
+/** Wave-1 onboarding ramp: teach the loop before the pressure arrives. */
+export const WAVE1_CONFIG = {
+  /** Seconds after wave 1 starts before enemies may fire. */
+  fireDelaySeconds: 8,
+  /** First N wave-1 spawns are plain BASIC hulls (no variants/affixes). */
+  basicOnlySpawns: 6,
+  /** Waves <= this never roll SAM sites (depots instead). */
+  noSamWaves: 2,
+} as const;
 
 /** Total enemies to spawn for a given wave number. */
 export function waveEnemyCount(wave: number): number {
@@ -1465,14 +1487,14 @@ export interface PerkInfo {
 }
 
 export const PERK_INFO: Record<PerkId, PerkInfo> = {
-  magnet: { name: 'Salvage Magnet', desc: '+20% pickup & gem magnet radius per rank', costs: [120, 300, 620], perRank: 0.2 },
-  dash: { name: 'Vector Thrusters', desc: 'Dash cooldown -8% per rank', costs: [140, 320, 660], perRank: 0.08 },
-  salvageLuck: { name: 'Scavenger Rig', desc: '+10% salvage from all sources per rank', costs: [150, 340, 700], perRank: 0.1 },
-  crashResist: { name: 'Crash Plating', desc: 'Collision damage -12% per rank', costs: [130, 310, 640], perRank: 0.12 },
-  xpGain: { name: 'Combat Computer', desc: '+8% run XP per rank', costs: [160, 360, 720], perRank: 0.08 },
-  fuelSaver: { name: 'Lean Burn', desc: 'Fuel drain -6% per rank', costs: [120, 300, 620], perRank: 0.06 },
-  superCharge: { name: 'Devastator Core', desc: '+15% Devastation charge rate per rank', costs: [180, 400, 780], perRank: 0.15 },
-  procChance: { name: 'Elemental Coils', desc: '+5% status proc chance per rank', costs: [170, 380, 740], perRank: 0.05 },
+  magnet: { name: 'Salvage Magnet', desc: '+20% pickup & gem magnet radius per rank', costs: [100, 280, 600], perRank: 0.2 },
+  dash: { name: 'Vector Thrusters', desc: 'Dash cooldown -8% per rank', costs: [110, 300, 640], perRank: 0.08 },
+  salvageLuck: { name: 'Scavenger Rig', desc: '+10% salvage from all sources per rank', costs: [120, 320, 680], perRank: 0.1 },
+  crashResist: { name: 'Crash Plating', desc: 'Collision damage -12% per rank', costs: [105, 290, 620], perRank: 0.12 },
+  xpGain: { name: 'Combat Computer', desc: '+8% run XP per rank', costs: [130, 340, 700], perRank: 0.08 },
+  fuelSaver: { name: 'Lean Burn', desc: 'Fuel drain -6% per rank', costs: [100, 280, 600], perRank: 0.06 },
+  superCharge: { name: 'Devastator Core', desc: '+15% Devastation charge rate per rank', costs: [140, 380, 760], perRank: 0.15 },
+  procChance: { name: 'Elemental Coils', desc: '+5% status proc chance per rank', costs: [135, 360, 720], perRank: 0.05 },
 };
 
 export type PerkRanks = Record<PerkId, number>;
@@ -1676,4 +1698,92 @@ export function formatScorecard(rec: RunRecord, best: number): string {
     `Survived: ${formatDuration(rec.survivalTime)}`,
   ];
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Progression pacing — starter grant, combat pay, first-time achievements
+// ---------------------------------------------------------------------------
+
+export const PROGRESS_SAVE_KEY = 'helistrike:progress';
+export const PROGRESS_SAVE_VERSION = 1;
+/** One-time welcome grant for brand-new profiles — guarantees a first purchase. */
+export const STARTER_CREDITS = 150;
+
+export interface ProgressSave {
+  version: number;
+  /** Starter credit grant already paid out. */
+  starterGranted: boolean;
+  /** One-time achievement ids already paid out (prevents restart farming). */
+  achievements: string[];
+}
+
+export function defaultProgress(): ProgressSave {
+  return { version: PROGRESS_SAVE_VERSION, starterGranted: false, achievements: [] };
+}
+
+/** Versioned, migration-friendly read. Corrupt or missing data degrades to
+ *  defaults instead of crashing; unknown future versions are kept intact. */
+export function readProgress(storage: Pick<Storage, 'getItem'> = window.localStorage): ProgressSave {
+  try {
+    const raw = storage.getItem(PROGRESS_SAVE_KEY);
+    if (!raw) return defaultProgress();
+    const parsed = JSON.parse(raw) as Partial<ProgressSave>;
+    const achievements = Array.isArray(parsed.achievements)
+      ? parsed.achievements.filter((a): a is string => typeof a === 'string')
+      : [];
+    // Future migration hooks key off `parsed.version` — v1 is the baseline.
+    return {
+      version: PROGRESS_SAVE_VERSION,
+      starterGranted: Boolean(parsed.starterGranted),
+      achievements,
+    };
+  } catch {
+    return defaultProgress();
+  }
+}
+
+export function writeProgress(
+  save: ProgressSave,
+  storage: Pick<Storage, 'setItem'> = window.localStorage,
+) {
+  try {
+    storage.setItem(PROGRESS_SAVE_KEY, JSON.stringify(save));
+  } catch {
+    // storage unavailable — progression stays in-memory for this session
+  }
+}
+
+export interface AchievementInfo {
+  id: string;
+  label: string;
+  credits: number;
+}
+
+/** One-time milestones — paid once per profile, never farmable by restarting. */
+export const FIRST_TIME_ACHIEVEMENTS: AchievementInfo[] = [
+  { id: 'firstKill', label: 'First Kill', credits: 20 },
+  { id: 'firstWaveClear', label: 'Wave 1 Cleared', credits: 40 },
+  { id: 'firstDelivery', label: 'First Delivery', credits: 60 },
+  { id: 'firstSam', label: 'SAM Site Destroyed', credits: 50 },
+  { id: 'firstExtraction', label: 'Clean Extraction', credits: 80 },
+];
+
+export interface CombatPayInput {
+  kills: number;
+  /** Wave the run reached (waves cleared = wave - 1). */
+  wave: number;
+  /** SAM + radar + depot objectives destroyed. */
+  objectives: number;
+  survivalTime: number;
+}
+
+/** Guaranteed end-of-run pay so an honest early run never ends at zero
+ *  credits. Doing nothing earns nothing: time pay requires at least one kill. */
+export function computeCombatPay(input: CombatPayInput): number {
+  const kills = Math.max(0, Math.floor(input.kills));
+  const wavesCleared = Math.max(0, Math.floor(input.wave) - 1);
+  const objectives = Math.max(0, Math.floor(input.objectives));
+  const time = Math.max(0, input.survivalTime);
+  const timePay = kills > 0 ? Math.floor(time / 30) * 4 : 0;
+  return kills * 2 + wavesCleared * 12 + objectives * 15 + timePay;
 }

@@ -154,6 +154,131 @@ export function createGlowMaterial(colorHex: number, opacity = 0.72) {
   });
 }
 
+// --- Vertex-color collapse --------------------------------------------------
+// Static prop/building clusters are folded into ONE opaque mesh (toon shading,
+// per-vertex colors) and optionally ONE additive glow mesh. Damage darkening
+// still works: the shared toon material multiplies vertex colors by its own
+// color, and the clone-on-write path keys off userData.baseColor (white here).
+let vertexToonMaterial: THREE.MeshToonMaterial | null = null;
+
+/** Shared toon material for vertex-color-collapsed static meshes. */
+export function getVertexToonMaterial(): THREE.MeshToonMaterial {
+  if (!vertexToonMaterial) {
+    vertexToonMaterial = new THREE.MeshToonMaterial({
+      vertexColors: true,
+      gradientMap: TOON_GRADIENT,
+      emissive: 0xffffff,
+      emissiveIntensity: 0.02,
+    });
+    vertexToonMaterial.userData.shared = true;
+    vertexToonMaterial.userData.baseColor = new THREE.Color(0xffffff);
+  }
+  return vertexToonMaterial;
+}
+
+let vertexGlowMaterial: THREE.MeshBasicMaterial | null = null;
+
+/** Shared additive material for vertex-color-collapsed glow meshes. */
+export function getVertexGlowMaterial(): THREE.MeshBasicMaterial {
+  if (!vertexGlowMaterial) {
+    vertexGlowMaterial = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 1,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    vertexGlowMaterial.userData.shared = true;
+  }
+  return vertexGlowMaterial;
+}
+
+const _collapseRel = new THREE.Matrix4();
+const _collapseInv = new THREE.Matrix4();
+const _collapseColor = new THREE.Color();
+
+/**
+ * Fold every static mesh under `root` into at most two meshes: one opaque
+ * vertex-color mesh and one additive glow mesh. Original meshes are removed
+ * from the graph; meshes flagged `userData.keepSeparate` (or under an
+ * ancestor that is) or `userData.isBeacon` (pulsing lights, animated screens)
+ * are left untouched. Returns the merged meshes (already parented to
+ * `root`). `root` may be detached from the scene.
+ *
+ * `bakeGlow` (used for destructible buildings) folds additive glow parts
+ * into the opaque mesh as bright vertex colors instead of a second draw
+ * call — one mesh per building instead of two.
+ */
+export function collapseStaticMeshes(root: THREE.Object3D, bakeGlow = false): THREE.Mesh[] {
+  const opaqueGeos: THREE.BufferGeometry[] = [];
+  const glowGeos: THREE.BufferGeometry[] = [];
+  const victims: THREE.Mesh[] = [];
+
+  root.updateMatrixWorld(true);
+  _collapseInv.copy(root.matrixWorld).invert();
+
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || mesh instanceof THREE.InstancedMesh || child === root) return;
+    if (mesh.userData.isBeacon) return;
+    // keepSeparate works on the mesh OR any ancestor — whole subtrees (cars,
+    // billboards, explosive props, destructible buildings) opt out as a unit.
+    for (let a: THREE.Object3D | null = mesh; a && a !== root; a = a.parent) {
+      if (a.userData.keepSeparate) return;
+    }
+    const material = (
+      Array.isArray(mesh.material) ? mesh.material[0] : mesh.material
+    ) as THREE.MeshBasicMaterial | THREE.MeshToonMaterial | THREE.MeshLambertMaterial | undefined;
+    if (!material || !(mesh.geometry instanceof THREE.BufferGeometry)) return;
+    const isGlow =
+      material instanceof THREE.MeshBasicMaterial &&
+      material.blending === THREE.AdditiveBlending;
+
+    _collapseRel.multiplyMatrices(_collapseInv, mesh.matrixWorld);
+    const geo = mesh.geometry.clone().applyMatrix4(_collapseRel);
+    _collapseColor.copy(material.color ?? _collapseColor.set(0xffffff));
+    if (isGlow) {
+      const opacity = material.opacity ?? 1;
+      if (bakeGlow) {
+        // Brighten instead of fade: over a dark facade a lit band reads as
+        // emissive even without additive blending (1 mesh per building).
+        _collapseColor.multiplyScalar(0.45 + opacity * 1.35);
+      } else {
+        _collapseColor.multiplyScalar(opacity);
+      }
+    }
+    const count = geo.getAttribute("position").count;
+    const colors = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      colors[i * 3] = _collapseColor.r;
+      colors[i * 3 + 1] = _collapseColor.g;
+      colors[i * 3 + 2] = _collapseColor.b;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    (isGlow && !bakeGlow ? glowGeos : opaqueGeos).push(geo);
+    victims.push(mesh);
+  });
+
+  if (victims.length === 0) return [];
+  for (const mesh of victims) mesh.parent?.remove(mesh);
+
+  const merged: THREE.Mesh[] = [];
+  const addMerged = (geos: THREE.BufferGeometry[], material: THREE.Material) => {
+    if (geos.length === 0) return;
+    const combined = mergeGeometries(geos, false);
+    for (const g of geos) g.dispose();
+    if (!combined) return;
+    const mesh = new THREE.Mesh(combined, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = false;
+    root.add(mesh);
+    merged.push(mesh);
+  };
+  addMerged(opaqueGeos, getVertexToonMaterial());
+  addMerged(glowGeos, getVertexGlowMaterial());
+  return merged;
+}
+
 // Pass 10: glow boxes used to mint a brand-new MeshBasicMaterial per mesh,
 // which ballooned the scene to 800+ unique materials. Cached by (color, opacity)
 // and marked `shared` so the existing clone-on-write systems (occlusion ghost,

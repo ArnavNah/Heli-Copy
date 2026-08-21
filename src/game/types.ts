@@ -21,6 +21,31 @@ export const SKY_STORM_COLOR = 0x55656b;
 export const FOG_CLEAR_COLOR = 0xe6d3a2;
 export const FOG_STORM_COLOR = 0x3a4038;
 /**
+ * 3e: CANNON.js collision groups — bitmask-based filtering so unrelated
+ * physics objects (e.g. player vs. distant debris, enemies vs. enemies)
+ * are never tested against each other.
+ */
+export const COLLISION = {
+  PLAYER: 1,
+  ENEMY: 2,
+  BUILDING: 4,
+  PLAYER_PROJECTILE: 8,
+  ENEMY_PROJECTILE: 16,
+  DEBRIS: 32,
+  PICKUP: 64,
+  /** Player collides with buildings + enemy projectiles. */
+  PLAYER_MASK: 4 | 16,
+  /** Enemies collide with buildings + player projectiles. */
+  ENEMY_MASK: 4 | 8,
+  /** Player projectiles collide with enemies + buildings. */
+  PLAYER_PROJ_MASK: 2 | 4,
+  /** Enemy projectiles collide with player + buildings. */
+  ENEMY_PROJ_MASK: 1 | 4,
+  /** Debris collides with buildings only (bounces off walls). */
+  DEBRIS_MASK: 4,
+} as const;
+
+/**
  * Linear fog band (low-poly pass): near-field combat stays completely clear,
  * the midground builds depth, and the far skyline melts into the horizon.
  * FOG_NEAR is where fog starts (nothing before it), FOG_FAR is full fog.
@@ -156,17 +181,34 @@ export type QualityPreset = 'low' | 'medium' | 'high';
 /** Graphics mode: SP1 = chunky low-res PS1-style pixels; HD = crisp full-res render. */
 export type GraphicsMode = 'sp1' | 'hd';
 export type Difficulty = 'casual' | 'normal' | 'hard';
+/** Flight handling preset: Arcade = snappy default, Simulation = heavier inertia. */
+export type MovementPreset = 'arcade' | 'simulation';
+/** Camera shake strength. 'off' fully disables gameplay impulses. */
+export type ScreenShakeLevel = 'off' | 'low' | 'full';
 
 export interface GameSettings {
   invertedY: boolean;
   gamepadSensitivity: number;
   quality: QualityPreset;
   graphics: GraphicsMode;
+  /** Master output level (0..1). Music/SFX buses sit under it. */
   volume: number;
+  /** Music bus level (0..1), relative to master. */
+  musicVolume: number;
+  /** Sound-effects bus level (0..1), relative to master. */
+  sfxVolume: number;
   touchMode: boolean;
   difficulty: Difficulty;
   /** Auto-lock guns onto the nearest enemy; the gun turret tracks, not the body. */
   autoAim: boolean;
+  /** Handling preset — arcade (default) or simulation (heavier, more drift). */
+  movement: MovementPreset;
+  /** Camera shake strength for impacts and explosions. */
+  screenShake: ScreenShakeLevel;
+  /** Tones down hit flashes and strobing warning pulses (photosensitivity aid). */
+  reduceFlash: boolean;
+  /** When true the quality governor may step effects down to hold frame rate. */
+  adaptiveQuality: boolean;
 }
 
 export enum EnemyType {
