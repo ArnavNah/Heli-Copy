@@ -1,16 +1,22 @@
 # 🚁 Heli-Strike Arcade Assault
 
-![Gameplay](screenshots/combat.jpg)
+![Gameplay](screenshots/verify-4-gameplay.png)
 
 > **A fast-paced 3D low-poly arcade helicopter shooter.** Fly a gunship over a living, procedural desert battlefield — dodge rooftop turrets, raze enemy waves, tear down SAM sites, and topple a three-phase boss. Built with React, Vite, Three.js, and Cannon-es.
 
 ## 🖼️ Screenshots
 
 ### Main Menu
-![Main Menu](screenshots/menu.jpg)
+![Main Menu](screenshots/verify-1-main-menu.png)
 
 ### Choose Your Gunship — The Hangar
-![Hangar](screenshots/hangar.jpg)
+![Hangar](screenshots/verify-2-hangar.png)
+
+### In-Game HUD — Wave Start
+![In-Game HUD](screenshots/hud-compact-2.png)
+
+### Combat & Combos
+![Combat](screenshots/verify-4-gameplay.png)
 
 ### Boss Battles Every 10th Wave
 ![Boss](screenshots/boss.jpg)
