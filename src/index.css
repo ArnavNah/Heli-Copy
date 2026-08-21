@@ -23,6 +23,50 @@ body,
   font-synthesis: none;
 }
 
+/* ── Keyboard focus-visible ring ────────────────────────────────────── */
+/* Every interactive element gets a visible cyan ring when keyboard-navigated.
+   Mouse/touch users see nothing extra. */
+:focus-visible {
+  outline: 2px solid #7df9ff;
+  outline-offset: 2px;
+}
+
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid #7df9ff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(125, 249, 255, 0.25);
+}
+
+/* Remove default outline on mouse/touch focus so it's only on keyboard nav */
+:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ── Reduced-motion preferences ─────────────────────────────────────── */
+/* Respect prefers-reduced-motion: disable nonessential animations and
+   transitions for players with vestibular sensitivities. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .arcade-scanlines { display: none; }
+  .damage-arc { display: none; }
+}
+
+/* ── Safe area padding for notched mobile devices ───────────────────── */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .safe-area-bottom { padding-bottom: env(safe-area-inset-bottom); }
+  .safe-area-top { padding-top: env(safe-area-inset-top); }
+  .safe-area-left { padding-left: env(safe-area-inset-left); }
+  .safe-area-right { padding-right: env(safe-area-inset-right); }
+}
+
 .arcade-scanlines {
   background:
     linear-gradient(rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.035)),
@@ -170,8 +214,7 @@ body,
 }
 
 @keyframes menu-float {
-  0%,
-  100% {
+  0%, 100% {
     transform: translateY(0);
   }
   50% {
@@ -345,6 +388,25 @@ body,
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
 }
 
+/* Disabled button state — clear visual feedback */
+.seg-btn:disabled,
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
+
+/* Hover/active states for buttons */
+.seg-btn:hover:not(:disabled) {
+  background: rgba(2, 6, 22, 0.7);
+  border-color: rgba(80, 235, 255, 0.65);
+}
+
+.seg-btn:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
 .joystick-base {
   width: 132px;
   height: 132px;
@@ -412,6 +474,52 @@ body,
     0 8px 16px rgba(0, 0, 0, 0.3);
 }
 
+/* ── Responsive breakpoints ─────────────────────────────────────────── */
+
+/* Narrow phone / very small viewports (< 400px) */
+@media (max-width: 400px) {
+  .menu-card {
+    padding: 14px;
+    width: calc(100vw - 16px);
+  }
+  .menu-title-slab {
+    min-height: 48px;
+  }
+  .menu-title-slab span {
+    font-size: 1rem;
+  }
+  .menu-stat strong {
+    font-size: 0.8rem;
+  }
+  .setting-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .hud-ability-card {
+    width: 48px;
+    padding: 3px 1px 2px;
+  }
+}
+
+/* Tablet / narrow desktop (401-768px) */
+@media (min-width: 401px) and (max-width: 768px) {
+  .menu-card {
+    padding: 18px;
+  }
+  .setting-row {
+    flex-wrap: wrap;
+  }
+}
+
+/* Tall viewports — tighten vertical spacing */
+@media (min-height: 900px) {
+  .menu-rig {
+    animation: none;
+  }
+}
+
 @media (max-height: 560px) {
   .menu-card {
     padding: 16px;
@@ -426,12 +534,7 @@ body,
   }
 }
 
-/* ------------------------------------------------------------------------
- * Neon-arcade HUD design system: deep navy panels with glowing cyan borders
- * and magenta/yellow accent pops (classic arcade-shooter look). Panels use
- * `filter: drop-shadow` (not box-shadow) because clip-path clips box-shadows
- * outside the clipped shape.
- * ------------------------------------------------------------------------ */
+/* ── HUD design system ──────────────────────────────────────────────── */
 .hud-panel {
   /* NOTE: no `position` here on purpose — unlayered CSS beats Tailwind's
      `.absolute`/`.relative` utilities in the cascade, and a hardcoded
@@ -606,10 +709,6 @@ body,
 }
 
 /* ── Directional damage indicator ──────────────────────────────────── */
-/* Red arc flashing at the screen edge toward the incoming hit. The engine
-   sends a camera-relative angle: 0° = dead ahead (top), +90° = right,
-   ±180° = behind (bottom), -90° = left. The element pivots around screen
-   center: rotate to the threat bearing, slide outward to the edge. */
 .damage-arc {
   position: absolute;
   left: 50%;

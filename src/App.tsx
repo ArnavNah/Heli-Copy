@@ -960,15 +960,12 @@ function ThreeDMenu({
               </div>
 
               <div className="mt-4 border-t border-white/12 pt-3 text-center">
-                <div className="text-[10px] font-bold uppercase leading-relaxed tracking-[0.16em] text-white/60">
-                  WASD move · Hold Left Mouse to fire · Space/Alt climb
-                </div>
                 <button
                   type="button"
                   onClick={() => { onUiSound(); onHelp(); }}
-                  className="mt-1 text-[10px] font-black uppercase tracking-[0.2em] text-[#7df9ff]/85 underline-offset-2 transition hover:text-[#7df9ff] hover:underline"
+                  className="text-[10px] font-black uppercase tracking-[0.2em] text-[#7df9ff]/85 underline-offset-2 transition hover:text-[#7df9ff] hover:underline"
                 >
-                  Full controls — How to Play
+                  How to Play — Controls & Tips
                 </button>
               </div>
             </div>
@@ -989,9 +986,9 @@ function ThreeDMenu({
                 </div>
               ) : null}
 
-              <div className="mt-3 text-center">
+              <div className="mt-4 text-center">
                 <div className="text-[9px] font-black uppercase tracking-[0.28em] text-white/50">Final Score</div>
-                <div className="font-display mt-1 text-3xl text-[#ffe66d]">{score.toLocaleString()}</div>
+                <div className="font-display mt-1.5 text-4xl text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.55),0_0_18px_rgba(255,230,109,0.35)]">{score.toLocaleString()}</div>
               </div>
 
               {isNewBest && (
@@ -1010,8 +1007,18 @@ function ThreeDMenu({
                   <strong>{formatDuration(stats?.time ?? 0)}</strong>
                 </div>
                 <div className="menu-stat">
+                  <span>Kills</span>
+                  <strong>{stats?.kills ?? 0}</strong>
+                </div>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-center">
+                <div className="menu-stat">
                   <span>Credits</span>
                   <strong>{(stats?.credits ?? credits).toLocaleString()}</strong>
+                </div>
+                <div className="menu-stat">
+                  <span>Accuracy</span>
+                  <strong>{Math.round((stats?.accuracy ?? 0) * 100)}%</strong>
                 </div>
               </div>
 
@@ -1619,7 +1626,7 @@ type HangarTab = 'aircraft' | 'systems' | 'weapons' | 'mods' | 'perks';
 
 const HANGAR_TABS: { id: HangarTab; label: string }[] = [
   { id: 'aircraft', label: 'Aircraft' },
-  { id: 'systems', label: 'Systems' },
+  { id: 'systems', label: 'Hull' },
   { id: 'weapons', label: 'Mastery' },
   { id: 'mods', label: 'Mods' },
   { id: 'perks', label: 'Perks' },
@@ -1738,9 +1745,8 @@ function HangarScreen({
             )}
 
             {tab === 'systems' && (
-              <>
-                <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-                  Permanent airframe systems — bought with credits, kept forever
+              <>                  <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
+                  Permanent hull upgrades — bought with credits, kept forever
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                   {(Object.entries(HANGAR_UPGRADE_INFO) as [HangarUpgradeId, (typeof HANGAR_UPGRADE_INFO)[HangarUpgradeId]][]).map(([id, info]) => {
@@ -2194,10 +2200,29 @@ export default function App() {
       }
     };
 
+    // Track last warning thresholds to avoid audio spam (one warning per tier)
+    let lastHullWarnTier = 0;
+    let lastFuelWarnTier = 0;
     const handleStats = (e: CustomEvent) => {
-      setHealth(e.detail.currentHealth);
-      setFuel(e.detail.currentFuel);
+      const h = e.detail.currentHealth;
+      const f = e.detail.currentFuel;
+      setHealth(h);
+      setFuel(f);
       if (Number.isFinite(e.detail.maxFuel)) setMaxFuel(e.detail.maxFuel);
+      // Low-hull audio warning — fire once at each 10% tier
+      const hullTier = h <= 0 ? 0 : Math.floor(h / 10);
+      if (hullTier < lastHullWarnTier && modeRef.current === 'playing') {
+        engineRef.current?.audio.playWarning();
+      }
+      lastHullWarnTier = hullTier;
+      // Low-fuel audio warning — fire once below 20%
+      const maxF = Number.isFinite(e.detail.maxFuel) ? e.detail.maxFuel : maxFuel;
+      const fuelPct = maxF > 0 ? (f / maxF) * 100 : 100;
+      const fuelTier = fuelPct <= 0 ? 0 : fuelPct <= 20 ? 1 : 2;
+      if (fuelTier < lastFuelWarnTier && modeRef.current === 'playing') {
+        engineRef.current?.audio.playWarning();
+      }
+      lastFuelWarnTier = fuelTier;
     };
 
     const handleAutoPause = () => {
@@ -2773,6 +2798,9 @@ export default function App() {
                 {Math.round(health)}<span className="text-[10px] text-white/45"> / {Math.round(maxHealth)}</span>
               </span>
             </div>
+            {health <= maxHealth * 0.25 && mode === 'playing' && (
+              <div className="text-[9px] font-black uppercase tracking-widest text-[#ff5d5d] animate-pulse" style={textShadow}>⚠ HULL CRITICAL</div>
+            )}
             <div className="hud-label mt-0.5">Fuel</div>
             <div className="flex items-center gap-2">
               <GasIcon />
@@ -2781,11 +2809,17 @@ export default function App() {
                 {Math.round(fuel)}<span className="text-[10px] text-white/45"> / {Math.round(maxFuel)}</span>
               </span>
             </div>
+            {fuel <= maxFuel * 0.15 && mode === 'playing' && (
+              <div className="text-[9px] font-black uppercase tracking-widest text-[#ff5d5d] animate-pulse" style={textShadow}>⚠ LOW FUEL — FIND PICKUP</div>
+            )}
           </div>
 
           {countermeasureInfo && mode === 'playing' && (
             <div className="hud-panel px-2.5 py-1.5">
-              <div className="hud-label text-[#ffbd3f]">Flares · C</div>
+              <div className="flex items-center justify-between">
+                <div className="hud-label text-[#ffbd3f]">Flares · C</div>
+                {countermeasureInfo.ready && countermeasureInfo.charges > 0 && <div className="text-[9px] font-black uppercase tracking-wider text-[#55f2a2]">READY</div>}
+              </div>
               <div className="mt-0.5 text-sm tracking-[0.18em] text-[#ffbd3f]">
                 {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(Math.max(0, countermeasureInfo.maxCharges - countermeasureInfo.charges))}</span>
               </div>
@@ -3008,16 +3042,22 @@ export default function App() {
           <FireButton onFire={setFire} />
           <button
             type="button"
-            aria-label="Deploy flares"
+            aria-label="Deploy flares to break missile locks"
             onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:countermeasure')); }}
-            className="pointer-events-auto absolute bottom-36 right-8 h-16 w-16 rounded-full border-2 border-[#ffbd3f] bg-[#613914]/80 text-[10px] font-black uppercase text-[#ffe0a0]"
-          >Flares</button>
+            className="pointer-events-auto absolute bottom-36 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#ffbd3f] bg-[#613914]/80 text-[10px] font-black uppercase text-[#ffe0a0]"
+          >
+            <span aria-hidden="true">🔥</span>
+            Flares
+          </button>
           <button
             type="button"
-            aria-label="Trigger Devastation"
+            aria-label="Trigger Devastation super attack when meter is full"
             onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:super')); }}
-            className="pointer-events-auto absolute bottom-56 right-8 h-16 w-16 rounded-full border-2 border-[#ff5d3a] bg-[#5c1a0d]/80 text-[10px] font-black uppercase text-[#ffb199]"
-          >Super</button>
+            className="pointer-events-auto absolute bottom-56 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#ff5d3a] bg-[#5c1a0d]/80 text-[10px] font-black uppercase text-[#ffb199]"
+          >
+            <span aria-hidden="true">💥</span>
+            Super
+          </button>
         </div>
       )}
 
