@@ -12,14 +12,27 @@ export function copyPhysicsPos(mesh: THREE.Object3D, pos: Vec3Like): void {
   mesh.position.set(pos.x, pos.y, pos.z);
 }
 
-// Desert warzone art direction: warm hazy sky over a sand battlefield. The
-// clear sky is a pale dry blue, and the fog is a dust-colored haze so distant
-// structures melt into the horizon instead of turning cyan. Storm colors stay
-// dark/moody so silhouettes remain readable.
-export const SKY_CLEAR_COLOR = 0xa9c6d3;
-export const SKY_STORM_COLOR = 0x55656b;
-export const FOG_CLEAR_COLOR = 0xe6d3a2;
-export const FOG_STORM_COLOR = 0x3a4038;
+// Coastal warzone art direction: crisp tropical sunny sky over a sunlit warzone.
+// Saturated cyan-blue zenith with bright sunny horizon and crystal clear visibility.
+export const SKY_CLEAR_COLOR = 0x6caee2;
+export const SKY_STORM_COLOR = 0x485868;
+export const FOG_CLEAR_COLOR = 0xdaf0fc;
+export const FOG_STORM_COLOR = 0x303840;
+
+export const HUD_COLORS = {
+  CYAN: '#50ebff',
+  CYAN_LIGHT: '#7df9ff',
+  CYAN_DIM: '#9bf1ff',
+  DANGER_RED: '#ef233c',
+  DANGER_RED_BRIGHT: '#ff3344',
+  WARNING_GOLD: '#ffd43b',
+  WARNING_GOLD_LIGHT: '#ffe66d',
+  SUCCESS_GREEN: '#55f2a2',
+  SUCCESS_GREEN_BRIGHT: '#2bd66f',
+  SHIELD_BLUE: '#4dabf7',
+  BOSS_MAGENTA: '#ff3366',
+} as const;
+
 /**
  * 3e: CANNON.js collision groups — bitmask-based filtering so unrelated
  * physics objects (e.g. player vs. distant debris, enemies vs. enemies)
@@ -211,8 +224,14 @@ export interface GameSettings {
   adaptiveQuality: boolean;
 }
 
+export enum EnemyMovementClass {
+  GROUND = "GROUND",
+  STATIC_GROUND = "STATIC_GROUND",
+  FLYING = "FLYING",
+}
+
 export enum EnemyType {
-  BASIC,
+  BASIC, // Infantry Cluster in Phase 1
   SHOOTER,
   TANK,
   DRONE,

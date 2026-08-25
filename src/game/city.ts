@@ -22,6 +22,30 @@ import {
   buildStorageTank,
   buildTrafficLight,
   buildUtilityBox,
+  buildPalmTree,
+  buildShrub,
+  buildRoadArrow,
+  buildTrafficCone,
+  buildStripedBarricade,
+  buildRadarTruck,
+  buildMissileLauncherTruck,
+  buildFuelTankerTruck,
+  buildPickupTruck,
+  buildUtilityVan,
+  buildSedan,
+  buildSteelTrussBridge,
+  buildWoodenDock,
+  buildSandbagBunker,
+  buildSandbagWall,
+  buildOilDrumStack,
+  buildGasStation,
+  buildCanalSegment,
+  buildWreckedCar,
+  buildCraterDecal,
+  buildTireStack,
+  buildRazorWire,
+  buildFireHydrant,
+  buildStreetLamp,
   PROP_COLORS,
 } from "./props";
 import { Turret } from "./entities";
@@ -622,8 +646,13 @@ export class CityEnvironment {
   }
 
   damageNearby(x: number, z: number, radius: number, amount: number) {
+    const minX = x - radius - 35;
+    const maxX = x + radius + 35;
+    const minZ = z - radius - 35;
+    const maxZ = z + radius + 35;
     for (const block of this.blocks) {
       if (block.destroyed) continue;
+      if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
       const distSq = this.distanceToBlockFootprintSq(x, z, block);
       if (distSq > radius * radius) continue;
       const falloff = 1 - Math.sqrt(distSq) / Math.max(radius, 0.001);
@@ -666,8 +695,13 @@ export class CityEnvironment {
    *  instead of recursing through damageExplosiveProps. */
   private damageNearbyChain(x: number, z: number, radius: number, amount: number, queue: ExplosiveProp[]) {
     const radiusSq = radius * radius;
+    const minX = x - radius - 35;
+    const maxX = x + radius + 35;
+    const minZ = z - radius - 35;
+    const maxZ = z + radius + 35;
     for (const block of this.blocks) {
       if (block.destroyed) continue;
+      if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
       const distSq = this.distanceToBlockFootprintSq(x, z, block);
       if (distSq > radiusSq) continue;
       const falloff = 1 - Math.sqrt(distSq) / Math.max(radius, 0.001);
@@ -701,8 +735,15 @@ export class CityEnvironment {
     // also keeps the player's own fire from chipping the roof they're hovering over.
     const pad = 1.5;
 
+    const minX = Math.min(from.x, to.x) - 35;
+    const maxX = Math.max(from.x, to.x) + 35;
+    const minZ = Math.min(from.z, to.z) - 35;
+    const maxZ = Math.max(from.z, to.z) + 35;
+
     for (const block of this.blocks) {
       if (block.destroyed) continue;
+      // Fast broadphase bounding box check (filters 98%+ of blocks per bullet)
+      if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
       // Arcade style: Projectiles hit any building in their path, regardless of height
       if (Math.max(from.y, to.y) < -1) {
         continue;
@@ -895,6 +936,7 @@ export class CityEnvironment {
 
     // Dressing after buildings: patches/rocks skip footprints, parks dodge real blocks.
     this.addGroundDressing(chunk, config, chunkCenterZ, id);
+    this.addCoastalZone(chunk, id, chunkCenterZ, config);
     this.addBillboards(chunk, id, chunkCenterZ, config);
     this.addStreetProps(chunk, id, config, chunkCenterZ);
     if (depot) this.addDepotFacility(chunk, depot, config);
@@ -1014,13 +1056,19 @@ export class CityEnvironment {
    * Avenue positions are FIXED constants — no per-chunk side flips — so every
    * chunk seam lines up when a new chunk streams in.
    */
+  /**
+   * Road hierarchy (Pass 2 & Visual Pass): grand central avenue with raised
+   * grass median planted with palm trees, crisp painted road arrows, white
+   * dashed lane dividers, yellow center lines, zebra crosswalks, and roadside
+   * parked vehicles (pickups, vans, fuel tankers, sedans).
+   */
   private addRoadNetwork(chunk: WorldChunk, id: number, chunkCenterZ: number, config: DistrictConfig) {
     const cz = chunkCenterZ;
     const len = this.chunkDepth - 0.4;
     const lineY = -0.06;
     const asphaltY = -0.16;
-    const cream = 0xe9e3cd;
-    const yellow = 0xf2c14e;
+    const white = ENV_PALETTE.roadWhite;
+    const yellow = ENV_PALETTE.roadYellow;
     const crossHalf = config.crossStreetHalf;
 
     // ---- Grand avenue (central spine under the flight corridor) ----
@@ -1028,105 +1076,177 @@ export class CityEnvironment {
     grand.position.set(0, asphaltY, cz);
     chunk.group.add(grand);
 
+    // Outer solid white road edge lines
     const grandEdges: THREE.Mesh[] = [];
     for (const side of [-1, 1]) {
-      const edge = createBox(0.55, 0.1, len, cream);
-      edge.position.set(side * (this.grandAvenueHalf - 1.4), lineY, cz);
+      const edge = createBox(0.45, 0.08, len, white);
+      edge.position.set(side * (this.grandAvenueHalf - 1.2), lineY, cz);
       grandEdges.push(edge);
     }
     const mergedGrandEdges = mergeBoxMeshes(grandEdges);
     if (mergedGrandEdges) chunk.group.add(mergedGrandEdges);
 
+    // Center Raised Grass Median with Palm Trees & Shrubs (splits north/south traffic)
+    const medianLen = Math.max(10, len - (crossHalf * 2 + 14));
+    const medianW = 2.4;
+    for (const mz of [cz - len * 0.28, cz + len * 0.28]) {
+      const curMedianLen = medianLen * 0.46;
+      // Concrete curb border
+      const curb = createBox(medianW + 0.5, 0.24, curMedianLen + 0.5, ENV_PALETTE.darkConcrete);
+      curb.position.set(0, -0.04, mz);
+      chunk.group.add(curb);
+      // Lush green grass lawn
+      const lawn = createBox(medianW, 0.28, curMedianLen, ENV_PALETTE.grass);
+      lawn.position.set(0, -0.01, mz);
+      chunk.group.add(lawn);
+
+      // Low-poly Palm Trees planted down the median
+      const palm1 = buildPalmTree(id * 3 + 1);
+      palm1.position.set(0, 0.12, mz - curMedianLen * 0.28);
+      chunk.group.add(palm1);
+
+      const palm2 = buildPalmTree(id * 3 + 2);
+      palm2.position.set(0, 0.12, mz + curMedianLen * 0.28);
+      chunk.group.add(palm2);
+
+      // Median shrubs between trees
+      const shrub1 = buildShrub(id * 2 + 1, ENV_PALETTE.grassDark);
+      shrub1.position.set(0, 0.12, mz);
+      chunk.group.add(shrub1);
+    }
+
+    // Dashed white lane dividers (2 lanes each direction)
     const grandDashes: THREE.Mesh[] = [];
-    for (let i = -3; i <= 3; i++) {
-      const dash = createBox(0.5, 0.1, 2.6, yellow);
-      dash.position.set(0, lineY, cz + i * 20);
-      grandDashes.push(dash);
+    for (const laneSide of [-1, 1]) {
+      const laneX = laneSide * (this.grandAvenueHalf * 0.55);
+      for (let i = -3; i <= 3; i++) {
+        const dash = createBox(0.45, 0.08, 2.8, white);
+        dash.position.set(laneX, lineY, cz + i * 18);
+        grandDashes.push(dash);
+      }
     }
     const mergedGrandDashes = mergeBoxMeshes(grandDashes);
     if (mergedGrandDashes) chunk.group.add(mergedGrandDashes);
 
-    // Warning chevrons just before/after each cross-street crossing (kept
-    // unmerged — mergeBoxMeshes ignores rotation). Spaced to the district's
-    // cross-street width so they sit on the pavement edge, not on it.
+    // Directional Road Arrows painted on Grand Avenue lanes
     for (const side of [-1, 1]) {
-      for (const zOff of [-(crossHalf + 2), crossHalf + 2]) {
-        for (const lane of [-6.5, 6.5]) {
-          const chev = createBox(2.6, 0.1, 0.5, yellow);
-          chev.position.set(lane, lineY, cz + zOff);
-          chev.rotation.y = side * 0.5;
-          chunk.group.add(chev);
-        }
+      const laneX = side * (this.grandAvenueHalf * 0.55);
+      for (const zOff of [-len * 0.32, len * 0.32]) {
+        const arrow = buildRoadArrow(side > 0 ? 'straight' : 'turn', white);
+        arrow.position.set(laneX, lineY, cz + zOff);
+        if (side < 0) arrow.rotation.y = Math.PI; // point toward camera
+        chunk.group.add(arrow);
       }
     }
 
-    // ---- Flanking avenues (fixed at ±sideAvenueX, both sides every chunk) ----
+    // ---- Flanking avenues (fixed at ±sideAvenueX) ----
     for (const side of [-1, 1]) {
       const ax = side * this.sideAvenueX;
       const ave = createBox(this.sideAvenueHalf * 2, 0.12, len, ENV_PALETTE.asphaltDark);
       ave.position.set(ax, asphaltY, cz);
       chunk.group.add(ave);
 
-      // Sidewalk + curb on the outer edge only (inner edge faces open ground)
-      const sidewalk = createBox(2.2, 0.06, len, config.sidewalk);
-      sidewalk.position.set(ax + side * (this.sideAvenueHalf + 2.4), -0.05, cz);
+      // Sidewalk + curb on outer edge
+      const sidewalk = createBox(3.4, 0.14, len, ENV_PALETTE.concrete);
+      sidewalk.position.set(ax + side * (this.sideAvenueHalf + 2.2), 0.02, cz);
       chunk.group.add(sidewalk);
-      const curb = createBox(0.4, 0.2, len, 0x39465c);
-      curb.position.set(ax + side * (this.sideAvenueHalf + 3.5), -0.02, cz);
+      const curb = createBox(0.4, 0.22, len, ENV_PALETTE.darkConcrete);
+      curb.position.set(ax + side * (this.sideAvenueHalf + 0.3), 0.04, cz);
       chunk.group.add(curb);
 
-      const aveEdges: THREE.Mesh[] = [];
-      for (const eSide of [-1, 1]) {
-        const edge = createBox(0.4, 0.09, len, 0xded8c2);
-        edge.position.set(ax + eSide * (this.sideAvenueHalf - 1.1), lineY, cz);
-        aveEdges.push(edge);
+      // Palm trees along the sidewalk
+      for (let p = 0; p < 3; p++) {
+        const palm = buildPalmTree(id * 7 + p + (side > 0 ? 11 : 23));
+        palm.position.set(ax + side * (this.sideAvenueHalf + 2.4), 0.1, cz - len * 0.35 + p * len * 0.35);
+        chunk.group.add(palm);
       }
-      const mergedAveEdges = mergeBoxMeshes(aveEdges);
-      if (mergedAveEdges) chunk.group.add(mergedAveEdges);
 
+      // Yellow center line dashes
       const aveDashes: THREE.Mesh[] = [];
       for (let i = -3; i <= 3; i++) {
-        const dash = createBox(0.4, 0.09, 2.2, yellow);
+        const dash = createBox(0.4, 0.08, 2.4, yellow);
         dash.position.set(ax, lineY, cz + i * 20 + 10);
         aveDashes.push(dash);
       }
       const mergedAveDashes = mergeBoxMeshes(aveDashes);
       if (mergedAveDashes) chunk.group.add(mergedAveDashes);
+
+      // Painted road arrows on flanking avenue
+      const aveArrow = buildRoadArrow('straight', white);
+      aveArrow.position.set(ax + (side > 0 ? 2.5 : -2.5), lineY, cz - len * 0.2);
+      if (side < 0) aveArrow.rotation.y = Math.PI;
+      chunk.group.add(aveArrow);
+
+      // Parked vehicles along avenue parking bays (matching reference image 1)
+      const parkZ = cz + (this.hash(id, side * 53) - 0.5) * 36;
+      const parkX = ax + side * (this.sideAvenueHalf - 2.2);
+      const vehicleRoll = this.hash(id, side * 79 + 17);
+      if (vehicleRoll < 0.28) {
+        const pickup = buildPickupTruck(PROP_COLORS.orange);
+        pickup.position.set(parkX, 0, parkZ);
+        pickup.rotation.y = side > 0 ? 0 : Math.PI;
+        chunk.group.add(pickup);
+      } else if (vehicleRoll < 0.55) {
+        const van = buildUtilityVan(PROP_COLORS.white);
+        van.position.set(parkX, 0, parkZ);
+        van.rotation.y = side > 0 ? 0 : Math.PI;
+        chunk.group.add(van);
+      } else if (vehicleRoll < 0.8) {
+        const tanker = buildFuelTankerTruck();
+        tanker.position.set(parkX, 0, parkZ);
+        tanker.rotation.y = side > 0 ? 0 : Math.PI;
+        chunk.group.add(tanker);
+      } else {
+        const sedan = buildSedan(PROP_COLORS.yellow);
+        sedan.position.set(parkX, 0, parkZ);
+        sedan.rotation.y = side > 0 ? 0 : Math.PI;
+        chunk.group.add(sedan);
+      }
+
+      // Roadside traffic cones & barricades
+      if (this.hash(id, side * 101) > 0.45) {
+        const cone = buildTrafficCone();
+        cone.position.set(ax + side * (this.sideAvenueHalf - 0.6), 0, parkZ + 6);
+        chunk.group.add(cone);
+        const barricade = buildStripedBarricade();
+        barricade.position.set(ax + side * (this.sideAvenueHalf - 0.6), 0, parkZ - 6);
+        barricade.rotation.y = side > 0 ? 0 : Math.PI;
+        chunk.group.add(barricade);
+      }
     }
 
-    // ---- Cross street (runs along X through every chunk center) — width is
-    // the district's seam-safe road tendency: the street is interior to the
-    // chunk, so industrial gets wider avenues without breaking chunk seams ----
+    // ---- Cross street (runs along X through chunk center) ----
     const cross = createBox(this.worldHalfWidth * 2, 0.12, crossHalf * 2, ENV_PALETTE.asphaltDark);
     cross.position.set(0, asphaltY, cz);
     chunk.group.add(cross);
     for (const side of [-1, 1]) {
-      const walk = createBox(this.worldHalfWidth * 2, 0.06, 2.2, config.sidewalk);
-      walk.position.set(0, -0.05, cz + side * (crossHalf + 1.4));
+      const walk = createBox(this.worldHalfWidth * 2, 0.14, 2.4, ENV_PALETTE.concrete);
+      walk.position.set(0, 0.02, cz + side * (crossHalf + 1.6));
       chunk.group.add(walk);
-      const curb = createBox(this.worldHalfWidth * 2, 0.2, 0.4, 0x39465c);
-      curb.position.set(0, -0.02, cz + side * (crossHalf + 2.6));
+      const curb = createBox(this.worldHalfWidth * 2, 0.22, 0.4, ENV_PALETTE.darkConcrete);
+      curb.position.set(0, 0.04, cz + side * (crossHalf + 0.3));
       chunk.group.add(curb);
     }
 
+    // Cross street dashes
     const crossDashes: THREE.Mesh[] = [];
     for (let i = -14; i <= 14; i++) {
-      if (Math.abs(i) % 2 === 1) continue; // sparse dashes
-      const dash = createBox(7, 0.09, 1.1, 0xe9df9a);
+      if (Math.abs(i) % 2 === 1) continue;
+      const dash = createBox(6.5, 0.08, 0.45, yellow);
       dash.position.set(i * 22, lineY, cz);
       crossDashes.push(dash);
     }
     const mergedCrossDashes = mergeBoxMeshes(crossDashes);
     if (mergedCrossDashes) chunk.group.add(mergedCrossDashes);
 
-    // Crosswalks across each avenue where it meets the cross street
+    // Large Zebra Crosswalks across every avenue intersection
     const crosswalks: THREE.Mesh[] = [];
     for (const ax of [0, -this.sideAvenueX, this.sideAvenueX]) {
       const span = (ax === 0 ? this.grandAvenueHalf : this.sideAvenueHalf) * 2 - 2;
       for (const zSide of [-1, 1]) {
-        for (let s = 0; s < 4; s++) {
-          const stripe = createBox(span, 0.08, 0.7, cream);
-          stripe.position.set(ax, lineY, cz + zSide * (crossHalf + 2.4 + s * 1.7));
+        for (let s = 0; s < 5; s++) {
+          const stripe = createBox(span, 0.07, 0.8, white);
+          stripe.position.set(ax, lineY, cz + zSide * (crossHalf + 1.8 + s * 1.5));
           crosswalks.push(stripe);
         }
       }
@@ -1134,27 +1254,17 @@ export class CityEnvironment {
     const mergedCrosswalks = mergeBoxMeshes(crosswalks);
     if (mergedCrosswalks) chunk.group.add(mergedCrosswalks);
 
-    // Small median islands + bushes at the flanking intersections (breathing props)
-    const islands: THREE.Mesh[] = [];
-    const bushes: THREE.Mesh[] = [];
+    // Traffic Lights at avenue intersections
     for (const ax of [-this.sideAvenueX, this.sideAvenueX]) {
       for (const zSide of [-1, 1]) {
-        const bx = ax + (ax > 0 ? -1 : 1) * 2.4;
-        const bz = cz + zSide * (crossHalf + 2.8);
-        const island = createBox(1.7, 0.55, 1.7, 0x4c525e);
-        island.position.set(bx, 0.16, bz);
-        islands.push(island);
-        const bush = createBox(1.0, 0.9, 1.0, 0x2f7a4a);
-        bush.position.set(bx, 0.85, bz);
-        bushes.push(bush);
+        const tLight = buildTrafficLight();
+        tLight.position.set(ax + (ax > 0 ? 1 : -1) * (this.sideAvenueHalf + 1.5), 0, cz + zSide * (crossHalf + 1.5));
+        tLight.rotation.y = zSide > 0 ? Math.PI : 0;
+        chunk.group.add(tLight);
       }
     }
-    const mergedIslands = mergeBoxMeshes(islands);
-    if (mergedIslands) chunk.group.add(mergedIslands);
-    const mergedBushes = mergeBoxMeshes(bushes);
-    if (mergedBushes) chunk.group.add(mergedBushes);
 
-    // ---- Service road: dirt industrial lane, fixed alignment at x = +96 ----
+    // ---- Service road (industrial / military dirt lane) ----
     if (
       config.name === 'industrial' ||
       config.name === 'base' ||
@@ -1174,7 +1284,7 @@ export class CityEnvironment {
       if (mergedRuts) chunk.group.add(mergedRuts);
     }
 
-    // ---- Street lamps along the grand avenue (modular prop library) ----
+    // ---- Street lamps along grand avenue ----
     for (let i = 0; i < 6; i++) {
       const seed = this.hash(id, 109 + i * 7);
       const side = seed > 0.5 ? 1 : -1;
@@ -1182,18 +1292,18 @@ export class CityEnvironment {
       const lampZ = cz - this.chunkDepth * 0.42 + this.hash(id, 127 + i * 5) * this.chunkDepth * 0.84;
       const lamp = buildLightPole(config.name === 'desert');
       lamp.position.set(lampX, 0, lampZ);
-      lamp.rotation.y = side > 0 ? 0 : Math.PI; // arm points toward the road
+      lamp.rotation.y = side > 0 ? 0 : Math.PI;
       chunk.group.add(lamp);
     }
 
-    // ---- Traffic: two-way lanes on both flanking avenues + a few on the grand ----
+    // ---- Traffic: two-way lanes with varied vehicles ----
     for (const side of [-1, 1]) {
       const ax = side * this.sideAvenueX;
       for (let i = -2; i <= 2; i++) {
         for (const lane of [4.5, -4.5]) {
           const laneKey = lane > 0 ? (side > 0 ? 7 : 29) : side > 0 ? 13 : 31;
           if (this.hash(id, i * 43 + laneKey) < 0.35) continue;
-          const forward = lane > 0; // right lane drives forward (away from player)
+          const forward = lane > 0;
           const speed = (forward ? -1 : 1) * (26 + this.hash(id, i * 29 + laneKey) * 16);
           const startZ = cz - this.chunkDepth * 0.5 + this.hash(id, i * 17 + laneKey) * this.chunkDepth * 0.9;
           const carX = ax + lane + (this.hash(id, i * 7 + laneKey) - 0.5) * 1.4;
@@ -1213,10 +1323,13 @@ export class CityEnvironment {
     }
   }
 
+  private static readonly _scratchColorA = new THREE.Color();
+  private static readonly _scratchColorB = new THREE.Color();
+
   /** Blend two hex colors by t (0..1) — used for seam transitions. */
   private mixColor(a: number, b: number, t: number): number {
-    const ca = new THREE.Color(a);
-    ca.lerp(new THREE.Color(b), t);
+    const ca = CityEnvironment._scratchColorA.setHex(a);
+    ca.lerp(CityEnvironment._scratchColorB.setHex(b), t);
     return ca.getHex();
   }
 
@@ -1250,27 +1363,26 @@ export class CityEnvironment {
     }
 
     // --- Footprint category (SMALL / MEDIUM / LARGE) ---
-    // Combat-corridor band: everything inside |x| < 58 is forced SMALL + low so
-    // the flight lane and avenues never turn into narrow building canyons.
-    const corridor = Math.abs(x) < 58;
+    // Combat-corridor band: central flight corridor inside |x| < 26 keeps a clear lane.
+    const corridor = Math.abs(x) < 26;
     let tier = footprintTier(this.hash(chunk.id, gx * 173 + local * 211), config.footprintWeights);
     if (corridor) tier = 0;
-    else if (tier === 2 && Math.abs(x) < 72) tier = 1; // LARGE footprints stay far from the roads
+    else if (tier === 2 && Math.abs(x) < 55) tier = 1; // Massive skyscrapers rise outside the avenue shoulders
 
-    // Dimensions per tier (the helicopter is ~8 units wide — SMALL is the default)
+    // Scale up dimensions: buildings are genuine architectural structures (11-26 units wide)
     const wHash = this.hash(chunk.id, gx + local * 3);
     const dHash = this.hash(chunk.id, gx * 3 - local);
     let width: number;
     let depth: number;
     if (tier === 0) {
-      width = 4.5 + wHash * 3.5; // SMALL  4.5-8
-      depth = 4.5 + dHash * 3.5;
+      width = 11 + wHash * 5; // SMALL  11-16
+      depth = 11 + dHash * 5;
     } else if (tier === 1) {
-      width = 8 + wHash * 4; // MEDIUM 8-12
-      depth = 8 + dHash * 4;
+      width = 17 + wHash * 5; // MEDIUM 17-22
+      depth = 17 + dHash * 5;
     } else {
-      width = 12 + wHash * 5; // LARGE  12-17
-      depth = 12 + dHash * 5;
+      width = 23 + wHash * 7; // LARGE  23-30
+      depth = 23 + dHash * 7;
     }
     width = this.snap(width);
     depth = this.snap(depth);
@@ -1281,10 +1393,10 @@ export class CityEnvironment {
     const nearAvenue = Math.abs(Math.abs(x) - this.sideAvenueX) < 14;
     if (nearAvenue) {
       tier = 0;
-      width = this.snap(4.5 + wHash * 3.5); // shrink back to SMALL
-      depth = this.snap(4.5 + dHash * 3.5);
+      width = this.snap(10 + wHash * 4); // shrink back to SMALL
+      depth = this.snap(10 + dHash * 4);
       const side = x < 0 ? -1 : 1;
-      const minInner = this.sideAvenueX + this.sideAvenueHalf + 4; // 4u setback
+      const minInner = this.sideAvenueX + this.sideAvenueHalf + 3; // 3u setback
       if (Math.abs(x) < minInner + width * 0.5) {
         x = side * (minInner + width * 0.5);
       }
@@ -1296,38 +1408,38 @@ export class CityEnvironment {
     if (nearService) {
       if (tier !== 0) {
         tier = 0;
-        width = this.snap(4.5 + wHash * 3.5);
-        depth = this.snap(4.5 + dHash * 3.5);
+        width = this.snap(10 + wHash * 4);
+        depth = this.snap(10 + dHash * 4);
       }
       if (x > 0) {
-        const minInner = this.serviceRoadX + this.serviceRoadHalf + 1.5; // 108.5
+        const minInner = this.serviceRoadX + this.serviceRoadHalf + 1.5;
         if (x < minInner + width * 0.5) x = minInner + width * 0.5;
       }
     }
 
-    // --- Height distribution: mostly low/medium, occasional towers, rare landmarks ---
+    // --- Height distribution: mostly medium/tall towers, soaring skyscrapers ---
     const [hMin, hMax] = config.heightBand;
     const [sMin, sMax] = config.skyscraperHeight;
     const towerRoll = this.hash(chunk.id, gx * 61 + local * 7);
     const skyscraper =
-      tier >= 1 && towerRoll > 1 - config.skyscraperChance && Math.abs(x) > 60;
+      tier >= 1 && towerRoll > 1 - config.skyscraperChance && Math.abs(x) > 40;
     let height: number;
     if (skyscraper) {
-      height = this.snap(sMin + seed * (sMax - sMin)); // rare tall towers
+      height = this.snap(sMin + seed * (sMax - sMin)); // soaring skyscrapers 45-110+ units
     } else if (tier === 0) {
-      height = this.snap(hMin + seed * (hMax - hMin) * 0.4); // SMALL stays low
+      height = this.snap(hMin + seed * (hMax - hMin) * 0.5); // SMALL solid cover 18-35 units
     } else if (tier === 1) {
-      height = this.snap(hMin + (hMax - hMin) * 0.25 + seed * (hMax - hMin) * 0.75); // MEDIUM mid band
+      height = this.snap(hMin + (hMax - hMin) * 0.35 + seed * (hMax - hMin) * 0.65); // MEDIUM mid-rise
     } else {
-      height = this.snap(Math.max(hMin + 2, hMax - 2) + seed * 4); // LARGE upper band (no tiers)
+      height = this.snap(hMax + seed * (sMax - hMax) * 0.5); // LARGE upper band
     }
-    if (corridor) height = Math.min(height, 10); // gentle 2-3 story canyon walls
+    if (corridor) height = Math.min(height, 18); // canyon walls framing the grand avenue
 
     // Seam transition: cap heights near the boundary so a downtown tower never
     // looms directly beside a low residential row in the next chunk.
     if (seamT > 0 && neighborCfg) {
-      const seamCap = neighborCfg.heightBand[1] + 6;
-      if (height > seamCap) height = this.snap(seamCap - seed * 2);
+      const seamCap = neighborCfg.heightBand[1] + 12;
+      if (height > seamCap) height = this.snap(seamCap - seed * 4);
     }
 
     // Core body + cap + structural forms share one color -> merged into a
@@ -1648,32 +1760,42 @@ export class CityEnvironment {
     const isLitZone = config.name !== 'desert' && config.name !== 'forest';
     const windowColor = config.windowColor;
     const trimColor = config.trimColor;
-    // Composite massings inset their upper volumes, so full-width facade
-    // stripes would float in mid-air — they get the base band only, and their
-    // silhouette does the talking.
+    const orangeAccent = ENV_PALETTE.accentOrange;
+
+    // Multi-tier terracotta accent panels & window floor bands (matching reference)
     const bandCount =
-      massing !== 'mono' ? 0 : isLitZone ? Math.max(1, Math.min(3, Math.floor(height / 8))) : 1;
+      massing !== 'mono' ? 1 : isLitZone ? Math.max(1, Math.min(4, Math.floor(height / 6))) : 1;
     const detailSeed = Math.floor(seed * 1000);
 
     for (let i = 0; i < bandCount; i++) {
       const y = 3.4 + i * (height / (bandCount + 0.45));
-      const bandHeight = isLitZone ? 0.34 : 0.22;
-      // Pass 8: windows stay controlled accents — fewer lit bands, softer
-      // opacity — so facades read as texture, never as glowing grids.
-      const lit = isLitZone && this.hash(chunk.id, detailSeed + i * 29) > 0.3;
-      const materialColor = lit ? windowColor : trimColor;
-      const opacity = lit ? 0.5 : 0.22;
-      // Pass 10: seeded band width — no two facades carry identical stripes.
-      const bandW = width * (0.5 + this.hash(chunk.id, detailSeed + i * 13) * 0.3);
+      const bandHeight = isLitZone ? 0.38 : 0.24;
+      const lit = isLitZone && this.hash(chunk.id, detailSeed + i * 29) > 0.28;
+      const materialColor = lit ? windowColor : (i % 2 === 0 ? orangeAccent : trimColor);
+      const opacity = lit ? 0.6 : 0.4;
+      const bandW = width * (0.65 + this.hash(chunk.id, detailSeed + i * 13) * 0.3);
 
       const front = createGlowBox(bandW, bandHeight, 0.08, materialColor, opacity);
       front.position.set(x, y, z + depth * 0.5 + 0.08);
       details.push(front);
 
-      // Side bands only off the corridor — less near-field clutter in the lane
+      // Recessed balcony with dark railing on mid floors of apartment blocks
+      if (archetype === 'resBlock' || archetype === 'slab' || archetype === 'plain') {
+        if (i > 0 && Math.abs(x) > 36 && this.hash(chunk.id, detailSeed + i * 47) > 0.45) {
+          const bW = bandW * 0.65;
+          const balconyFloor = createBox(bW, 0.12, 0.9, ENV_PALETTE.concrete);
+          balconyFloor.position.set(x, y - 0.2, z + depth * 0.5 + 0.45);
+          details.push(balconyFloor);
+          const balconyRail = createBox(bW + 0.1, 0.4, 0.08, 0x222832);
+          balconyRail.position.set(x, y + 0.08, z + depth * 0.5 + 0.9);
+          details.push(balconyRail);
+        }
+      }
+
+      // Side bands off the corridor
       if (isLitZone && i % 2 === 0 && Math.abs(x) > 34) {
         const side = seed > 0.5 ? 1 : -1;
-        const sideBand = createGlowBox(0.08, bandHeight, depth * 0.42, materialColor, opacity * 0.3);
+        const sideBand = createGlowBox(0.08, bandHeight, depth * 0.55, materialColor, opacity * 0.4);
         sideBand.position.set(x + side * (width * 0.5 + 0.08), y, z);
         details.push(sideBand);
       }
@@ -1688,42 +1810,39 @@ export class CityEnvironment {
       beacons.push(beacon);
     }
 
-    // Pass 10 facade variety: a street-level base band grounds the mass, and
-    // taller towers get paired vertical pilasters that break up flat walls.
-    // Both are single glow boxes — near-zero cost, kept off the corridor.
-    if (height > 9 && Math.abs(x) > 34) {
-      const base = createGlowBox(width * 0.96, 1.4, 0.08, trimColor, 0.25);
+    // Street-level entrance base band + awning canopy
+    if (height > 7 && Math.abs(x) > 34) {
+      const base = createGlowBox(width * 0.96, 1.4, 0.08, orangeAccent, 0.45);
       base.position.set(x, 1.1, z + depth * 0.5 + 0.08);
       details.push(base);
+
+      const canopy = createBox(width * 0.45, 0.14, 1.4, orangeAccent);
+      canopy.position.set(x, 2.2, z + depth * 0.5 + 0.7);
+      details.push(canopy);
     }
     if (isLitZone && massing === 'mono' && height > 13 && Math.abs(x) > 34 && this.hash(chunk.id, detailSeed + 7) > 0.55) {
       const pilH = height * 0.72;
       for (const px of [-1, 1]) {
-        const pilaster = createGlowBox(0.3, pilH, 0.08, trimColor, 0.28);
+        const pilaster = createGlowBox(0.35, pilH, 0.08, orangeAccent, 0.45);
         pilaster.position.set(x + px * width * 0.32, pilH / 2 + 1.2, z + depth * 0.5 + 0.08);
         details.push(pilaster);
       }
     }
 
-    // Archetype accents (Pass 6): a few cheap emissive strips that make the
-    // form read at a glance without hundreds of window meshes.
     const frontZ = z + depth * 0.5 + 0.08;
     if (archetype === 'office' && isLitZone) {
-      // Signage panel high on the front face of office towers
       const sign = createGlowBox(width * 0.5, 1.1, 0.08, windowColor, 0.72);
       sign.position.set(x, height * 0.72, frontZ);
       details.push(sign);
     } else if (archetype === 'parking') {
-      // Front floor bands read as parking ramps
       for (let i = 0; i < 3; i++) {
         const fy = 3.4 + i * (height / 3.6);
-        const band = createGlowBox(width * 0.6, 0.26, 0.08, trimColor, 0.4);
+        const band = createGlowBox(width * 0.6, 0.26, 0.08, orangeAccent, 0.5);
         band.position.set(x, fy, frontZ);
         details.push(band);
       }
     } else if (archetype === 'resBlock' && isLitZone) {
-      // Balcony trim strips near the top of apartment blocks
-      const trim = createGlowBox(width * 0.72, 0.3, depth * 0.72, trimColor, 0.35);
+      const trim = createGlowBox(width * 0.72, 0.3, depth * 0.72, orangeAccent, 0.5);
       trim.position.set(x, height - 0.6, z);
       details.push(trim);
     }
@@ -2378,7 +2497,7 @@ export class CityEnvironment {
       const ax = side * this.sideAvenueX;
       for (const zSide of [-1, 1]) {
         for (let i = 0; i < 3; i++) {
-          bollards.push({
+      bollards.push({
             x: ax + side * (this.sideAvenueHalf - 1.2),
             y: 0.5,
             z: cz + zSide * (crossHalf + 3 + i * 1.8),
@@ -2403,6 +2522,19 @@ export class CityEnvironment {
       if (placed >= cap) return;
     }
 
+    // Street lamps and fire hydrants along the grand avenue curbs
+    for (const side of [-1, 1]) {
+      const lampZ = cz + (this.hash(id, side * 113) - 0.5) * 60;
+      const lamp = buildStreetLamp();
+      lamp.position.set(side * (this.grandAvenueHalf + 0.8), 0, lampZ);
+      lamp.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+      chunk.group.add(lamp);
+
+      const hydrant = buildFireHydrant();
+      hydrant.position.set(side * (this.grandAvenueHalf + 1.6), 0, cz + (this.hash(id, side * 137) - 0.5) * 45);
+      chunk.group.add(hydrant);
+    }
+
     // Dumpsters + utility boxes on open ground outside the flight corridor
     for (let i = 0; i < 4; i++) {
       if (this.hash(id, 1559 + i * 7) > config.propDensity) continue;
@@ -2420,319 +2552,12 @@ export class CityEnvironment {
     }
   }
 
-  /** Military yard dressing for base/ruins districts (Pass 5). */
-  private addMilitaryProps(chunk: WorldChunk, id: number, config: DistrictConfig, cz: number) {
-    const crossHalf = config.crossStreetHalf;
-    let placed = 0;
-    const cap = 14;
-
-    // Concrete barriers — one InstancedMesh per chunk
-    const barriers: { x: number; y: number; z: number; ry?: number }[] = [];
-    for (let i = 0; i < 9; i++) {
-      if (this.hash(id, 1701 + i * 13) > config.propDensity) continue;
-      const side = this.hash(id, 1717 + i * 17) > 0.5 ? 1 : -1;
-      const bx = side * (48 + this.hash(id, 1731 + i * 19) * 120);
-      const bz = cz - 52 + this.hash(id, 1747 + i * 23) * 104;
-      if (this.overlapsBuilding(chunk, bx, bz, 3, 3)) continue;
-      if (!this.roadClear(bx, bz, 3, 3, crossHalf)) continue;
-      barriers.push({ x: bx, y: 0.35, z: bz, ry: this.hash(id, 1759 + i * 29) * Math.PI });
-      placed++;
-      if (placed >= cap) break;
-    }
-    addInstancedProps(chunk.group, barrierGeometry, getLowPolyMaterial(PROP_COLORS.concrete), barriers);
-
-    // Barricades / antenna arrays / floodlights
-    for (let i = 0; i < 3; i++) {
-      if (this.hash(id, 1777 + i * 7) > config.propDensity) continue;
-      const side = this.hash(id, 1789 + i * 11) > 0.5 ? 1 : -1;
-      const px = side * (50 + this.hash(id, 1801 + i * 13) * 120);
-      const pz = cz - 50 + this.hash(id, 1813 + i * 17) * 100;
-      if (this.overlapsBuilding(chunk, px, pz, 3, 3)) continue;
-      if (!this.roadClear(px, pz, 3, 3, crossHalf)) continue;
-      const which = this.hash(id, 1829 + i * 19);
-      const prop =
-        which < 0.4
-          ? buildBarricade()
-          : which < 0.7
-            ? buildAntennaArray(Math.floor(this.hash(id, 1841 + i * 23) * 4))
-            : buildFloodlight();
-      prop.position.set(px, 0, pz);
-      prop.rotation.y = this.hash(id, 1853 + i * 29) * Math.PI;
-      chunk.group.add(prop);
-      placed++;
-      if (placed >= cap) break;
-    }
-
-    // Striped perimeter markers along the yard
-    for (let i = 0; i < 6; i++) {
-      if (this.hash(id, 1867 + i * 5) > config.propDensity) continue;
-      const side = this.hash(id, 1879 + i * 9) > 0.5 ? 1 : -1;
-      const px = side * (46 + this.hash(id, 1891 + i * 15) * 130);
-      const pz = cz - 56 + this.hash(id, 1903 + i * 21) * 112;
-      if (this.overlapsBuilding(chunk, px, pz, 2, 2)) continue;
-      if (!this.roadClear(px, pz, 2, 2, crossHalf)) continue;
-      const marker = buildPerimeterMarker();
-      marker.position.set(px, 0, pz);
-      marker.rotation.y = this.hash(id, 1913 + i * 27) * Math.PI;
-      chunk.group.add(marker);
-      placed++;
-      if (placed >= cap) break;
-    }
-  }
-
-  /**
-   * Light military props in a ring around a ground-level objective (Pass 5).
-   * Returns the group so the engine can attach it to the objective's lifecycle
-   * (removed when the objective dies). Props use shared geometry/materials.
-   */
-  /**
-   * Type-aware environmental framing for destroyable objectives (Pass 7).
-   * Each objective gets a recognizable low-poly emplacement — military pad for
-   * SAM sites, technical comm layout for radar towers, supply yard for depots —
-   * built from shared cached props. Framing starts ~4.8u out and the instanced
-   * barrier ring sits at 6.2u, well clear of the objective's own ~4.4u radius,
-   * so the center stays open and attack runs are never blocked by clutter. The
-   * group attaches to the city graph and dies with the objective via
-   * Objective.propGroup (destroy/cull/reset all detach it).
-   */
-  addObjectiveProps(x: number, z: number, type: ObjectiveType): THREE.Group {
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-
-    // Shared instanced barrier ring — one draw call, cached geometry/material.
-    const barrierTransforms: { x: number; y: number; z: number; ry: number }[] = [];
-    const barrierCount = type === ObjectiveType.AMMO_DEPOT ? 3 : 4;
-    for (let i = 0; i < barrierCount; i++) {
-      const ang = (i / barrierCount) * Math.PI * 2 + 0.6;
-      barrierTransforms.push({ x: Math.cos(ang) * 6.2, y: 0.35, z: Math.sin(ang) * 6.2, ry: ang });
-    }
-    addInstancedProps(g, barrierGeometry, getLowPolyMaterial(PROP_COLORS.concrete), barrierTransforms);
-
-    if (type === ObjectiveType.SAM_SITE) {
-      // Military launch pad: dark pad + launch ring + radar/support gear
-      const pad = createBox(5.6, 0.16, 5.6, PROP_COLORS.concreteDark);
-      pad.position.y = 0.09;
-      g.add(pad);
-      const padMark = createBox(4.2, 0.05, 4.2, PROP_COLORS.oliveDark);
-      padMark.position.y = 0.18;
-      g.add(padMark);
-      const antenna = buildAntennaArray(1);
-      antenna.position.set(-5.2, 0, -4.6);
-      g.add(antenna);
-      const crate1 = buildEquipmentCrate();
-      crate1.position.set(5.0, 0, -5.2);
-      crate1.rotation.y = 0.8;
-      g.add(crate1);
-      const crate2 = buildEquipmentCrate();
-      crate2.position.set(-5.6, 0, 3.8);
-      crate2.rotation.y = -0.4;
-      g.add(crate2);
-      const flood = buildFloodlight();
-      flood.position.set(5.4, 0, 4.6);
-      flood.rotation.y = Math.PI * 0.9;
-      g.add(flood);
-    } else if (type === ObjectiveType.RADAR_TOWER) {
-      // Technical layout: dark slab + yellow perimeter markers + comms gear
-      const pad = createBox(6.0, 0.14, 6.0, PROP_COLORS.darkSteel);
-      pad.position.y = 0.09;
-      g.add(pad);
-      const markerTransforms: { x: number; y: number; z: number }[] = [];
-      for (let i = 0; i < 4; i++) {
-        const ang = (i / 4) * Math.PI * 2 + 0.8;
-        markerTransforms.push({ x: Math.cos(ang) * 5.0, y: 0.4, z: Math.sin(ang) * 5.0 });
-      }
-      addInstancedProps(g, bollardGeometry, getLowPolyMaterial(PROP_COLORS.yellow), markerTransforms);
-      const antenna = buildAntennaArray(0);
-      antenna.position.set(-5.4, 0, -4.4);
-      g.add(antenna);
-      const box = buildUtilityBox(PROP_COLORS.blue);
-      box.position.set(5.6, 0, -3.6);
-      box.rotation.y = 0.5;
-      g.add(box);
-      const crate = buildEquipmentCrate();
-      crate.position.set(-4.8, 0, 5.0);
-      crate.rotation.y = -0.7;
-      g.add(crate);
-    } else {
-      // AMMO_DEPOT: supply yard — containers, crates, fuel tank, generator.
-      // Containers sit ~1u farther out than the other props so their long
-      // bodies never swing into the objective's marker ring when rotated.
-      const pad = createBox(6.4, 0.14, 6.4, PROP_COLORS.concrete);
-      pad.position.y = 0.09;
-      g.add(pad);
-      const c1 = buildContainer(PROP_COLORS.olive);
-      c1.position.set(-6.2, 0, -5.4);
-      c1.rotation.y = 0.4;
-      g.add(c1);
-      const c2 = buildContainer(PROP_COLORS.rust);
-      c2.position.set(6.4, 0, -5.0);
-      c2.rotation.y = -0.3;
-      g.add(c2);
-      const tank = buildStorageTank(0, PROP_COLORS.yellow);
-      tank.position.set(-5.8, 0, 4.4);
-      g.add(tank);
-      const gen = buildGenerator();
-      gen.position.set(4.6, 0, 5.4);
-      gen.rotation.y = 0.9;
-      g.add(gen);
-      const crate = buildCrate(1);
-      crate.position.set(4.2, 0, -6.0);
-      crate.rotation.y = 1.1;
-      g.add(crate);
-    }
-
-    this.group.add(g);
-    return g;
-  }
-
-  private addOpenLot(
-    chunk: WorldChunk,
-    id: number,
-    x: number,
-    z: number,
-    gx: number,
-    local: number,
-    config: DistrictConfig,
-  ) {
-    // Only a share of empty cells become themed lots — the rest stay pure
-    // breathing room (openSpaceChance is the district's openness tendency).
-    if (this.hash(id, gx * 313 + local * 317) > config.openSpaceChance) return;
-
-    const lotRoll = this.hash(id, gx * 233 + local * 257);
-    const w = this.snap(8 + this.hash(id, gx * 263 + local * 271) * 8);
-    const d = this.snap(8 + this.hash(id, gx * 277 + local * 283) * 8);
-
-    if (config.name === 'industrial' && lotRoll < 0.82) {
-      // Industrial yard (Pass 5): container yard / storage tank + pipes / generator + crates
-      const kindRoll = this.hash(id, gx * 351 + local * 359);
-      const yard = createBox(w, 0.07, d, 0x4a443d);
-      yard.position.set(x, -0.09, z);
-      chunk.group.add(yard);
-      if (kindRoll < 0.4) {
-        // Cargo container yard — stacked containers in muted rust/blue/green
-        const containerColors = [0x8a4a35, 0x3a6b9f, 0x4f7a4f, 0x6b6f4a];
-        const stacks = 2 + Math.floor(this.hash(id, gx * 331 + local * 337) * 2);
-        for (let i = 0; i < stacks; i++) {
-          const c = containerColors[Math.floor(this.hash(id, gx * 341 + i * 13) * containerColors.length)];
-          const cont = buildContainer(c);
-          cont.position.set(
-            x - w * 0.35 + this.hash(id, gx + i * 23) * w * 0.7,
-            0,
-            z - d * 0.3 + this.hash(id, local + i * 29) * d * 0.6,
-          );
-          cont.rotation.y = i % 2;
-          chunk.group.add(cont);
-        }
-      } else if (kindRoll < 0.7) {
-        // Storage tank + pipe run
-        const tank = buildStorageTank(Math.floor(this.hash(id, gx * 361 + local * 367) * 4), config.accentColor);
-        tank.position.set(x + w * 0.18, 0, z - d * 0.12);
-        chunk.group.add(tank);
-        // C4: full fuel tank — volatile.
-        this.registerExplosiveProp(tank, x + w * 0.18, z - d * 0.12, 30);
-        const pipes = buildPipeRun();
-        pipes.position.set(x - w * 0.25, 0, z + d * 0.22);
-        pipes.rotation.y = this.hash(id, gx * 373 + local * 379) * Math.PI;
-        chunk.group.add(pipes);
-      } else if (kindRoll < 0.85) {
-        // Generator + crates
-        const gen = buildGenerator();
-        gen.position.set(x - w * 0.2, 0, z - d * 0.1);
-        chunk.group.add(gen);
-        // C4: transformer generator — pops when shot up.
-        this.registerExplosiveProp(gen, x - w * 0.2, z - d * 0.1, 22);
-        for (let i = 0; i < 2; i++) {
-          const crate = buildCrate(Math.floor(this.hash(id, gx + i * 31) * 4));
-          crate.position.set(x + w * 0.25 + i * 2.2, 0, z + d * 0.2);
-          crate.rotation.y = this.hash(id, local + i * 37) * Math.PI;
-          chunk.group.add(crate);
-        }
-      } else {
-        // Loading bay — platform + posts + canopy
-        const bay = buildLoadingBay();
-        bay.position.set(x, 0, z);
-        bay.rotation.y = this.hash(id, gx * 383 + local * 389) * Math.PI;
-        chunk.group.add(bay);
-      }
-      return;
-    }
-
-    if (config.name === 'waterfront' && lotRoll >= 0.58 && lotRoll < 0.82) {
-      // Dockside yard: timber deck, mooring posts, a stacked crate
-      const deck = createBox(w, 0.1, d, 0x6b4f2f);
-      deck.position.set(x, -0.07, z);
-      chunk.group.add(deck);
-      for (let i = 0; i < 4; i++) {
-        const post = createBox(0.5, 1.4, 0.5, 0x3f3326);
-        post.position.set(
-          x - w * 0.42 + this.hash(id, gx + i * 31) * w * 0.84,
-          0.55,
-          z - d * 0.42 + this.hash(id, local + i * 37) * d * 0.84,
-        );
-        chunk.group.add(post);
-      }
-      const crate = createBox(2.2, 1.6, 2.2, 0x8a5f42);
-      crate.position.set(x + w * 0.22, 0.8, z + d * 0.18);
-      chunk.group.add(crate);
-      return;
-    }
-
-    if (lotRoll < 0.28) {
-      // Parking lot: asphalt + white stall lines (merged into one mesh)
-      const asphalt = createBox(w, 0.07, d, 0x2b2f36);
-      asphalt.position.set(x, -0.09, z);
-      chunk.group.add(asphalt);
-      const lines: THREE.Mesh[] = [];
-      const stalls = Math.max(2, Math.floor(w / 4));
-      for (let i = 1; i < stalls; i++) {
-        const line = createBox(0.3, 0.05, d * 0.7, 0xd8d3c0);
-        line.position.set(x - w / 2 + (i * w) / stalls, -0.05, z);
-        lines.push(line);
-      }
-      const merged = mergeBoxMeshes(lines);
-      if (merged) chunk.group.add(merged);
-    } else if (lotRoll < 0.58) {
-      // Empty lot: dirt patch + rubble
-      const dirt = createBox(w, 0.06, d, 0x57544a);
-      dirt.position.set(x, -0.1, z);
-      chunk.group.add(dirt);
-      for (let i = 0; i < 3; i++) {
-        const rb = createBox(
-          1 + this.hash(id, gx * 293 + i * 31) * 2,
-          0.8 + this.hash(id, gx * 307 + i) * 1.2,
-          1 + this.hash(id, local * 311 + i) * 2,
-          0x3d4652,
-        );
-        rb.position.set(
-          x + (this.hash(id, gx + i * 17) - 0.5) * (w - 2),
-          0.5,
-          z + (this.hash(id, local + i * 19) - 0.5) * (d - 2),
-        );
-        chunk.group.add(rb);
-      }
-    } else if (lotRoll < 0.82) {
-      // Courtyard plaza: light paving + a shade tree
-      const plaza = createBox(w, 0.07, d, 0x6e6a60);
-      plaza.position.set(x, -0.09, z);
-      chunk.group.add(plaza);
-      const trunk = createBox(0.7, 3, 0.7, 0x4a3a28);
-      trunk.position.set(x + w * 0.2, 1.3, z - d * 0.1);
-      const crown = createBox(3.4, 3.2, 3.4, 0x2f7a4a);
-      crown.position.set(x + w * 0.2, 3.6, z - d * 0.1);
-      chunk.group.add(trunk, crown);
-    }
-    // else: bare open ground — pure breathing room
-  }
-
   private addGroundDressing(
     chunk: WorldChunk,
     config: DistrictConfig,
     chunkCenterZ: number,
     id: number,
   ) {
-    // Roads, markings, lamps and traffic now live in addRoadNetwork — this
-    // method only dresses the leftover ground (patches, rocks, craters, parks).
-
     const palette = config.detailPalette;
     const spread = this.worldHalfWidth - 40;
 
@@ -2775,16 +2600,384 @@ export class CityEnvironment {
       }
     }
 
+    // Battlefield storytelling: occasional burned vehicle wreck / blast crater near roadways
     if (Math.abs(id) % 3 === 1) {
-      const crater = createBox(16, 0.05, 12, 0x242831);
-      crater.position.set(this.hash(id, 203) > 0.5 ? -112 : 112, -0.02, chunkCenterZ + (this.hash(id, 207) - 0.5) * 52);
-      crater.rotation.y = this.hash(id, 211) * Math.PI;
-      chunk.group.add(crater);
+      const side = this.hash(id, 301) > 0.5 ? 1 : -1;
+      const craterX = side * (this.grandAvenueHalf + 8 + this.hash(id, 307) * 12);
+      const craterZ = chunkCenterZ + (this.hash(id, 311) - 0.5) * 40;
+      if (!this.overlapsBuilding(chunk, craterX, craterZ, 8, 8)) {
+        const crater = buildCraterDecal(4.0);
+        crater.position.set(craterX, 0, craterZ);
+        chunk.group.add(crater);
+
+        const wreck = buildWreckedCar();
+        wreck.position.set(craterX + 1.2, 0, craterZ - 0.8);
+        wreck.rotation.y = this.hash(id, 313) * Math.PI;
+        chunk.group.add(wreck);
+      }
     }
 
     // Occasional city park: a green plaza with trees, benches, and a pond
     if (Math.abs(id) % 4 === 3) {
       this.addCityPark(chunk, id, chunkCenterZ);
+    }
+  }
+
+  /** Military yard dressing for base/ruins districts (Pass 5 & Visual Pass). */
+  private addMilitaryProps(chunk: WorldChunk, id: number, config: DistrictConfig, cz: number) {
+    const crossHalf = config.crossStreetHalf;
+    let placed = 0;
+    const cap = 16;
+
+    // Concrete barriers — one InstancedMesh per chunk
+    const barriers: { x: number; y: number; z: number; ry?: number }[] = [];
+    for (let i = 0; i < 9; i++) {
+      if (this.hash(id, 1701 + i * 13) > config.propDensity) continue;
+      const side = this.hash(id, 1717 + i * 17) > 0.5 ? 1 : -1;
+      const bx = side * (48 + this.hash(id, 1731 + i * 19) * 120);
+      const bz = cz - 52 + this.hash(id, 1747 + i * 23) * 104;
+      if (this.overlapsBuilding(chunk, bx, bz, 3, 3)) continue;
+      if (!this.roadClear(bx, bz, 3, 3, crossHalf)) continue;
+      barriers.push({ x: bx, y: 0.35, z: bz, ry: this.hash(id, 1759 + i * 29) * Math.PI });
+      placed++;
+      if (placed >= cap) break;
+    }
+    addInstancedProps(chunk.group, barrierGeometry, getLowPolyMaterial(PROP_COLORS.concrete), barriers);
+
+    // Parked military radar trucks / missile trucks / sandbag bunkers
+    for (let i = 0; i < 3; i++) {
+      if (this.hash(id, 1777 + i * 7) > config.propDensity) continue;
+      const side = this.hash(id, 1789 + i * 11) > 0.5 ? 1 : -1;
+      const px = side * (52 + this.hash(id, 1801 + i * 13) * 110);
+      const pz = cz - 48 + this.hash(id, 1813 + i * 17) * 96;
+      if (this.overlapsBuilding(chunk, px, pz, 6, 6)) continue;
+      if (!this.roadClear(px, pz, 6, 6, crossHalf)) continue;
+      const which = this.hash(id, 1829 + i * 19);
+      let prop: THREE.Group;
+      if (which < 0.28) {
+        prop = buildRadarTruck();
+      } else if (which < 0.55) {
+        prop = buildMissileLauncherTruck();
+      } else if (which < 0.78) {
+        prop = buildSandbagBunker();
+      } else {
+        prop = buildOilDrumStack();
+      }
+      prop.position.set(px, 0, pz);
+      prop.rotation.y = this.hash(id, 1853 + i * 29) * Math.PI;
+      chunk.group.add(prop);
+      placed++;
+      if (placed >= cap) break;
+    }
+
+    // Striped perimeter markers along the yard
+    for (let i = 0; i < 6; i++) {
+      if (this.hash(id, 1867 + i * 5) > config.propDensity) continue;
+      const side = this.hash(id, 1879 + i * 9) > 0.5 ? 1 : -1;
+      const px = side * (46 + this.hash(id, 1891 + i * 15) * 130);
+      const pz = cz - 56 + this.hash(id, 1903 + i * 21) * 112;
+      if (this.overlapsBuilding(chunk, px, pz, 2, 2)) continue;
+      if (!this.roadClear(px, pz, 2, 2, crossHalf)) continue;
+      const marker = buildPerimeterMarker();
+      marker.position.set(px, 0, pz);
+      marker.rotation.y = this.hash(id, 1913 + i * 27) * Math.PI;
+      chunk.group.add(marker);
+      placed++;
+      if (placed >= cap) break;
+    }
+  }
+
+  /**
+   * Type-aware environmental framing for destroyable objectives (Pass 7 & Visual Pass).
+   * Emplacements feature authentic military vehicles, sandbag fortifications,
+   * oil drum clusters, and radar arrays (matching reference image 2).
+   */
+  addObjectiveProps(x: number, z: number, type: ObjectiveType): THREE.Group {
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+
+    // Shared instanced barrier ring
+    const barrierTransforms: { x: number; y: number; z: number; ry: number }[] = [];
+    const barrierCount = type === ObjectiveType.AMMO_DEPOT ? 3 : 4;
+    for (let i = 0; i < barrierCount; i++) {
+      const ang = (i / barrierCount) * Math.PI * 2 + 0.6;
+      barrierTransforms.push({ x: Math.cos(ang) * 6.8, y: 0.35, z: Math.sin(ang) * 6.8, ry: ang });
+    }
+    addInstancedProps(g, barrierGeometry, getLowPolyMaterial(PROP_COLORS.concrete), barrierTransforms);
+
+    if (type === ObjectiveType.SAM_SITE) {
+      // Military launch pad: dark pad + missile truck support + sandbag fortification + oil drums
+      const pad = createBox(6.4, 0.16, 6.4, PROP_COLORS.concreteDark);
+      pad.position.y = 0.09;
+      g.add(pad);
+      const padMark = createBox(4.8, 0.05, 4.8, PROP_COLORS.oliveDark);
+      padMark.position.y = 0.18;
+      g.add(padMark);
+
+      // Support MLRS / Radar Truck standing near SAM emplacement
+      const missileTruck = buildMissileLauncherTruck();
+      missileTruck.position.set(-6.5, 0, -4.8);
+      missileTruck.rotation.y = 0.6;
+      g.add(missileTruck);
+
+      const bunker = buildSandbagBunker();
+      bunker.position.set(5.8, 0, -4.5);
+      bunker.rotation.y = -0.8;
+      g.add(bunker);
+
+      const drums = buildOilDrumStack();
+      drums.position.set(-5.6, 0, 5.2);
+      g.add(drums);
+
+      const flood = buildFloodlight();
+      flood.position.set(6.2, 0, 4.8);
+      flood.rotation.y = Math.PI * 0.9;
+      g.add(flood);
+    } else if (type === ObjectiveType.RADAR_TOWER) {
+      // Technical comms site: radar truck + sandbag wall + yellow perimeter markers
+      const pad = createBox(6.4, 0.14, 6.4, PROP_COLORS.darkSteel);
+      pad.position.y = 0.09;
+      g.add(pad);
+
+      const markerTransforms: { x: number; y: number; z: number }[] = [];
+      for (let i = 0; i < 4; i++) {
+        const ang = (i / 4) * Math.PI * 2 + 0.8;
+        markerTransforms.push({ x: Math.cos(ang) * 5.4, y: 0.4, z: Math.sin(ang) * 5.4 });
+      }
+      addInstancedProps(g, bollardGeometry, getLowPolyMaterial(PROP_COLORS.yellow), markerTransforms);
+
+      // Radar truck parked beside the radar tower
+      const radarTruck = buildRadarTruck();
+      radarTruck.position.set(-6.4, 0, -4.6);
+      radarTruck.rotation.y = 0.4;
+      g.add(radarTruck);
+
+      const sandbag = buildSandbagWall(5.4);
+      sandbag.position.set(5.8, 0, -3.8);
+      sandbag.rotation.y = -0.5;
+      g.add(sandbag);
+
+      const box = buildUtilityBox(PROP_COLORS.blue);
+      box.position.set(5.6, 0, 4.2);
+      box.rotation.y = 0.5;
+      g.add(box);
+
+      const crate = buildEquipmentCrate();
+      crate.position.set(-5.2, 0, 5.2);
+      crate.rotation.y = -0.7;
+      g.add(crate);
+    } else {
+      // AMMO_DEPOT: supply yard with Fuel Tanker Truck, shipping containers, oil drums, generator
+      const pad = createBox(6.8, 0.14, 6.8, PROP_COLORS.concrete);
+      pad.position.y = 0.09;
+      g.add(pad);
+
+      const tanker = buildFuelTankerTruck();
+      tanker.position.set(-6.8, 0, -5.2);
+      tanker.rotation.y = 0.35;
+      g.add(tanker);
+
+      const c1 = buildContainer(PROP_COLORS.blue);
+      c1.position.set(6.8, 0, -4.8);
+      c1.rotation.y = -0.4;
+      g.add(c1);
+
+      const drums = buildOilDrumStack();
+      drums.position.set(-5.6, 0, 5.2);
+      g.add(drums);
+
+      const gen = buildGenerator();
+      gen.position.set(5.2, 0, 5.2);
+      gen.rotation.y = 0.9;
+      g.add(gen);
+    }
+
+    this.group.add(g);
+    return g;
+  }
+
+  private addOpenLot(
+    chunk: WorldChunk,
+    id: number,
+    x: number,
+    z: number,
+    gx: number,
+    local: number,
+    config: DistrictConfig,
+  ) {
+    // Only a share of empty cells become themed lots — the rest stay pure
+    // breathing room (openSpaceChance is the district's openness tendency).
+    if (this.hash(id, gx * 313 + local * 317) > config.openSpaceChance) return;
+
+    const lotRoll = this.hash(id, gx * 233 + local * 257);
+    const w = this.snap(10 + this.hash(id, gx * 263 + local * 271) * 8);
+    const d = this.snap(10 + this.hash(id, gx * 277 + local * 283) * 8);
+
+    // GAS_STATION_BLOCK (reference image 1 "VOLT FUEL" / "SKYWAY")
+    if (
+      config.name !== "forest" &&
+      config.name !== "ruins" &&
+      Math.abs(x) > 38 &&
+      Math.abs(x) < 90 &&
+      lotRoll < 0.16
+    ) {
+      const station = buildGasStation("VOLT FUEL");
+      station.position.set(x, 0, z);
+      station.rotation.y = x > 0 ? -Math.PI / 2 : Math.PI / 2;
+      chunk.group.add(station);
+      this.registerExplosiveProp(station, x, z, 35);
+
+      // Parked tanker truck at the station loading bay
+      const tanker = buildFuelTankerTruck();
+      tanker.position.set(x + (x > 0 ? -8 : 8), 0, z + 6);
+      tanker.rotation.y = station.rotation.y;
+      chunk.group.add(tanker);
+      return;
+    }
+
+    if (config.name === "industrial" && lotRoll < 0.82) {
+      // Industrial yard: container yard / storage tank + pipes / generator + crates
+      const kindRoll = this.hash(id, gx * 351 + local * 359);
+      const yard = createBox(w, 0.07, d, 0x4a443d);
+      yard.position.set(x, -0.09, z);
+      chunk.group.add(yard);
+      if (kindRoll < 0.4) {
+        const containerColors = [PROP_COLORS.rust, PROP_COLORS.blue, PROP_COLORS.green, PROP_COLORS.olive];
+        const stacks = 2 + Math.floor(this.hash(id, gx * 331 + local * 337) * 2);
+        for (let i = 0; i < stacks; i++) {
+          const c = containerColors[Math.floor(this.hash(id, gx * 341 + i * 13) * containerColors.length)];
+          const cont = buildContainer(c);
+          cont.position.set(
+            x - w * 0.35 + this.hash(id, gx + i * 23) * w * 0.7,
+            0,
+            z - d * 0.3 + this.hash(id, local + i * 29) * d * 0.6,
+          );
+          cont.rotation.y = i % 2;
+          chunk.group.add(cont);
+        }
+      } else if (kindRoll < 0.7) {
+        const tank = buildStorageTank(Math.floor(this.hash(id, gx * 361 + local * 367) * 4), config.accentColor);
+        tank.position.set(x + w * 0.18, 0, z - d * 0.12);
+        chunk.group.add(tank);
+        this.registerExplosiveProp(tank, x + w * 0.18, z - d * 0.12, 30);
+        const pipes = buildPipeRun();
+        pipes.position.set(x - w * 0.25, 0, z + d * 0.22);
+        pipes.rotation.y = this.hash(id, gx * 373 + local * 379) * Math.PI;
+        chunk.group.add(pipes);
+      } else if (kindRoll < 0.85) {
+        const gen = buildGenerator();
+        gen.position.set(x - w * 0.2, 0, z - d * 0.1);
+        chunk.group.add(gen);
+        this.registerExplosiveProp(gen, x - w * 0.2, z - d * 0.1, 22);
+        for (let i = 0; i < 2; i++) {
+          const crate = buildCrate(Math.floor(this.hash(id, gx + i * 31) * 4));
+          crate.position.set(x + w * 0.25 + i * 2.2, 0, z + d * 0.2);
+          crate.rotation.y = this.hash(id, local + i * 37) * Math.PI;
+          chunk.group.add(crate);
+        }
+      } else {
+        const bay = buildLoadingBay();
+        bay.position.set(x, 0, z);
+        bay.rotation.y = this.hash(id, gx * 383 + local * 389) * Math.PI;
+        chunk.group.add(bay);
+      }
+      return;
+    }
+
+    if (config.name === "waterfront" && lotRoll >= 0.58 && lotRoll < 0.82) {
+      const deck = createBox(w, 0.1, d, PROP_COLORS.wood);
+      deck.position.set(x, -0.07, z);
+      chunk.group.add(deck);
+      for (let i = 0; i < 4; i++) {
+        const post = createBox(0.5, 1.4, 0.5, PROP_COLORS.woodDark);
+        post.position.set(
+          x - w * 0.42 + this.hash(id, gx + i * 31) * w * 0.84,
+          0.55,
+          z - d * 0.42 + this.hash(id, local + i * 37) * d * 0.84,
+        );
+        chunk.group.add(post);
+      }
+      const crate = createBox(2.2, 1.6, 2.2, PROP_COLORS.wood);
+      crate.position.set(x + w * 0.22, 0.8, z + d * 0.18);
+      chunk.group.add(crate);
+      return;
+    }
+
+    // PARKING_LOT_BLOCK (matching reference image 1)
+    if (lotRoll < 0.38) {
+      const asphalt = createBox(w, 0.08, d, ENV_PALETTE.asphaltDark);
+      asphalt.position.set(x, -0.08, z);
+      chunk.group.add(asphalt);
+      const lines: THREE.Mesh[] = [];
+      const stalls = Math.max(2, Math.floor(w / 4.2));
+      for (let i = 1; i < stalls; i++) {
+        const line = createBox(0.3, 0.05, d * 0.75, ENV_PALETTE.roadWhite);
+        line.position.set(x - w / 2 + (i * w) / stalls, -0.04, z);
+        lines.push(line);
+      }
+      const merged = mergeBoxMeshes(lines);
+      if (merged) chunk.group.add(merged);
+
+      // Parked vehicles in stalls
+      const carRoll = this.hash(id, gx * 317 + local * 331);
+      const car1 = carRoll < 0.5 ? buildPickupTruck(PROP_COLORS.orange) : buildSedan(PROP_COLORS.yellow);
+      car1.position.set(x - w * 0.22, 0, z);
+      car1.rotation.y = Math.PI / 2;
+      chunk.group.add(car1);
+
+      if (w > 12) {
+        const car2 = buildUtilityVan(PROP_COLORS.white);
+        car2.position.set(x + w * 0.22, 0, z);
+        car2.rotation.y = Math.PI / 2;
+        chunk.group.add(car2);
+      }
+
+      // Street lamp
+      const lamp = buildStreetLamp();
+      lamp.position.set(x + w * 0.45, 0, z - d * 0.45);
+      chunk.group.add(lamp);
+    } else if (lotRoll < 0.65) {
+      // COURTYARD_PARK_BLOCK: lush lawn, paved paths, palm trees, flowering shrubs, benches
+      const lawn = createBox(w, 0.08, d, ENV_PALETTE.grass);
+      lawn.position.set(x, -0.04, z);
+      chunk.group.add(lawn);
+
+      const path = createBox(w * 0.45, 0.06, d, ENV_PALETTE.concrete);
+      path.position.set(x, -0.02, z);
+      chunk.group.add(path);
+
+      const palm = buildPalmTree(id * 7 + gx + local);
+      palm.position.set(x + w * 0.25, 0, z - d * 0.2);
+      chunk.group.add(palm);
+
+      const shrub = buildShrub(id * 5 + gx, ENV_PALETTE.grassDark);
+      shrub.position.set(x - w * 0.25, 0, z + d * 0.2);
+      chunk.group.add(shrub);
+
+      const bench = createBox(2.2, 0.5, 0.7, PROP_COLORS.wood);
+      bench.position.set(x, 0.2, z + d * 0.35);
+      chunk.group.add(bench);
+    } else {
+      // CONSTRUCTION_AND_DAMAGE_BLOCK: blast crater, tire stacks, cones, razor wire
+      const lot = createBox(w, 0.07, d, 0x4a4740);
+      lot.position.set(x, -0.09, z);
+      chunk.group.add(lot);
+
+      const crater = buildCraterDecal(3.2);
+      crater.position.set(x, 0, z);
+      chunk.group.add(crater);
+
+      const tires = buildTireStack();
+      tires.position.set(x - w * 0.28, 0, z - d * 0.25);
+      chunk.group.add(tires);
+
+      const cone = buildTrafficCone();
+      cone.position.set(x + w * 0.28, 0, z - d * 0.25);
+      chunk.group.add(cone);
+
+      const wire = buildRazorWire(4.8);
+      wire.position.set(x, 0, z + d * 0.32);
+      chunk.group.add(wire);
     }
   }
 
@@ -2861,16 +3054,20 @@ export class CityEnvironment {
     pondRim.position.set(pond.position.x, -0.05, pond.position.z);
     chunk.group.add(pondRim);
 
-    // Trees around the park
+    // Palm trees & flowering shrubs around the park
     for (let i = 0; i < 4; i++) {
       const treeX = parkX - parkW * 0.4 + this.hash(id, i * 19 + 271) * parkW * 0.8;
       const treeZ = parkZ - parkD * 0.4 + this.hash(id, i * 23 + 277) * parkD * 0.8;
       if (Math.abs(treeX - path.position.x) < 4) continue; // keep off the path
-      const trunk = createBox(0.7, 3, 0.7, 0x4a3a28);
-      trunk.position.set(treeX, 1.3, treeZ);
-      const crown = createBox(3.4 + this.hash(id, i * 29 + 281) * 2, 3.2 + this.hash(id, i * 31 + 283) * 2, 3.4 + this.hash(id, i * 37 + 287) * 2, 0x2f7a4a);
-      crown.position.set(treeX, 3.6, treeZ);
-      chunk.group.add(trunk, crown);
+      if (i % 2 === 0) {
+        const palm = buildPalmTree(id * 4 + i);
+        palm.position.set(treeX, 0, treeZ);
+        chunk.group.add(palm);
+      } else {
+        const shrub = buildShrub(id * 3 + i, ENV_PALETTE.grassDark);
+        shrub.position.set(treeX, 0, treeZ);
+        chunk.group.add(shrub);
+      }
     }
 
     // A couple of benches at the edge
@@ -2879,6 +3076,66 @@ export class CityEnvironment {
       const bench = createBox(2.2, 0.5, 0.7, 0x6b4f2f);
       bench.position.set(benchX, 0.2, parkZ + parkD * 0.4);
       chunk.group.add(bench);
+    }
+  }
+
+  /**
+   * Coastal ocean shoreline & island water features (Visual Pass):
+   * Golden beach sand, turquoise water surface with white surf foam, palm trees,
+   * wooden piers, and industrial steel truss bridges along the chunk flanks.
+   */
+  private addCoastalZone(chunk: WorldChunk, id: number, chunkCenterZ: number, config: DistrictConfig) {
+    const isWaterZone =
+      config.name === 'waterfront' ||
+      config.name === 'base' ||
+      config.name === 'residential' ||
+      config.name === 'desert' ||
+      Math.abs(id) % 2 === 0;
+    if (!isWaterZone) return;
+
+    const cz = chunkCenterZ;
+    const len = this.chunkDepth - 0.4;
+    const waterX = this.worldHalfWidth - 32;
+    const sandX = waterX - 22;
+
+    // Golden sand shoreline buffer
+    const beach = createBox(30, 0.22, len, ENV_PALETTE.sand);
+    beach.position.set(sandX, -0.2, cz);
+    chunk.group.add(beach);
+
+    // Palm trees along beach edge
+    for (let i = 0; i < 3; i++) {
+      const px = sandX - 6 + (this.hash(id, i * 19 + 71) - 0.5) * 10;
+      const pz = cz - len * 0.38 + this.hash(id, i * 23 + 83) * len * 0.76;
+      const palm = buildPalmTree(id * 5 + i);
+      palm.position.set(px, -0.05, pz);
+      chunk.group.add(palm);
+    }
+
+    // Turquoise coastal ocean plane
+    const water = createBox(68, 0.32, len, ENV_PALETTE.water);
+    water.position.set(waterX + 16, -0.3, cz);
+    chunk.group.add(water);
+
+    // Sparkling shoreline white foam line
+    const foam = createBox(2.4, 0.08, len, ENV_PALETTE.waterFoam);
+    foam.position.set(waterX - 17, -0.14, cz);
+    chunk.group.add(foam);
+
+    // Wooden dock extending into the ocean
+    if (Math.abs(id) % 3 === 1) {
+      const dock = buildWoodenDock(22, 5.5);
+      dock.position.set(waterX - 6, -0.05, cz + (this.hash(id, 307) - 0.5) * 36);
+      dock.rotation.y = Math.PI / 2;
+      chunk.group.add(dock);
+    }
+
+    // Industrial Blue Steel Truss Bridge spanning over the water channel
+    if (Math.abs(id) % 5 === 2) {
+      const bridge = buildSteelTrussBridge(28, 10);
+      bridge.position.set(waterX - 10, 0, cz);
+      bridge.rotation.y = Math.PI / 2;
+      chunk.group.add(bridge);
     }
   }
 
@@ -2893,27 +3150,33 @@ export class CityEnvironment {
     laneKey: number,
   ) {
     const forward = speed < 0;
-    const carColor = [0x992222, 0x225599, 0x999999, 0x222222, 0x887722, 0x2a6b4f][
-      Math.floor(this.hash(id, laneKey * 3 + 5) * 6)
-    ];
-    // Pass 10: car body + roof are merged into ONE mesh at the car's local
-    // origin, with the glow lights as children — the per-frame update then
-    // moves a single group instead of four meshes (and saves ~45 draw calls
-    // across the three live chunks).
-    const carGroup = new THREE.Group();
-    carGroup.userData.keepSeparate = true; // moves every frame — never merged
-    carGroup.position.set(carX, 0, carZ);
-    const carBody = createBox(2.8, 1.2, 5.5, carColor);
-    carBody.position.set(0, 0.6, 0);
-    const carRoof = createBox(2.4, 0.8, 3.0, 0x111111);
-    carRoof.position.set(0, 1.6, -0.5);
-    const mergedBody = mergeBoxMeshes([carBody, carRoof]);
-    if (mergedBody) {
-      mergedBody.castShadow = true;
-      carGroup.add(mergedBody);
+    const carColor = [
+      PROP_COLORS.orange,
+      PROP_COLORS.yellow,
+      PROP_COLORS.white,
+      PROP_COLORS.blue,
+      PROP_COLORS.red,
+      PROP_COLORS.olive,
+    ][Math.floor(this.hash(id, laneKey * 3 + 5) * 6)];
+
+    const vehicleTypeRoll = this.hash(id, laneKey * 7 + 11);
+    let carGroup: THREE.Group;
+    if (vehicleTypeRoll < 0.35) {
+      carGroup = buildPickupTruck(carColor);
+    } else if (vehicleTypeRoll < 0.65) {
+      carGroup = buildUtilityVan(carColor);
+    } else if (vehicleTypeRoll < 0.85) {
+      carGroup = buildSedan(carColor);
     } else {
-      carGroup.add(carBody, carRoof);
+      carGroup = buildFuelTankerTruck();
     }
+
+    carGroup.userData.keepSeparate = true;
+    carGroup.position.set(carX, 0, carZ);
+    if (!forward) {
+      carGroup.rotation.y = Math.PI;
+    }
+
     const headlight = createGlowBox(2.2, 0.24, 0.18, forward ? 0xfff3b0 : 0xff3344, 0.68);
     headlight.position.set(0, 0.86, forward ? -3.05 : 3.05);
     const taillight = createGlowBox(2.2, 0.2, 0.14, forward ? 0xff3344 : 0xfff3b0, 0.5);

@@ -24,6 +24,11 @@ export class AudioManager {
   private musicStep = 0;
   
   private lastExplosionTime = 0;
+  private lastHitSoundTime = 0;
+  private lastGunSoundTime = 0;
+  private explosionNoiseBuffer: AudioBuffer | null = null;
+  private bigExplosionNoiseBuffer: AudioBuffer | null = null;
+  private shotgunNoiseBuffer: AudioBuffer | null = null;
 
   constructor() {
     // Context is created lazily on first interaction
@@ -38,11 +43,33 @@ export class AudioManager {
 
     this.sfxGain = this.ctx.createGain();
     this.sfxGain.gain.value = this.sfxVolume;
-    this.sfxGain.connect(this.sfxGain);
+    this.sfxGain.connect(this.masterGain);
 
     this.musicGain = this.ctx.createGain();
     this.musicGain.gain.value = this.musicVolume;
-    this.musicGain.connect(this.sfxGain);
+    this.musicGain.connect(this.masterGain);
+
+    // Pre-create shared explosion noise buffers (avoids 24k Math.random() allocations on every boom)
+    const noiseLen = Math.floor(this.ctx.sampleRate * 0.5);
+    this.explosionNoiseBuffer = this.ctx.createBuffer(1, noiseLen, this.ctx.sampleRate);
+    const exData = this.explosionNoiseBuffer.getChannelData(0);
+    for (let i = 0; i < noiseLen; i++) {
+      exData[i] = (Math.random() * 2 - 1) * (1 - i / noiseLen);
+    }
+
+    const bigNoiseLen = Math.floor(this.ctx.sampleRate * 0.9);
+    this.bigExplosionNoiseBuffer = this.ctx.createBuffer(1, bigNoiseLen, this.ctx.sampleRate);
+    const bigData = this.bigExplosionNoiseBuffer.getChannelData(0);
+    for (let i = 0; i < bigNoiseLen; i++) {
+      bigData[i] = (Math.random() * 2 - 1) * (1 - i / bigNoiseLen);
+    }
+
+    const shotLen = Math.floor(this.ctx.sampleRate * 0.13);
+    this.shotgunNoiseBuffer = this.ctx.createBuffer(1, shotLen, this.ctx.sampleRate);
+    const shotData = this.shotgunNoiseBuffer.getChannelData(0);
+    for (let i = 0; i < shotLen; i++) {
+      shotData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / shotLen, 2.3);
+    }
     
     this.setupEngine();
   }
@@ -177,6 +204,7 @@ export class AudioManager {
   }
 
   public playLaser(x: number) {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
     
@@ -203,8 +231,12 @@ export class AudioManager {
   }
 
   public playMachineGun(x: number) {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
+    if (now - this.lastGunSoundTime < 0.04) return;
+    this.lastGunSoundTime = now;
+
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
     const filter = this.ctx.createBiquadFilter();
@@ -229,17 +261,14 @@ export class AudioManager {
   }
 
   public playShotgun(x: number) {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
-    const length = Math.floor(this.ctx.sampleRate * 0.13);
-    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < length; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.3);
-    }
 
     const burst = this.ctx.createBufferSource();
-    burst.buffer = buffer;
+    if (this.shotgunNoiseBuffer) {
+      burst.buffer = this.shotgunNoiseBuffer;
+    }
     const filter = this.ctx.createBiquadFilter();
     const g = this.ctx.createGain();
     const panner = this.ctx.createStereoPanner();
@@ -353,6 +382,7 @@ export class AudioManager {
   }
 
   public playEnemyFire() {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -372,36 +402,31 @@ export class AudioManager {
   }
 
   public playExplosion(intensity: number = 1.0) {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
-    if (now - this.lastExplosionTime < 0.1) return;
+    if (now - this.lastExplosionTime < 0.08) return;
     this.lastExplosionTime = now;
     
-    // Noise burst
-    const bufferSize = this.ctx.sampleRate * 0.5;
-    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    // Use pre-allocated shared noise buffer if available
+    if (this.explosionNoiseBuffer) {
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = this.explosionNoiseBuffer;
+      
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(800 * intensity, now);
+      filter.frequency.exponentialRampToValueAtTime(40, now + 0.4);
+      
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.4 * intensity, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+      
+      noise.connect(filter);
+      filter.connect(g);
+      g.connect(this.sfxGain);
+      noise.start();
     }
-    
-    const noise = this.ctx.createBufferSource();
-    noise.buffer = buffer;
-    
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(800 * intensity, now);
-    filter.frequency.exponentialRampToValueAtTime(40, now + 0.4);
-    
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.4 * intensity, now);
-    g.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-    
-    noise.connect(filter);
-    filter.connect(g);
-    g.connect(this.sfxGain);
-    
-    noise.start();
     
     // Low thump
     const osc = this.ctx.createOscillator();
@@ -417,8 +442,8 @@ export class AudioManager {
     osc.start();
     osc.stop(now + 0.3);
 
-    // Debris crackle — a few short bright ticks after the boom
-    this.playCrackle(now + 0.08, Math.min(1.6, 0.5 + intensity * 0.7), 0.06 * intensity);
+    // Debris crackle — throttled
+    this.playCrackle(now + 0.08, Math.min(1.2, 0.4 + intensity * 0.5), 0.05 * intensity);
   }
 
   /** Short random crackle of bright ticks — debris hitting ground/metal. */
@@ -446,26 +471,21 @@ export class AudioManager {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
 
-    // Wide noise burst (longer than the regular boom)
-    const bufferSize = this.ctx.sampleRate * 0.9;
-    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    if (this.bigExplosionNoiseBuffer) {
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = this.bigExplosionNoiseBuffer;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1500 * intensity, now);
+      filter.frequency.exponentialRampToValueAtTime(50, now + 0.7);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.6 * intensity, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+      noise.connect(filter);
+      filter.connect(g);
+      g.connect(this.sfxGain);
+      noise.start();
     }
-    const noise = this.ctx.createBufferSource();
-    noise.buffer = buffer;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(1500 * intensity, now);
-    filter.frequency.exponentialRampToValueAtTime(50, now + 0.7);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.6 * intensity, now);
-    g.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
-    noise.connect(filter);
-    filter.connect(g);
-    g.connect(this.sfxGain);
-    noise.start();
 
     // Deep sub thump — the big body of the boom
     const osc = this.ctx.createOscillator();
@@ -533,8 +553,12 @@ export class AudioManager {
   }
 
   public playHit() {
+    if (!this.ctx) this.init();
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
+    if (now - this.lastHitSoundTime < 0.035) return; // Throttle hits
+    this.lastHitSoundTime = now;
+    
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
     

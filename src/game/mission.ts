@@ -163,12 +163,32 @@ export class MissionManager {
     let mission: Mission;
     if (type === MissionType.DESTROY_SAM) {
       const target = context.sams[0];
-      mission = make({ type, title: "Destroy SAM Battery", targetId: target.id, targetKind: "SAM", destination: target, targetProgress: 1,
-        reward: reward(Math.round(300 * scale), 18, 2), bonusObjectives: [bonus(BonusObjectiveType.NO_MISSILE_DAMAGE, "Take no SAM missile damage", 1, reward(100, 0, 1))] });
+      mission = make({
+        type,
+        title: "Destroy SAM Battery",
+        targetId: target.id,
+        targetKind: "SAM",
+        destination: target,
+        targetProgress: 1,
+        reward: reward(Math.round(300 * scale), 18, 2),
+        bonusObjectives: [
+          bonus(BonusObjectiveType.NO_MISSILE_DAMAGE, "Take no SAM missile damage", 1, reward(100, 0, 1)),
+        ],
+      });
     } else if (type === MissionType.DESTROY_RADAR) {
       const target = context.radars[0];
-      mission = make({ type, title: "Destroy Radar Uplink", targetId: target.id, targetKind: "RADAR", destination: target, targetProgress: 1,
-        reward: reward(Math.round(280 * scale), 16, 2), bonusObjectives: [bonus(BonusObjectiveType.TIME_LIMIT, "Destroy before uplink relocates", 1, reward(90, 0, 1), time + 55)] });
+      mission = make({
+        type,
+        title: "Destroy Radar Station",
+        targetId: target.id,
+        targetKind: "RADAR",
+        destination: target,
+        targetProgress: 1,
+        reward: reward(Math.round(350 * scale), 20, 2),
+        bonusObjectives: [
+          bonus(BonusObjectiveType.NO_MISSILE_DAMAGE, "Take no SAM missile damage", 1, reward(100, 0, 1)),
+        ],
+      });
     } else if (type === MissionType.DELIVERY && context.delivery) {
       const target = context.delivery;
       mission = make({ type, title: "Complete Cargo Run", targetId: target.id, targetKind: "DELIVERY", destination: target, targetProgress: 1,

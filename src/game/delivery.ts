@@ -380,12 +380,12 @@ function cargoFor(sequence: number, difficulty: ContractDifficulty): CargoType {
 }
 
 export function createDeliveryContract(
-  origin: DepotHub,
-  destination: DepotHub,
+  origin: DepotHub | null | undefined,
+  destination: DepotHub | null | undefined,
   wave: number,
   sequence: number,
 ): DeliveryContract | null {
-  if (origin.id === destination.id) return null;
+  if (!origin || !destination || origin.id === destination.id) return null;
   const distance = distanceBetween(origin.position, destination.position);
   if (distance < MIN_DELIVERY_DISTANCE || distance > MAX_DELIVERY_DISTANCE) return null;
   const difficulty = difficultyFor(wave, sequence);

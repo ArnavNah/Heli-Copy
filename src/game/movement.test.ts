@@ -192,12 +192,51 @@ describe('handling upgrades', () => {
     const strafeRight: MovementCommand = { x: 1, y: 0, z: 0, afterburner: 1 };
 
     step(rig, 1 / 60, strafeRight);
-    // A rate limit of ~7 rad/s caps the first frame well under a radian;
-    // the old exponential snap would have jumped a large fraction of π/2.
-    expect(rig.helicopter.mesh.rotation.y).toBeLessThan(0.3);
+    // Starts at Math.PI and turns toward Math.PI/2 with rate limit
+    expect(rig.helicopter.mesh.rotation.y).toBeLessThan(Math.PI);
+    expect(rig.helicopter.mesh.rotation.y).toBeGreaterThan(Math.PI / 2);
 
     simulate(rig, 1, 60, strafeRight);
     expect(rig.helicopter.mesh.rotation.y).toBeCloseTo(Math.PI / 2, 1);
+  });
+
+  it('moves and aligns body across 360-degree analog angles', () => {
+    // Test 8 distinct angles around the circle
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * Math.PI * 2 - Math.PI;
+      const cmd: MovementCommand = {
+        x: Math.sin(angle),
+        y: 0,
+        z: Math.cos(angle),
+        afterburner: 1,
+      };
+      const rig = createRig();
+      simulate(rig, 1, 60, cmd);
+
+      // Body yaw should match movement angle
+      let yawDiff = rig.helicopter.mesh.rotation.y - angle;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      expect(Math.abs(yawDiff)).toBeLessThan(0.15);
+
+      // Velocity direction should match movement angle
+      const speed = Math.hypot(rig.helicopter.body.velocity.x, rig.helicopter.body.velocity.z);
+      expect(speed).toBeCloseTo(MOVEMENT_CONFIG.maxHorizontalSpeed, 0);
+    }
+  });
+
+  it('scales desired speed with analog stick magnitude', () => {
+    const halfRig = createRig();
+    const fullRig = createRig();
+    const halfForward: MovementCommand = { x: 0, y: 0, z: -0.5, afterburner: 1 };
+
+    simulate(halfRig, 1, 60, halfForward);
+    simulate(fullRig, 1, 60, FORWARD);
+
+    const halfSpeed = -halfRig.helicopter.body.velocity.z;
+    const fullSpeed = -fullRig.helicopter.body.velocity.z;
+
+    expect(halfSpeed).toBeCloseTo(fullSpeed * 0.5, 0);
   });
 
   it('pitches the nose up when climbing and down when descending', () => {
@@ -251,9 +290,68 @@ describe('handling upgrades', () => {
       -warlock.helicopter.body.velocity.z,
     );
   });
+
+  it('transitions through a curved path during 90-degree turn instead of instant snapping', () => {
+    const rig = createRig();
+    // 1. Establish full speed forward (North: -Z)
+    simulate(rig, 1, 60, FORWARD);
+    expect(-rig.helicopter.body.velocity.z).toBeGreaterThan(60);
+
+    // 2. Instantly steer Right (East: +X)
+    const rightCmd: MovementCommand = { x: 1, y: 0, z: 0, afterburner: 1 };
+    // Step 0.15s into the turn
+    simulate(rig, 0.15, 60, rightCmd);
+
+    // Physical arc: velocity still has forward momentum (-Z) while building lateral velocity (+X)
+    expect(-rig.helicopter.body.velocity.z).toBeGreaterThan(15);
+    expect(rig.helicopter.body.velocity.x).toBeGreaterThan(15);
+
+    // Complete the turn over ~0.6s
+    simulate(rig, 0.6, 60, rightCmd);
+    expect(rig.helicopter.body.velocity.x).toBeCloseTo(MOVEMENT_CONFIG.maxHorizontalSpeed, 0);
+    expect(Math.abs(rig.helicopter.body.velocity.z)).toBeLessThan(2);
+  });
+
+  it('brakes and accelerates physically during 180-degree reversal', () => {
+    const rig = createRig();
+    // 1. Establish full speed forward (North: -Z)
+    simulate(rig, 1, 60, FORWARD);
+    expect(-rig.helicopter.body.velocity.z).toBeGreaterThan(60);
+
+    // 2. Reverse to backward (South: +Z)
+    const backCmd: MovementCommand = { x: 0, y: 0, z: 1, afterburner: 1 };
+    // Step 0.12s — aircraft should be braking hard (reversal acceleration active)
+    simulate(rig, 0.12, 60, backCmd);
+    expect(-rig.helicopter.body.velocity.z).toBeLessThan(45);
+
+    // Step to 0.8s — fully reversed to South (+Z)
+    simulate(rig, 0.8, 60, backCmd);
+    expect(rig.helicopter.body.velocity.z).toBeCloseTo(MOVEMENT_CONFIG.maxHorizontalSpeed, 0);
+  });
+
+  it('builds angular velocity smoothly with critically damped spring', () => {
+    const rig = createRig();
+    const strafeRight: MovementCommand = { x: 1, y: 0, z: 0, afterburner: 1 };
+
+    // Initial angular velocity is 0
+    expect(rig.helicopter.bodyYawVelocity).toBe(0);
+
+    // Step 2 frames (0.033s)
+    step(rig, 1 / 60, strafeRight);
+    step(rig, 1 / 60, strafeRight);
+
+    // Angular velocity builds up gradually without instantly teleporting to max
+    expect(Math.abs(rig.helicopter.bodyYawVelocity)).toBeGreaterThan(0.2);
+    expect(Math.abs(rig.helicopter.bodyYawVelocity)).toBeLessThanOrEqual(MOVEMENT_CONFIG.maxYawSpeed);
+
+    // After settling, angular velocity returns to 0
+    simulate(rig, 1.2, 60, strafeRight);
+    expect(Math.abs(rig.helicopter.bodyYawVelocity)).toBeLessThan(0.05);
+    expect(rig.helicopter.mesh.rotation.y).toBeCloseTo(Math.PI / 2, 1);
+  });
 });
 
-describe('gun hierarchy', () => {
+describe('gun hierarchy & cross-aim independence', () => {
   it('rotates only the gun and derives direction from the real muzzle', () => {
     const rig = createRig();
     rig.helicopter.setGunAim(60, 26, 0, true);
@@ -262,10 +360,40 @@ describe('gun hierarchy', () => {
     const muzzlePosition = rig.helicopter.getMuzzlePosition(new THREE.Vector3());
     const muzzleDirection = rig.helicopter.getMuzzleDirection(new THREE.Vector3());
 
-    expect(rig.helicopter.mesh.rotation.y).toBeCloseTo(0, 6);
-    expect(rig.helicopter.gunYawPivot.rotation.y).toBeGreaterThan(1);
+    expect(rig.helicopter.mesh.rotation.y).toBeCloseTo(Math.PI, 6);
+    expect(rig.helicopter.gunYawPivot.rotation.y).toBeLessThan(-1);
     expect(muzzlePosition.distanceTo(rig.helicopter.mesh.position)).toBeGreaterThan(3);
     expect(muzzleDirection.x).toBeGreaterThan(0.85);
     expect(Math.abs(muzzleDirection.z)).toBeLessThan(0.35);
+  });
+
+  it('passes critical cross-aim: moving UP-LEFT while aiming RIGHT', () => {
+    const rig = createRig();
+    // Enemy is at RIGHT (+X)
+    rig.helicopter.setGunAim(60, 26, 0, true);
+    // Player pushes UP-LEFT (world -X, -Z)
+    const upLeft: MovementCommand = {
+      x: -1 / Math.SQRT2,
+      y: 0,
+      z: -1 / Math.SQRT2,
+      afterburner: 1,
+    };
+
+    simulate(rig, 1, 60, upLeft);
+
+    // 1. Helicopter moves UP-LEFT
+    expect(rig.helicopter.body.velocity.x).toBeLessThan(-10);
+    expect(rig.helicopter.body.velocity.z).toBeLessThan(-10);
+
+    // 2. Helicopter body faces UP-LEFT (Math.atan2(-0.707, -0.707) = -3*PI/4)
+    const expectedYaw = Math.atan2(-1 / Math.SQRT2, -1 / Math.SQRT2);
+    let yawDiff = rig.helicopter.mesh.rotation.y - expectedYaw;
+    while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+    while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+    expect(Math.abs(yawDiff)).toBeLessThan(0.15);
+
+    // 3. Gun turret aims RIGHT in world space
+    const muzzleDirection = rig.helicopter.getMuzzleDirection(new THREE.Vector3());
+    expect(muzzleDirection.x).toBeGreaterThan(0.85);
   });
 });

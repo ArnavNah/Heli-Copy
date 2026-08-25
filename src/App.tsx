@@ -39,6 +39,16 @@ import {
 } from './game/logic';
 import type { PerkId, PerkRanks, RunRecord } from './game/logic';
 import { Bomb, Cog, Flame, Fuel, Rocket, Shield, Skull, Sparkles, Zap } from 'lucide-react';
+import React from 'react';
+
+const STORAGE_KEYS = {
+  HIGH_SCORE: 'helistrike:highScore',
+  CREDITS: 'helistrike:credits',
+  SETTINGS: 'helistrike:settings',
+  PLAYER_MODEL: 'helistrike:playerModel',
+  TUTORIAL_DONE: 'helistrike:tutorialDone',
+  PERF: 'helistrike:perf',
+} as const;
 
 type GameMode = 'menu' | 'playing' | 'paused' | 'gameover';
 
@@ -115,7 +125,7 @@ function clampPercent(value: number) {
 }
 
 function readHighScore() {
-  const stored = Number(window.localStorage.getItem('helistrike:highScore') ?? 0);
+  const stored = Number(window.localStorage.getItem(STORAGE_KEYS.HIGH_SCORE) ?? 0);
   return Number.isFinite(stored) ? stored : 0;
 }
 
@@ -129,7 +139,7 @@ function grantStarterCreditsOnce(): number {
     progress.starterGranted = true;
     writeProgress(progress);
     const next = base + STARTER_CREDITS;
-    window.localStorage.setItem('helistrike:credits', String(next));
+    window.localStorage.setItem(STORAGE_KEYS.CREDITS, String(next));
     return next;
   } catch {
     return base;
@@ -154,7 +164,7 @@ const DIFFICULTY_INFO: Record<'casual' | 'normal' | 'hard', { name: string; desc
 
 function readSettings(): GameSettings {
   try {
-    const raw = window.localStorage.getItem('helistrike:settings');
+    const raw = window.localStorage.getItem(STORAGE_KEYS.SETTINGS);
     if (!raw) return { ...DEFAULT_SETTINGS };
     return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<GameSettings>) };
   } catch {
@@ -173,7 +183,7 @@ function detectTouch() {
 
 function HeartIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-7 w-7 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false" className="h-7 w-7 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <path d="M8 5h6v4h4V5h6v4h4v8h-4v4h-4v4h-4v4h-4v-4H8v-4H4v-4H0V9h4V5h4Z" fill="#ef233c" />
       <path d="M8 7h5v3H8v3H5v-3h3V7Z" fill="#ff7b86" opacity="0.75" />
     </svg>
@@ -182,7 +192,7 @@ function HeartIcon() {
 
 function GasIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <path d="M7 4h14v24H5V8h2V4Z" fill="#2bd66f" />
       <path d="M10 8h8v5h-8V8Z" fill="#caffdb" />
       <path d="M21 8h4l3 4v10h-4v-8l-3-2V8Z" fill="#1a9f52" />
@@ -193,7 +203,7 @@ function GasIcon() {
 
 function CoinIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <circle cx="16" cy="16" r="12" fill="#ffd43b" />
       <circle cx="16" cy="16" r="8" fill="#f6b800" />
       <rect x="14" y="8" width="4" height="16" fill="#fff3a3" opacity="0.8" />
@@ -203,7 +213,7 @@ function CoinIcon() {
 
 function BulletIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-6 w-6">
+    <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false" className="h-6 w-6">
       <path d="M18 3h5v5h3v16h-3v5H9v-5H6V12h12V3Z" fill="#ffe66d" />
       <path d="M9 17h14v4H9v-4Z" fill="#ff4b35" />
       <path d="M18 7h3v5h-3V7Z" fill="#fff6ad" />
@@ -213,7 +223,7 @@ function BulletIcon() {
 
 function TargetIcon() {
   return (
-    <svg viewBox="0 0 32 32" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
+    <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false" className="h-6 w-6 drop-shadow-[0_2px_0_rgba(0,0,0,0.45)]">
       <circle cx="16" cy="16" r="12" fill="none" stroke="#ff3344" strokeWidth="2.5" />
       <circle cx="16" cy="16" r="5" fill="#ff3344" />
       <rect x="15" y="2" width="2" height="6" fill="#ff3344" />
@@ -224,12 +234,18 @@ function TargetIcon() {
   );
 }
 
-function KeyCap({ children }: { children: ReactNode }) {
+const KeyCap = React.memo(function KeyCap({ children }: { children: ReactNode }) {
   return (
     <span className="rounded-[4px] border border-white/30 bg-white/14 px-2 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-white shadow-[0_2px_0_rgba(0,0,0,0.25)]">
       {children}
     </span>
   );
+});
+
+function formatDistance(meters: number): string {
+  if (!Number.isFinite(meters) || meters <= 0) return '0 M';
+  if (meters < 1000) return `${Math.round(meters)} M`;
+  return `${(meters / 1000).toFixed(2)} KM`;
 }
 
 const CONTROL_HINTS: { keys: string; label: string }[] = [
@@ -243,7 +259,7 @@ const CONTROL_HINTS: { keys: string; label: string }[] = [
 
 /** Contextual onboarding: a short fading hint sequence after each run starts.
  *  Replaces the old always-on control bar — hints never persist during combat. */
-function ControlHints({ runId }: { runId: number }) {
+const ControlHints = React.memo(function ControlHints({ runId }: { runId: number }) {
   const [idx, setIdx] = useState(0);
   const [visible, setVisible] = useState(false);
 
@@ -291,15 +307,15 @@ function ControlHints({ runId }: { runId: number }) {
       </div>
     </div>
   );
-}
+});
 
-function Meter({ value, color }: { value: number; color: string }) {
+const Meter = React.memo(function Meter({ value, color }: { value: number; color: string }) {
   return (
     <div className="h-3 w-20 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-32">
       <div className={`h-full ${color} transition-[width] duration-300`} style={{ width: `${clampPercent(value)}%` }} />
     </div>
   );
-}
+});
 
 // --- Tactical minimap ------------------------------------------------------
 // A north-up radar fed by the engine's ~12 Hz `helistrike:minimap` snapshot.
@@ -312,27 +328,27 @@ function drawMinimap(
 ) {
   const W = canvas.width;
   const H = canvas.height;
-  const R = Math.min(W, H) / 2 - 20;
+  const R = Math.min(W, H) / 2 - 8;
   const cx = W / 2;
   const cy = H / 2;
   const t = performance.now() / 1000;
 
   ctx.clearRect(0, 0, W, H);
 
-  // Circular radar disc (military round-screen look, khaki ring + N marker)
+  // Circular radar disc (military round-screen look)
   ctx.beginPath();
-  ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(6, 13, 24, 0.82)';
+  ctx.arc(cx, cy, R + 4, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(10, 16, 12, 0.94)';
   ctx.fill();
 
   // Grid rings + cross
-  ctx.strokeStyle = 'rgba(120, 190, 255, 0.11)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(80, 235, 255, 0.12)';
+  ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
-  ctx.arc(cx, cy, R * 0.55, 0, Math.PI * 2);
+  ctx.arc(cx, cy, R * 0.5, 0, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
   ctx.moveTo(cx - R, cy);
@@ -748,28 +764,28 @@ function drawMinimap(
 
   ctx.restore(); // end circular clip
 
-  // Neon cyan bezel ring + compass tick
+  // Tactical radar bezel ring + compass tick
   ctx.beginPath();
-  ctx.arc(cx, cy, R + 10, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(80, 235, 255, 0.75)';
-  ctx.lineWidth = 2.5;
+  ctx.arc(cx, cy, R + 3, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(80, 235, 255, 0.7)';
+  ctx.lineWidth = 2;
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(80, 235, 255, 0.5)';
+  ctx.strokeStyle = 'rgba(80, 235, 255, 0.35)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.arc(cx, cy, R + 14, 0, Math.PI * 2);
+  ctx.arc(cx, cy, R + 6, 0, Math.PI * 2);
   ctx.stroke();
   ctx.strokeStyle = 'rgba(125, 249, 255, 0.9)';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(cx - 4, cy - R - 4);
-  ctx.lineTo(cx + 4, cy - R - 4);
+  ctx.moveTo(cx - 4, cy - R - 1);
+  ctx.lineTo(cx + 4, cy - R - 1);
   ctx.stroke();
   ctx.fillStyle = 'rgba(125, 249, 255, 0.95)';
-  ctx.font = '9px "Press Start 2P", system-ui, sans-serif';
+  ctx.font = '700 11px Oxanium, "Chakra Petch", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('N', cx, cy - R - 15);
+  ctx.fillText('N', cx, cy - R - 8);
 }
 
 function MinimapPanel() {
@@ -802,60 +818,65 @@ function MinimapPanel() {
     <div className="pointer-events-none">
       <canvas
         ref={canvasRef}
-        width={360}
-        height={360}
+        width={380}
+        height={380}
         className="block"
-        style={{ width: 'min(150px, 24vw)', height: 'min(150px, 24vw)' }}
+        style={{ width: 'clamp(165px, 14vw, 215px)', height: 'clamp(165px, 14vw, 215px)' }}
         aria-label="Tactical minimap"
       />
     </div>
   );
 }
 
-function MenuButton({
+const MenuButton = React.memo(function MenuButton({
   children,
   onClick,
   secondary,
+  danger,
   size = 'md',
 }: {
   children: ReactNode;
   onClick: () => void;
   secondary?: boolean;
-  size?: 'md' | 'sm';
+  danger?: boolean;
+  size?: 'md' | 'sm' | 'lg';
 }) {
   const sizing =
     size === 'sm'
-      ? 'h-11 min-w-32 px-3 text-[11px] tracking-[0.1em] sm:flex-1 sm:min-w-0'
-      : 'h-12 min-w-44 px-6 text-sm tracking-[0.14em]';
+      ? 'mil-btn-sm min-w-28 sm:flex-1 sm:min-w-0'
+      : size === 'lg'
+        ? 'mil-btn-lg min-w-56'
+        : 'min-w-44';
+  const variant = danger
+    ? 'mil-btn-danger'
+    : secondary
+      ? 'mil-btn-secondary'
+      : 'mil-btn-primary';
   return (
     <button
-      className={`pointer-events-auto rounded-none border font-black uppercase transition hover:-translate-y-0.5 active:translate-y-1 ${sizing} ${
-        secondary
-          ? 'border-[#50ebff]/50 bg-[#101a4a]/95 text-[#9bf1ff]/95 shadow-[0_4px_0_rgba(0,0,0,0.5),0_10px_18px_rgba(0,0,0,0.35),inset_0_0_16px_rgba(80,235,255,0.08)] hover:bg-[#16205c] active:shadow-[0_2px_0_rgba(0,0,0,0.5),0_6px_12px_rgba(0,0,0,0.3)]'
-          : 'border-[#7df9ff]/90 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_4px_0_#06505f,0_10px_18px_rgba(0,0,0,0.35),0_0_16px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4] hover:shadow-[0_4px_0_#06505f,0_10px_18px_rgba(0,0,0,0.35),0_0_24px_rgba(80,235,255,0.6)] active:shadow-[0_2px_0_#06505f,0_6px_12px_rgba(0,0,0,0.3)]'
-      }`}
+      className={`pointer-events-auto mil-btn ${variant} ${sizing}`}
       onClick={onClick}
       type="button"
     >
       {children}
     </button>
   );
-}
+});
 
-function DifficultyChip({ difficulty }: { difficulty: GameSettings['difficulty'] }) {
+const DifficultyChip = React.memo(function DifficultyChip({ difficulty }: { difficulty: GameSettings['difficulty'] }) {
   const info = DIFFICULTY_INFO[difficulty];
   const tone =
     difficulty === 'casual'
-      ? 'border-[#55f2a2]/60 text-[#8df5c8]'
+      ? 'border-[#58a72b] text-[#7de04a] bg-[#1a2e10]'
       : difficulty === 'hard'
-        ? 'border-[#ff3344]/60 text-[#ff9aa4]'
-        : 'border-[#ffd35c]/60 text-[#ffe392]';
+        ? 'border-[#d32f2f] text-[#ff6666] bg-[#3a0d0d]'
+        : 'border-[#f5ba2c] text-[#ffd766] bg-[#332205]';
   return (
-    <span className={`border bg-black/30 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] ${tone}`}>
+    <span className={`border px-2 py-0.5 text-[10px] font-military tracking-[0.14em] rounded-[2px] shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)] ${tone}`}>
       {info.name}
     </span>
   );
-}
+});
 
 function ThreeDMenu({
   mode,
@@ -896,8 +917,6 @@ function ThreeDMenu({
   const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
   const [showDetails, setShowDetails] = useState(false);
 
-  // C7: shareable scorecard — latest run to the clipboard, with a visible
-  // non-blocking error when the browser refuses clipboard access.
   const copyScorecard = async () => {
     const latest = history[0];
     if (!latest) return;
@@ -912,190 +931,239 @@ function ThreeDMenu({
 
   const runRewards = (stats?.combatPay ?? 0) + (stats?.achievementCredits ?? 0);
 
+  const calcGrade = (s?: RunStats | null, sc: number = 0) => {
+    const w = s?.wave ?? wave;
+    const acc = s?.accuracy ?? 0;
+    const ext = s?.status === 'EXTRACTED';
+    if (ext && (w >= 6 || sc >= 20000) && acc >= 0.45) return { rank: 'S+', title: 'ACE COMMANDER', color: '#ffd700', border: 'border-[#ffcc00]', bg: 'bg-[#332205]' };
+    if ((w >= 4 || sc >= 10000) && acc >= 0.35) return { rank: 'A', title: 'DISTINGUISHED', color: '#8df578', border: 'border-[#58a72b]', bg: 'bg-[#102e14]' };
+    if (w >= 2 || sc >= 4000) return { rank: 'B', title: 'COMBAT QUALIFIED', color: '#50ebff', border: 'border-[#00e5ff]', bg: 'bg-[#082533]' };
+    return { rank: 'C', title: 'TRAINING GRADE', color: '#ffa726', border: 'border-[#ff7700]', bg: 'bg-[#2b1404]' };
+  };
+  const missionGrade = isGameOver ? calcGrade(stats, score) : null;
+
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/60 px-3 py-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/75 px-3 py-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           {!isGameOver ? (
             <div className="menu-card">
-              <div className="menu-title-slab">
-                <span>Heli-Strike</span>
-              </div>
-              <div className="mt-2 text-center text-[10px] font-black uppercase tracking-[0.26em] text-[#9bf1ff]/70">
-                Urban gunship · endless waves
+              <span className="mil-rivet mil-rivet-tl" />
+              <span className="mil-rivet mil-rivet-tr" />
+              <span className="mil-rivet mil-rivet-bl" />
+              <span className="mil-rivet mil-rivet-br" />
+
+              <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+              <div className="menu-title-slab text-center">
+                <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.26em] text-[#ffcc00] text-center w-full">
+                  <span>★</span>
+                  <span className="text-[#c2b697]">TACTICAL GUNSHIP CORPS</span>
+                  <span>★</span>
+                </div>
+                <h1 className="arcade-title-hero my-1.5 text-center w-full whitespace-nowrap">HELI-STRIKE</h1>
+                <div className="text-[10px] font-military tracking-[0.18em] text-[#a89d7c] text-center w-full">
+                  URBAN FIELD COMMAND · ENDLESS WAVES
+                </div>
               </div>
 
               <div className="mt-4 grid grid-cols-3 gap-2 text-center">
                 <div className="menu-stat">
-                  <span>Best</span>
+                  <span>HIGH SCORE</span>
                   <strong>{highScore.toLocaleString()}</strong>
                 </div>
                 <div className="menu-stat">
-                  <span>Credits</span>
-                  <strong>{credits.toLocaleString()}</strong>
+                  <span>CREDITS</span>
+                  <strong className="text-[#ffd700]">{credits.toLocaleString()}</strong>
                 </div>
                 <div className="menu-stat">
-                  <span>Last Wave</span>
+                  <span>LAST WAVE</span>
                   <strong>{wave || '—'}</strong>
                 </div>
               </div>
 
               {isNewPilot && (
-                <div className="mt-3 border border-[#55f2a2]/50 bg-[#0c3a2a]/45 px-3 py-1.5 text-center text-[10px] font-black uppercase tracking-[0.16em] text-[#8df5c8]">
-                  Starter credits granted — open the Hangar for your first upgrade
+                <div className="mt-3 mil-panel px-3 py-2 text-center text-[10px] font-bold uppercase tracking-[0.14em] text-[#9df578] border-[#58a72b]/60">
+                  ★ Starter credits granted — open Hangar to equip your first upgrade
                 </div>
               )}
 
               <div className="mt-5 flex flex-col items-center gap-3">
-                <MenuButton onClick={() => { onUiSound(); onStart(); }}>Start Run</MenuButton>
-                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-white/55">
-                  Difficulty <DifficultyChip difficulty={difficulty} />
-                  <span className="text-white/35">· change in Settings</span>
+                <MenuButton size="lg" onClick={() => { onUiSound(); onStart(); }}>
+                  DEPLOY HELICOPTER
+                </MenuButton>
+                <div className="flex items-center gap-2 text-[11px] font-military tracking-[0.14em] text-[#c2b697]">
+                  <span>THREAT RATING</span>
+                  <DifficultyChip difficulty={difficulty} />
                 </div>
-                <div className="flex flex-wrap justify-center gap-2.5">
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>Hangar</MenuButton>
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onSettings(); }}>Settings</MenuButton>
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHelp(); }}>How to Play</MenuButton>
+                <div className="flex flex-wrap justify-center gap-2.5 mt-1">
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>HANGAR & PERKS</MenuButton>
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onSettings(); }}>SETTINGS</MenuButton>
+                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHelp(); }}>FIELD MANUAL</MenuButton>
                 </div>
               </div>
 
-              <div className="mt-4 border-t border-white/12 pt-3 text-center">
-                <button
-                  type="button"
-                  onClick={() => { onUiSound(); onHelp(); }}
-                  className="text-[10px] font-black uppercase tracking-[0.2em] text-[#7df9ff]/85 underline-offset-2 transition hover:text-[#7df9ff] hover:underline"
-                >
-                  How to Play — Controls & Tips
-                </button>
-              </div>
+              <div className="mil-hazard-strip mt-5 rounded-[1px]" />
             </div>
           ) : (
             <div className="menu-card">
-              <div className="menu-title-slab">
-                <span>{stats?.status === 'EXTRACTED' ? 'Run Complete — Extracted' : 'Aircraft Destroyed'}</span>
+              <span className="mil-rivet mil-rivet-tl" />
+              <span className="mil-rivet mil-rivet-tr" />
+              <span className="mil-rivet mil-rivet-bl" />
+              <span className="mil-rivet mil-rivet-br" />
+
+              <div className={stats?.status === 'EXTRACTED' ? 'mil-hazard-strip rounded-[1px] mb-3' : 'mil-hazard-strip-danger rounded-[1px] mb-3'} />
+
+              <div className="menu-title-slab text-center">
+                <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00] text-center w-full">
+                  <span>★</span>
+                  <span>AFTER ACTION REPORT</span>
+                  <span>★</span>
+                </div>
+                <span className={`my-1 text-center w-full whitespace-nowrap ${stats?.status === 'EXTRACTED' ? 'arcade-title-lg arcade-title-success' : 'arcade-title-lg arcade-title-danger'}`}>
+                  {stats?.status === 'EXTRACTED' ? 'MISSION ACCOMPLISHED' : 'AIRCRAFT DESTROYED'}
+                </span>
+                <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center w-full">
+                  {stats?.status === 'EXTRACTED' ? 'TACTICAL EXTRACTION SUCCESSFUL' : 'HULL INTEGRITY COMPROMISED'}
+                </div>
               </div>
 
               {stats?.status === 'EXTRACTED' ? (
-                <div className="mt-3 border border-[#55f2a2]/55 bg-[#0c3a2a]/40 px-3 py-1.5 text-center text-[11px] font-black uppercase tracking-[0.18em] text-[#8df5c8]">
-                  Clean extraction — all rewards secured
+                <div className="mt-3 border border-[#58a72b] bg-[#1a2e10] px-3 py-1.5 text-center text-[11px] font-military tracking-[0.14em] text-[#8df578]">
+                  ✔ CLEAN EXTRACTION — ALL COMBAT PAY & SALVAGE SECURED
                 </div>
               ) : stats?.causeOfDeath ? (
-                <div className="mt-3 border border-[#ff3344]/60 bg-[#4a0710]/45 px-3 py-1.5 text-center">
-                  <span className="text-[10px] font-black uppercase tracking-[0.24em] text-white/55">Destroyed by · </span>
-                  <span className="text-sm font-black uppercase tracking-[0.12em] text-[#ff8b96]">{stats.causeOfDeath}</span>
+                <div className="mt-3 border border-[#b71c1c] bg-[#3a0d0d] px-3 py-1.5 text-center">
+                  <span className="text-[10px] font-military tracking-[0.2em] text-[#ff8a8a]">DESTROYED BY: </span>
+                  <span className="text-xs font-military tracking-[0.12em] text-[#ffffff]">{stats.causeOfDeath}</span>
                 </div>
               ) : null}
 
-              <div className="mt-4 text-center">
-                <div className="text-[9px] font-black uppercase tracking-[0.28em] text-white/50">Final Score</div>
-                <div className="font-display mt-1.5 text-4xl text-[#ffe66d] drop-shadow-[0_3px_0_rgba(0,0,0,0.55),0_0_18px_rgba(255,230,109,0.35)]">{score.toLocaleString()}</div>
+              <div className="mt-3 flex items-center justify-center gap-3">
+                <div className="flex-1 text-center">
+                  <div className="mil-label">FINAL SCORE</div>
+                  <div className="arcade-title-lg my-0.5 text-[#ffcc00]">{score.toLocaleString()}</div>
+                </div>
+                {missionGrade && (
+                  <div className={`px-3 py-1.5 rounded-[2px] border ${missionGrade.border} ${missionGrade.bg} flex flex-col items-center justify-center shadow-[0_0_12px_rgba(0,0,0,0.6)] min-w-[100px]`}>
+                    <span className="text-[9px] font-hud font-bold text-[#ded6be] tracking-wider leading-none">RANK</span>
+                    <span className="font-display text-2xl font-black leading-none drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] mt-0.5" style={{ color: missionGrade.color }}>
+                      {missionGrade.rank}
+                    </span>
+                    <span className="text-[8px] font-military tracking-wider text-[#a89d7c] mt-0.5 whitespace-nowrap">
+                      {missionGrade.title}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {isNewBest && (
-                <div className="mt-2 border border-[#ff4fd8]/80 bg-[#ff4fd8]/15 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-[#ff9bf0] shadow-[0_3px_0_rgba(0,0,0,0.35),0_0_18px_rgba(255,77,216,0.35)]">
-                  ★ New Personal Best ★
+                <div className="mt-1 border border-[#ffcc00] bg-[#3d2f05] px-4 py-1.5 text-center text-xs font-military tracking-[0.16em] text-[#ffea80] shadow-[0_0_12px_rgba(255,204,0,0.3)]">
+                  ★ NEW PERSONAL RECORD ★
                 </div>
               )}
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-center">
                 <div className="menu-stat">
-                  <span>Wave</span>
+                  <span>WAVE</span>
                   <strong>{stats?.wave ?? wave}</strong>
                 </div>
                 <div className="menu-stat">
-                  <span>Time</span>
+                  <span>COMBAT TIME</span>
                   <strong>{formatDuration(stats?.time ?? 0)}</strong>
                 </div>
                 <div className="menu-stat">
-                  <span>Kills</span>
+                  <span>HOSTILES DOWN</span>
                   <strong>{stats?.kills ?? 0}</strong>
                 </div>
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2 text-center">
                 <div className="menu-stat">
-                  <span>Credits</span>
-                  <strong>{(stats?.credits ?? credits).toLocaleString()}</strong>
+                  <span>CREDITS</span>
+                  <strong className="text-[#ffd700]">{(stats?.credits ?? credits).toLocaleString()}</strong>
                 </div>
                 <div className="menu-stat">
-                  <span>Accuracy</span>
+                  <span>ACCURACY</span>
                   <strong>{Math.round((stats?.accuracy ?? 0) * 100)}%</strong>
                 </div>
               </div>
 
               {stats && runRewards > 0 && (
-                <div className="mt-3 border border-[#ffe66d]/40 bg-[#3d2f05]/35 px-3 py-2">
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.2em] text-[#ffe66d]">
-                    <span>Run Rewards</span>
+                <div className="mt-3 mil-panel px-3 py-2">
+                  <div className="flex items-center justify-between text-[11px] font-military tracking-[0.18em] text-[#ffcc00]">
+                    <span>RUN REWARDS</span>
                     <span>+{runRewards} CR</span>
                   </div>
-                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-bold uppercase tracking-wider text-white/65">
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-bold uppercase tracking-wider text-[#ded6be]">
                     <span>Combat pay +{stats.combatPay ?? 0}</span>
                     {(stats.achievementLabels ?? []).map((a) => (
-                      <span key={a} className="text-[#8df5c8]">★ {a}</span>
+                      <span key={a} className="text-[#8df578]">★ {a}</span>
                     ))}
                   </div>
                 </div>
               )}
 
               <div className="mt-4 flex justify-center">
-                <MenuButton onClick={() => { onUiSound(); onStart(); }}>Restart (Enter)</MenuButton>
+                <MenuButton size="lg" onClick={() => { onUiSound(); onStart(); }}>REDEPLOY (ENTER)</MenuButton>
               </div>
               <div className="mt-2.5 flex flex-wrap justify-center gap-2.5">
-                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>Hangar</MenuButton>
-                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onMenu(); }}>Main Menu</MenuButton>
+                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>HANGAR</MenuButton>
+                <MenuButton size="sm" secondary onClick={() => { onUiSound(); onMenu(); }}>MAIN MENU</MenuButton>
               </div>
 
               <button
                 type="button"
                 onClick={() => { onUiSound(); setShowDetails((v) => !v); }}
                 aria-expanded={showDetails}
-                className="mt-4 w-full border border-white/15 bg-black/25 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-white/65 transition hover:border-[#50ebff]/50 hover:text-[#9bf1ff]"
+                className="mt-3 w-full mil-btn mil-btn-secondary py-1 text-[10px] tracking-[0.18em]"
               >
-                {showDetails ? 'Hide Detailed Statistics ▲' : 'Detailed Statistics ▼'}
+                {showDetails ? '▲ HIDE COMBAT LOG' : '▼ COMBAT LOG & STATS'}
               </button>
 
               {showDetails && stats && (
                 <div className="mt-2">
                   <div className="grid grid-cols-3 gap-1.5 text-center sm:grid-cols-4">
-                    <div className="run-stat"><span>Kills</span><strong>{stats.kills}</strong></div>
-                    <div className="run-stat"><span>Accuracy</span><strong>{Math.round(stats.accuracy * 100)}%</strong></div>
-                    <div className="run-stat"><span>Max Combo</span><strong>{stats.maxCombo}x</strong></div>
-                    <div className="run-stat"><span>Threat</span><strong>{stats.threatLevel ?? 1}</strong></div>
-                    <div className="run-stat"><span>Deliveries</span><strong>{stats.deliveries ?? 0}</strong></div>
-                    <div className="run-stat"><span>SAM Sites</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
-                    <div className="run-stat"><span>Radar</span><strong>{stats.radarSitesDestroyed ?? 0}</strong></div>
-                    <div className="run-stat"><span>Bosses</span><strong>{stats.bossesDestroyed ?? 0}</strong></div>
-                    <div className="run-stat"><span>Missions</span><strong>{stats.missionsCompleted ?? 0}</strong></div>
-                    <div className="run-stat"><span>Bonuses</span><strong>{stats.missionBonusesCompleted ?? 0}</strong></div>
-                    <div className="run-stat"><span>Salvage</span><strong>{stats.salvage ?? 0}</strong></div>
+                    <div className="run-stat"><span>KILLS</span><strong>{stats.kills}</strong></div>
+                    <div className="run-stat"><span>ACCURACY</span><strong>{Math.round(stats.accuracy * 100)}%</strong></div>
+                    <div className="run-stat"><span>MAX COMBO</span><strong>{stats.maxCombo}x</strong></div>
+                    <div className="run-stat"><span>THREAT</span><strong>{stats.threatLevel ?? 1}</strong></div>
+                    <div className="run-stat"><span>CARGO</span><strong>{stats.deliveries ?? 0}</strong></div>
+                    <div className="run-stat"><span>SAM SITES</span><strong>{stats.samSitesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>RADARS</span><strong>{stats.radarSitesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>BOSSES</span><strong>{stats.bossesDestroyed ?? 0}</strong></div>
+                    <div className="run-stat"><span>MISSIONS</span><strong>{stats.missionsCompleted ?? 0}</strong></div>
+                    <div className="run-stat"><span>BONUSES</span><strong>{stats.missionBonusesCompleted ?? 0}</strong></div>
+                    <div className="run-stat"><span>SALVAGE</span><strong>{stats.salvage ?? 0}</strong></div>
                     <div className="run-stat">
-                      <span>{stats.status === 'EXTRACTED' ? 'Bonus Secured' : 'Bonus Lost'}</span>
-                      <strong>{stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR</strong>
+                      <span>{stats.status === 'EXTRACTED' ? 'BONUS GAIN' : 'BONUS LOST'}</span>
+                      <strong className={stats.status === 'EXTRACTED' ? 'text-[#8df578]' : 'text-[#ff6666]'}>
+                        {stats.status === 'EXTRACTED' ? stats.securedThreatBonus ?? 0 : stats.lostUnsecured ?? 0} CR
+                      </strong>
                     </div>
                   </div>
 
                   {history.length > 0 && (
-                    <div className="mt-2 border border-white/15 bg-black/25 px-3 py-2">
+                    <div className="mt-2 mil-panel px-3 py-2">
                       <div className="mb-1.5 flex items-center justify-between gap-2">
-                        <span className="text-[9px] font-black uppercase tracking-[0.24em] text-white/50">Recent Runs</span>
+                        <span className="mil-label">RECENT FLIGHT RECORDS</span>
                         <button
                           type="button"
                           onClick={copyScorecard}
-                          className="border border-[#50ebff]/60 bg-[#50ebff]/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.18em] text-[#9bf1ff] transition hover:bg-[#50ebff]/25"
+                          className="mil-btn mil-btn-secondary mil-btn-sm py-0.5 text-[9px]"
                         >
-                          {copied === 'ok' ? 'Copied!' : 'Copy Scorecard'}
+                          {copied === 'ok' ? 'COPIED!' : 'COPY SCORECARD'}
                         </button>
                       </div>
                       {copied === 'err' && (
-                        <div role="status" className="mb-1 text-[9px] font-bold uppercase tracking-wider text-[#ff9aa4]">
-                          Clipboard unavailable — the browser blocked the copy
+                        <div role="status" className="mb-1 text-[9px] font-military tracking-wider text-[#ff8a8a]">
+                          Clipboard blocked by browser
                         </div>
                       )}
                       <div className="grid grid-cols-1 gap-1">
                         {history.slice(0, 5).map((run) => (
-                          <div key={run.at} className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
-                            <span className={run.victory ? 'text-[#55f2c2]' : 'text-white/55'}>{run.victory ? '✔ EXT' : '✖ KIA'}</span>
-                            <span className="text-[#ffe66d]">{run.score.toLocaleString()}</span>
+                          <div key={run.at} className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[#ded6be]">
+                            <span className={run.victory ? 'text-[#8df578]' : 'text-[#ff6666]'}>{run.victory ? '✔ EXT' : '✖ KIA'}</span>
+                            <span className="text-[#ffcc00] font-mono">{run.score.toLocaleString()}</span>
                             <span>W{run.wave}</span>
                             <span>{run.kills} K</span>
                             <span>{Math.round(run.accuracy * 100)}%</span>
@@ -1107,6 +1175,8 @@ function ThreeDMenu({
                   )}
                 </div>
               )}
+
+              <div className="mil-hazard-strip mt-3 rounded-[1px]" />
             </div>
           )}
         </div>
@@ -1131,42 +1201,67 @@ const HOW_TO_PLAY_CONTROLS: { keys: string; label: string }[] = [
 
 function HowToPlayScreen({ touchDevice, onClose }: { touchDevice: boolean; onClose: () => void }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-3 py-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#0d0f0a]/80 px-3 py-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig">
           <div className="menu-card max-h-[86vh] w-[min(560px,calc(100vw-24px))] overflow-y-auto">
-            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
-              How to Play
+            <span className="mil-rivet mil-rivet-tl" />
+            <span className="mil-rivet mil-rivet-tr" />
+            <span className="mil-rivet mil-rivet-bl" />
+            <span className="mil-rivet mil-rivet-br" />
+
+            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+            <div className="menu-title-slab">
+              <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
+                <span>★</span>
+                <span>TACTICAL BRIEFING</span>
+                <span>★</span>
+              </div>
+              <h2 className="arcade-title-lg my-0.5 text-center">FIELD MANUAL</h2>
+              <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center">
+                FLIGHT SYSTEMS & COMBAT DOCTRINE
+              </div>
             </div>
 
-            <div className="mt-4 text-[10px] font-black uppercase tracking-[0.24em] text-[#ffd35c]">Flight Controls</div>
+            <div className="mt-4 setting-section-header">
+              <span>🕹</span>
+              <span>FLIGHT & COMBAT CONTROLS</span>
+              <span>🕹</span>
+            </div>
             <div className="mt-2 flex flex-col gap-1.5">
               {HOW_TO_PLAY_CONTROLS.map((c) => (
-                <div key={c.keys} className="flex items-center gap-3 border border-white/12 bg-black/25 px-3 py-1.5">
+                <div key={c.keys} className="flex items-center justify-between gap-3 mil-panel px-3 py-2">
                   <KeyCap>{c.keys}</KeyCap>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-white/85">{c.label}</span>
+                  <span className="text-[11px] font-military tracking-wider text-[#ded6be] text-right">{c.label}</span>
                 </div>
               ))}
             </div>
 
             {touchDevice && (
-              <div className="mt-2 border border-[#50ebff]/35 bg-[#101a4a]/80 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[#9bf1ff]">
+              <div className="mt-3 mil-panel px-3 py-2 text-center text-[11px] font-military tracking-wider text-[#ffcc00] border-[#f5ba2c]/60">
                 Touch: left stick moves · right stick aims · FIRE button shoots · on-screen Flares & Super buttons
               </div>
             )}
 
-            <div className="mt-4 text-[10px] font-black uppercase tracking-[0.24em] text-[#ffd35c]">Survival Basics</div>
-            <ul className="mt-2 flex flex-col gap-1 text-[11px] font-semibold leading-relaxed text-white/80">
-              <li>· Enemies attack in waves — the opening countdown is completely safe.</li>
-              <li>· Watch Hull and Fuel: fuel pickups keep you airborne, depots repair and rearm you.</li>
-              <li>· Earned credits stay unsecured until you extract — dying drops them.</li>
-              <li>· Destroy SAM sites before they lock on; flares break active missile locks.</li>
-              <li>· Spend credits in the Hangar on permanent systems, pilot perks and weapon mods.</li>
+            <div className="mt-4 setting-section-header">
+              <span>🛡</span>
+              <span>TACTICAL SURVIVAL DOCTRINE</span>
+              <span>🛡</span>
+            </div>
+            <ul className="mt-2 flex flex-col gap-1.5 text-[11px] font-semibold leading-relaxed text-[#c2b697]">
+              <li className="mil-panel px-3 py-2 text-center">Enemies attack in waves — the opening countdown is safe.</li>
+              <li className="mil-panel px-3 py-2 text-center">Watch Hull & Fuel: fuel pickups restore energy; depots rearm/repair.</li>
+              <li className="mil-panel px-3 py-2 text-center">Combat pay stays unsecured until extraction — dying forfeits it.</li>
+              <li className="mil-panel px-3 py-2 text-center">SAMs lock on from distance — deploy flares (C) to break missile locks.</li>
+              <li className="mil-panel px-3 py-2 text-center">Reinvest combat credits in the Hangar for permanent hull and weapon systems.</li>
             </ul>
 
             <div className="mt-5 flex justify-center">
-              <MenuButton onClick={onClose}>Back</MenuButton>
+              <MenuButton onClick={onClose}>RETURN TO COMMAND</MenuButton>
             </div>
+
+            <div className="mil-hazard-strip mt-4 rounded-[1px]" />
           </div>
         </div>
       </div>
@@ -1176,13 +1271,13 @@ function HowToPlayScreen({ touchDevice, onClose }: { touchDevice: boolean; onClo
 
 function VirtualJoystick({ side, onStick }: { side: 'left' | 'right'; onStick: (v: StickPayload) => void }) {
   const baseRef = useRef<HTMLDivElement>(null);
+  const rectRef = useRef<DOMRect | null>(null);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
 
   const handleMove = (clientX: number, clientY: number) => {
-    const base = baseRef.current;
-    if (!base) return;
-    const rect = base.getBoundingClientRect();
+    const rect = rectRef.current;
+    if (!rect) return;
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
     let dx = clientX - cx;
@@ -1199,6 +1294,7 @@ function VirtualJoystick({ side, onStick }: { side: 'left' | 'right'; onStick: (
 
   const reset = () => {
     setActiveId(null);
+    rectRef.current = null;
     setKnob({ x: 0, y: 0 });
     onStick({ x: 0, y: 0, active: false });
   };
@@ -1210,6 +1306,7 @@ function VirtualJoystick({ side, onStick }: { side: 'left' | 'right'; onStick: (
       onPointerDown={(e) => {
         e.preventDefault();
         baseRef.current?.setPointerCapture?.(e.pointerId);
+        rectRef.current = baseRef.current?.getBoundingClientRect() ?? null;
         setActiveId(e.pointerId);
         handleMove(e.clientX, e.clientY);
       }}
@@ -1257,22 +1354,37 @@ function PauseOverlay({
   onQuit: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/65 px-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/80 px-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig">
-          <div className="menu-card w-[min(400px,calc(100vw-32px))] text-center">
-            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-2xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
-              Paused
+          <div className="menu-card w-[min(420px,calc(100vw-32px))] text-center">
+            <span className="mil-rivet mil-rivet-tl" />
+            <span className="mil-rivet mil-rivet-tr" />
+            <span className="mil-rivet mil-rivet-bl" />
+            <span className="mil-rivet mil-rivet-br" />
+
+            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+            <div className="menu-title-slab">
+              <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
+                <span>★</span>
+                <span>COMBAT HALTED</span>
+                <span>★</span>
+              </div>
+              <h2 className="arcade-title-lg my-0.5 text-center">TACTICAL PAUSE</h2>
+              <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center">
+                ESC / P TO RESUME ENGAGEMENT
+              </div>
             </div>
-            <div className="mt-2 text-xs font-black uppercase tracking-[0.18em] text-[#9bf1ff]/80">
-              Esc to Resume
-            </div>
+
             <div className="mt-6 flex flex-col items-center gap-3">
-              <MenuButton onClick={onResume}>Resume</MenuButton>
-              <MenuButton secondary onClick={onRestart}>Restart</MenuButton>
-              <MenuButton secondary onClick={onSettings}>Settings</MenuButton>
-              <MenuButton secondary onClick={onQuit}>Quit to Menu</MenuButton>
+              <MenuButton size="lg" onClick={onResume}>RESUME RUN</MenuButton>
+              <MenuButton secondary onClick={onRestart}>RESTART WAVE</MenuButton>
+              <MenuButton secondary onClick={onSettings}>SYSTEM SETTINGS</MenuButton>
+              <MenuButton secondary onClick={onQuit}>ABORT TO MENU</MenuButton>
             </div>
+
+            <div className="mil-hazard-strip mt-5 rounded-[1px]" />
           </div>
         </div>
       </div>
@@ -1280,7 +1392,7 @@ function PauseOverlay({
   );
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+const Toggle = React.memo(function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
       type="button"
@@ -1291,7 +1403,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       <span className="toggle-knob" />
     </button>
   );
-}
+});
 
 function SettingsPanel({
   settings,
@@ -1308,24 +1420,43 @@ function SettingsPanel({
 }) {
   const [confirmReset, setConfirmReset] = useState(false);
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#050a26]/70 px-3 py-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#0d0f0a]/80 px-3 py-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig">
-          <div className="menu-card max-h-[88vh] w-[min(480px,calc(100vw-24px))] overflow-y-auto">
-            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
-              Settings
-            </div>
-            <div className="mt-1 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/45">
-              Changes save automatically and apply instantly
+          <div className="menu-card max-h-[88vh] w-[min(560px,calc(100vw-24px))] overflow-y-auto">
+            <span className="mil-rivet mil-rivet-tl" />
+            <span className="mil-rivet mil-rivet-tr" />
+            <span className="mil-rivet mil-rivet-bl" />
+            <span className="mil-rivet mil-rivet-br" />
+
+            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+            <div className="menu-title-slab">
+              <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
+                <span>★</span>
+                <span>SWITCHBOARD INTERFACE</span>
+                <span>★</span>
+              </div>
+              <h2 className="arcade-title-lg my-0.5 text-center">SYSTEM CONFIG</h2>
+              <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center">
+                REAL-TIME HARDWARE & AUDIO TUNING
+              </div>
             </div>
 
-            <div className="mt-5 flex flex-col gap-5">
+            <div className="mt-4 flex flex-col gap-3">
+              {/* ── Section: Threat & Difficulty ── */}
+              <div className="setting-section-header">
+                <span>⚔</span>
+                <span>THREAT & COMBAT PARAMETERS</span>
+                <span>⚔</span>
+              </div>
+
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Difficulty</div>
+                  <div className="setting-label">THREAT RATING</div>
                   <div className="setting-desc">{DIFFICULTY_INFO[settings.difficulty].desc}</div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-1.5">
                   {(['casual', 'normal', 'hard'] as const).map((d) => (
                     <button
                       key={d}
@@ -1340,12 +1471,19 @@ function SettingsPanel({
                 </div>
               </div>
 
+              {/* ── Section: Flight & Controls ── */}
+              <div className="setting-section-header">
+                <span>🕹</span>
+                <span>FLIGHT & TARGETING AVIONICS</span>
+                <span>🕹</span>
+              </div>
+
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Movement Preset</div>
-                  <div className="setting-desc">Arcade = instant response · Simulation = weighty inertia on the flight stick</div>
+                  <div className="setting-label">FLIGHT HANDLING</div>
+                  <div className="setting-desc">Arcade = instant stick response · Simulation = realistic inertia</div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-1.5">
                   {(['arcade', 'simulation'] as const).map((m) => (
                     <button
                       key={m}
@@ -1354,7 +1492,7 @@ function SettingsPanel({
                       aria-pressed={settings.movement === m}
                       className={`seg-btn ${settings.movement === m ? 'seg-on' : ''}`}
                     >
-                      {m === 'arcade' ? 'Arcade' : 'Simulation'}
+                      {m === 'arcade' ? 'Arcade' : 'Sim'}
                     </button>
                   ))}
                 </div>
@@ -1362,24 +1500,24 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Invert Y-Axis</div>
-                  <div className="setting-desc">Flips gamepad / touch aim direction</div>
+                  <div className="setting-label">INVERT Y-AXIS</div>
+                  <div className="setting-desc">Inverts pitch & gamepad aim direction</div>
                 </div>
                 <Toggle checked={settings.invertedY} onChange={(v) => { onUiSound(); onChange({ invertedY: v }); }} />
               </div>
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Auto-Aim</div>
-                  <div className="setting-desc">Locks guns onto the nearest enemy — the gun turret tracks the target while the helicopter flies on course</div>
+                  <div className="setting-label">AUTO-AIM ASSIST</div>
+                  <div className="setting-desc">Turret automatically tracks nearest hostile target</div>
                 </div>
                 <Toggle checked={settings.autoAim} onChange={(v) => { onUiSound(); onChange({ autoAim: v }); }} />
               </div>
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Stick Sensitivity</div>
-                  <div className="setting-desc">Gamepad & touch movement speed</div>
+                  <div className="setting-label">STICK SENSITIVITY</div>
+                  <div className="setting-desc">Gamepad & touch response multiplier</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="setting-value">{settings.gamepadSensitivity.toFixed(1)}x</span>
@@ -1390,18 +1528,25 @@ function SettingsPanel({
                     step={0.1}
                     value={settings.gamepadSensitivity}
                     onChange={(e) => onChange({ gamepadSensitivity: Number(e.target.value) })}
-                    className="slider-arcade w-32"
+                    className="slider-arcade w-28"
                     aria-label="Stick sensitivity"
                   />
                 </div>
               </div>
 
+              {/* ── Section: Graphics & Performance ── */}
+              <div className="setting-section-header">
+                <span>🖥</span>
+                <span>GRAPHICS & VISUAL ENGINE</span>
+                <span>🖥</span>
+              </div>
+
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Graphics Mode</div>
-                  <div className="setting-desc">SP1 = chunky low-res PS1-style pixels · HD = crisp full-resolution render with bloom & anti-aliasing</div>
+                  <div className="setting-label">GRAPHICS RENDER</div>
+                  <div className="setting-desc">SP1 = retro low-res pixels · HD = sharp high-fidelity lighting</div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-1.5">
                   {(['sp1', 'hd'] as const).map((g) => (
                     <button
                       key={g}
@@ -1418,18 +1563,18 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Adaptive Quality</div>
-                  <div className="setting-desc">Automatically tunes effects to hold a smooth frame rate</div>
+                  <div className="setting-label">ADAPTIVE QUALITY</div>
+                  <div className="setting-desc">Dynamic LOD governor to maintain 60 FPS</div>
                 </div>
                 <Toggle checked={settings.adaptiveQuality} onChange={(v) => { onUiSound(); onChange({ adaptiveQuality: v }); }} />
               </div>
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Screen Shake</div>
-                  <div className="setting-desc">Camera impact feedback from explosions and damage</div>
+                  <div className="setting-label">SCREEN SHAKE</div>
+                  <div className="setting-desc">Explosion & ballistic impact feedback</div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-1.5">
                   {(['off', 'low', 'full'] as const).map((s) => (
                     <button
                       key={s}
@@ -1446,15 +1591,22 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Reduce Flashing</div>
-                  <div className="setting-desc">Softens hit flashes and bright screen effects</div>
+                  <div className="setting-label">REDUCE FLASHING</div>
+                  <div className="setting-desc">Softens high-intensity weapon flashes</div>
                 </div>
                 <Toggle checked={settings.reduceFlash} onChange={(v) => { onUiSound(); onChange({ reduceFlash: v }); }} />
               </div>
 
+              {/* ── Section: Audio Communications ── */}
+              <div className="setting-section-header">
+                <span>🔊</span>
+                <span>AUDIO COMMUNICATIONS & SFX</span>
+                <span>🔊</span>
+              </div>
+
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Master Volume</div>
+                  <div className="setting-label">MASTER AUDIO</div>
                   <div className="setting-desc">Overall loudness</div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1466,7 +1618,7 @@ function SettingsPanel({
                     step={0.05}
                     value={settings.volume}
                     onChange={(e) => onChange({ volume: Number(e.target.value) })}
-                    className="slider-arcade w-32"
+                    className="slider-arcade w-28"
                     aria-label="Master volume"
                   />
                 </div>
@@ -1474,8 +1626,8 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Music Volume</div>
-                  <div className="setting-desc">Combat soundtrack level</div>
+                  <div className="setting-label">COMBAT MUSIC</div>
+                  <div className="setting-desc">Soundtrack volume</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="setting-value">{Math.round(settings.musicVolume * 100)}%</span>
@@ -1486,7 +1638,7 @@ function SettingsPanel({
                     step={0.05}
                     value={settings.musicVolume}
                     onChange={(e) => onChange({ musicVolume: Number(e.target.value) })}
-                    className="slider-arcade w-32"
+                    className="slider-arcade w-28"
                     aria-label="Music volume"
                   />
                 </div>
@@ -1494,8 +1646,8 @@ function SettingsPanel({
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">SFX Volume</div>
-                  <div className="setting-desc">Weapons, explosions and interface sounds</div>
+                  <div className="setting-label">SFX WEAPONS</div>
+                  <div className="setting-desc">Gunfire & explosion sounds</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="setting-value">{Math.round(settings.sfxVolume * 100)}%</span>
@@ -1506,30 +1658,37 @@ function SettingsPanel({
                     step={0.05}
                     value={settings.sfxVolume}
                     onChange={(e) => onChange({ sfxVolume: Number(e.target.value) })}
-                    className="slider-arcade w-32"
+                    className="slider-arcade w-28"
                     aria-label="SFX volume"
                   />
                 </div>
               </div>
 
+              {/* ── Section: System & Diagnostics ── */}
+              <div className="setting-section-header">
+                <span>🔧</span>
+                <span>SYSTEM PROTOCOLS & RESET</span>
+                <span>🔧</span>
+              </div>
+
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Tutorial</div>
-                  <div className="setting-desc">Replay the first-run flight briefing from the start</div>
+                  <div className="setting-label">TACTICAL TUTORIAL</div>
+                  <div className="setting-desc">Replay initial flight briefing</div>
                 </div>
                 <button
                   type="button"
                   onClick={() => { onUiSound(); onReplayTutorial?.(); }}
                   className="seg-btn"
                 >
-                  Replay
+                  REPLAY
                 </button>
               </div>
 
               <div className="setting-row">
                 <div>
-                  <div className="setting-label">Reset Settings</div>
-                  <div className="setting-desc">Restores every option to its default value</div>
+                  <div className="setting-label">FACTORY RESET</div>
+                  <div className="setting-desc">Restore all parameters to factory defaults</div>
                 </div>
                 <button
                   type="button"
@@ -1543,16 +1702,18 @@ function SettingsPanel({
                       window.setTimeout(() => setConfirmReset(false), 3000);
                     }
                   }}
-                  className={`seg-btn ${confirmReset ? 'border-[#ff3344] text-[#ff8b96]' : ''}`}
+                  className={`seg-btn ${confirmReset ? 'border-[#d32f2f] text-[#ff6666]' : ''}`}
                 >
-                  {confirmReset ? 'Confirm?' : 'Reset'}
+                  {confirmReset ? 'CONFIRM?' : 'RESET'}
                 </button>
               </div>
             </div>
 
             <div className="mt-6 flex justify-center">
-              <MenuButton onClick={() => { onUiSound(); onClose(); }}>Done</MenuButton>
+              <MenuButton onClick={onClose}>SAVE & CLOSE</MenuButton>
             </div>
+
+            <div className="mil-hazard-strip mt-4 rounded-[1px]" />
           </div>
         </div>
       </div>
@@ -1573,7 +1734,7 @@ const HELICOPTER_MODEL_INFO: { id: HelicopterModel; name: string; desc: string; 
   { id: HelicopterModel.WARLOCK, name: 'Warlock', desc: 'Heavy gunship, big payload', color: '#3a4436', dark: '#242c2a' },
 ];
 
-function HelicopterCard({
+const HelicopterCard = React.memo(function HelicopterCard({
   name,
   desc,
   color,
@@ -1592,44 +1753,44 @@ function HelicopterCard({
     <button
       type="button"
       onClick={onSelect}
-      className={`group flex flex-col items-center gap-2 rounded-xl border-2 px-3 py-4 text-center transition hover:-translate-y-1 ${
+      className={`group flex flex-col items-center gap-2 mil-panel px-3 py-4 text-center transition hover:-translate-y-0.5 ${
         selected
-          ? 'border-[#7df9ff] bg-[#50ebff]/15 shadow-[0_8px_24px_rgba(80,235,255,0.3),0_0_16px_rgba(80,235,255,0.2)]'
-          : 'border-white/25 bg-[#101a4a]/95 hover:border-[#50ebff]/70'
+          ? 'border-[#ffcc00] shadow-[0_0_14px_rgba(255,204,0,0.35)]'
+          : 'hover:border-[#738a5e]'
       }`}
     >
-      {/* Stylized top-down helicopter silhouette preview */}
+      {/* Top-down helicopter silhouette preview */}
       <div className="relative h-14 w-28" style={{ perspective: '300px' }}>
-        <div className="absolute left-1/2 top-1/2 h-2 w-16 -translate-x-1/2 -translate-y-1/2 rounded-[3px]" style={{ background: '#161a18', transform: 'rotateX(70deg) rotateZ(-8deg)' }} />
+        <div className="absolute left-1/2 top-1/2 h-2 w-16 -translate-x-1/2 -translate-y-1/2 rounded-[2px]" style={{ background: '#161a18', transform: 'rotateX(70deg) rotateZ(-8deg)' }} />
         <div
-          className="absolute left-1/2 top-1/2 h-4 w-12 -translate-x-1/2 -translate-y-1/2 rounded-[4px] border border-white/30"
+          className="absolute left-1/2 top-1/2 h-4 w-12 -translate-x-1/2 -translate-y-1/2 rounded-[3px] border border-white/30"
           style={{ background: color, boxShadow: `0 4px 0 ${color}99` }}
         />
         <div className="absolute left-1/2 top-1/2 h-2 w-7 -translate-x-1/2 -translate-y-1/2 rounded-[2px]" style={{ background: dark }} />
       </div>
-      <span className={`text-sm font-black uppercase tracking-wider ${selected ? 'text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]' : 'text-white'}`}>
+      <span className={`text-sm font-military tracking-wider ${selected ? 'text-[#ffcc00]' : 'text-[#ded6be]'}`}>
         {name}
       </span>
-      <span className="text-[11px] font-semibold leading-snug text-white/75">{desc}</span>
+      <span className="text-[11px] font-semibold leading-snug text-[#a89d7c]">{desc}</span>
       <span
-        className={`mt-1 rounded-[4px] px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-          selected ? 'bg-[#22b8d8] text-[#04222b] shadow-[0_0_10px_rgba(80,235,255,0.5)]' : 'bg-white/10 text-white/60'
+        className={`mt-1 px-3 py-0.5 text-[10px] font-military tracking-wider rounded-[2px] ${
+          selected ? 'bg-[#ffcc00] text-[#1a1202] shadow-[0_0_8px_rgba(255,204,0,0.5)]' : 'mil-recessed text-[#a89d7c]'
         }`}
       >
-        {selected ? 'Selected' : 'Select'}
+        {selected ? 'ACTIVE CHASSIS' : 'EQUIP'}
       </span>
     </button>
   );
-}
+});
 
 type HangarTab = 'aircraft' | 'systems' | 'weapons' | 'mods' | 'perks';
 
 const HANGAR_TABS: { id: HangarTab; label: string }[] = [
-  { id: 'aircraft', label: 'Aircraft' },
-  { id: 'systems', label: 'Hull' },
-  { id: 'weapons', label: 'Mastery' },
-  { id: 'mods', label: 'Mods' },
-  { id: 'perks', label: 'Perks' },
+  { id: 'aircraft', label: 'AIRCRAFT' },
+  { id: 'systems', label: 'HULL SYSTEMS' },
+  { id: 'weapons', label: 'MASTERY' },
+  { id: 'mods', label: 'WEAPON MODS' },
+  { id: 'perks', label: 'PILOT PERKS' },
 ];
 
 /** Numeric current → next preview for each permanent system rank. */
@@ -1639,15 +1800,15 @@ function upgradePreview(id: HangarUpgradeId, rank: number): string {
     case 'armor': return `Hull ${100 + rank * 10} → ${100 + next * 10}`;
     case 'fuel': return `Fuel tank ${100 + rank * 4} → ${100 + next * 4}`;
     case 'engine': return `Fuel burn −${(rank * 2.4).toFixed(1)}% → −${(next * 2.4).toFixed(1)}%`;
-    case 'rotor': return `Vertical thrust +${(rank * 2.5).toFixed(1)}% → +${(next * 2.5).toFixed(1)}%`;
+    case 'rotor': return `Thrust +${(rank * 2.5).toFixed(1)}% → +${(next * 2.5).toFixed(1)}%`;
     case 'targeting': return `Aim range +${rank * 10}m → +${next * 10}m`;
     case 'weaponSystem': return `Ammo capacity +${(rank * 4.5).toFixed(1)}% → +${(next * 4.5).toFixed(1)}%`;
     case 'countermeasures': {
       const cur = countermeasureConfig(rank);
       const nxt = countermeasureConfig(next);
-      return `${cur.maxCharges} → ${nxt.maxCharges} flares · ${cur.cooldown}s → ${nxt.cooldown}s reload`;
+      return `${cur.maxCharges} → ${nxt.maxCharges} flares · ${cur.cooldown}s → ${nxt.cooldown}s`;
     }
-    case 'airframe': return `Rank ${rank} → ${next} — steadier cargo flight`;
+    case 'airframe': return `Rank ${rank} → ${next} (cargo flight stability)`;
     default: return `Rank ${rank} → ${next}`;
   }
 }
@@ -1683,17 +1844,32 @@ function HangarScreen({
 }) {
   const [tab, setTab] = useState<HangarTab>('aircraft');
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#050a26]/75 px-3 py-4 backdrop-blur-[1px]">
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/80 px-3 py-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig max-h-[92vh] overflow-y-auto">
-          <div className="menu-card w-[min(640px,calc(100vw-24px))]">
-            <div className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text text-center text-xl uppercase tracking-[0.1em] text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.6)]">
-              Hangar
+          <div className="menu-card w-[min(680px,calc(100vw-24px))]">
+            <span className="mil-rivet mil-rivet-tl" />
+            <span className="mil-rivet mil-rivet-tr" />
+            <span className="mil-rivet mil-rivet-bl" />
+            <span className="mil-rivet mil-rivet-br" />
+
+            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+            <div className="menu-title-slab text-center">
+              <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00] text-center w-full">
+                <span>★</span>
+                <span>ARMORY PROTOCOLS</span>
+                <span>★</span>
+              </div>
+              <h2 className="arcade-title-lg my-1 text-center w-full whitespace-nowrap">HANGAR & ARMORY</h2>
+              <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center w-full">
+                FIELD MAINTENANCE & HARDWARE PROTOCOLS
+              </div>
             </div>
 
-            <div className="mx-auto mt-3 flex w-fit items-center gap-2 rounded-none border border-[#ffe66d]/75 bg-[#ffe66d]/12 px-3 py-1.5 shadow-[0_0_16px_rgba(255,230,109,0.25)]">
+            <div className="mx-auto mt-3 flex w-fit items-center gap-2 mil-panel px-4 py-1.5 border-[#ffcc00]/75 shadow-[0_0_12px_rgba(255,204,0,0.25)]">
               <CoinIcon />
-              <span className="text-xl font-black text-[#ffe66d]">{credits.toLocaleString()} CREDITS</span>
+              <span className="text-lg font-military text-[#ffcc00] tracking-wider">{credits.toLocaleString()} CREDITS</span>
             </div>
 
             <div className="mt-4 flex flex-wrap justify-center gap-1.5" role="tablist" aria-label="Hangar sections">
@@ -1704,11 +1880,7 @@ function HangarScreen({
                   role="tab"
                   aria-selected={tab === t.id}
                   onClick={() => { onUiSound(); setTab(t.id); }}
-                  className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition ${
-                    tab === t.id
-                      ? 'border-[#7df9ff] bg-[#22b8d8]/25 text-[#7df9ff]'
-                      : 'border-white/15 bg-black/25 text-white/60 hover:border-[#50ebff]/50 hover:text-[#9bf1ff]'
-                  }`}
+                  className={`seg-btn ${tab === t.id ? 'seg-on' : ''}`}
                 >
                   {t.label}
                 </button>
@@ -1716,16 +1888,15 @@ function HangarScreen({
             </div>
 
             {isNewPilot && (
-              <div className="mt-3 border border-[#55f2a2]/50 bg-[#0c3a2a]/40 px-3 py-2 text-center text-[10px] font-black uppercase leading-relaxed tracking-[0.14em] text-[#8df5c8]">
-                New pilot — your starter credits are ready. A cheap perk (from 100 CR) or Countermeasures I (170 CR) is a great first buy.
+              <div className="mt-3 mil-panel px-3 py-2 text-center text-[10px] font-bold uppercase tracking-[0.14em] text-[#9df578] border-[#58a72b]/60">
+                ★ Starter credits granted — purchase Hull Armor or Flares to increase combat survivability.
               </div>
             )}
 
             {tab === 'aircraft' && (
               <>
-                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/60">
-                  All aircraft are free and unlocked — cosmetic variants with identical performance.
-                  Your pick is saved and flies on the next run.
+                <div className="mt-3 text-center text-[10px] font-military tracking-[0.16em] text-[#a89d7c]">
+                  ALL AIRCRAFT FRAMES ARE UNLOCKED — SELECT CHASSIS FOR NEXT SORTIE
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                   {HELICOPTER_MODEL_INFO.map((m) => (
@@ -1745,8 +1916,9 @@ function HangarScreen({
             )}
 
             {tab === 'systems' && (
-              <>                  <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-                  Permanent hull upgrades — bought with credits, kept forever
+              <>
+                <div className="mt-3 text-center text-[10px] font-military tracking-[0.16em] text-[#a89d7c]">
+                  PERMANENT HULL UPGRADES — PURCHASED WITH CREDITS, ACTIVE ACROSS ALL SORTIES
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                   {(Object.entries(HANGAR_UPGRADE_INFO) as [HangarUpgradeId, (typeof HANGAR_UPGRADE_INFO)[HangarUpgradeId]][]).map(([id, info]) => {
@@ -1755,30 +1927,26 @@ function HangarScreen({
                     const maxed = cost === undefined;
                     const affordable = !maxed && credits >= cost;
                     return (
-                      <div key={id} className="flex flex-col border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(80,235,255,0.05)]">
-                        <div className="text-xs font-black uppercase tracking-wide text-[#9bf1ff]">{info.name}</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#9bf1ff]/70">Rank {rank} / {info.costs.length}</div>
-                        <div className="mt-2 flex justify-center gap-1">
+                      <div key={id} className="flex flex-col mil-panel px-3 py-3 text-center">
+                        <div className="text-xs font-military tracking-wide text-[#ffcc00]">{info.name}</div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#a89d7c]">Rank {rank} / {info.costs.length}</div>
+                        <div className="mt-2 flex items-center justify-center gap-1.5">
                           {info.costs.map((_, index) => index + 1).map((level) => (
-                            <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ffe66d] shadow-[0_0_6px_rgba(255,230,109,0.6)]' : 'bg-[#50ebff]/15'}`} />
+                            <span key={level} className={level <= rank ? 'mil-led-on' : 'mil-led-off'} />
                           ))}
                         </div>
-                        <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#9bf1ff]/65">{info.description}</div>
-                        <div className="mt-1 min-h-4 text-[10px] font-black uppercase tracking-wide text-[#ffe66d]/90">
-                          {maxed ? 'Fully upgraded' : upgradePreview(id, rank)}
+                        <div className="mt-2 min-h-8 text-[11px] font-semibold leading-snug text-[#ded6be]">{info.description}</div>
+                        <div className="mt-1 min-h-4 text-[10px] font-military tracking-wide text-[#ffcc00]">
+                          {maxed ? '★ MAX RANK' : upgradePreview(id, rank)}
                         </div>
                         <button
                           type="button"
                           disabled={!affordable}
                           onClick={() => onBuyUpgrade(id)}
                           aria-label={maxed ? `${info.name} is at max rank` : affordable ? `Upgrade ${info.name} for ${cost} credits` : `Upgrade ${info.name} — need ${cost - credits} more credits`}
-                          className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
-                            affordable
-                              ? 'border-[#7df9ff]/85 bg-gradient-to-b from-[#22b8d8] to-[#0c7fa0] text-white shadow-[0_3px_0_#06505f,0_0_12px_rgba(80,235,255,0.4)] hover:from-[#31c9ea] hover:to-[#1090b4]'
-                              : 'cursor-not-allowed border-white/20 bg-black/30 text-white/55'
-                          }`}
+                          className={`mt-2 mil-btn ${maxed ? 'mil-btn-secondary' : affordable ? 'mil-btn-primary' : 'mil-btn-secondary'} mil-btn-sm`}
                         >
-                          {maxed ? 'Max Rank' : affordable ? `Upgrade — ${cost} CR` : `Need ${(cost ?? 0) - credits} more CR`}
+                          {maxed ? 'MAXED' : affordable ? `UPGRADE · ${cost} CR` : `NEED ${(cost ?? 0) - credits} CR`}
                         </button>
                       </div>
                     );
@@ -1789,8 +1957,8 @@ function HangarScreen({
 
             {tab === 'weapons' && (
               <>
-                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/55">
-                  Kills earn weapon XP. Each rank adds +18% damage; reaching LV.5 unlocks the signature alt-fire and +10 Hull.
+                <div className="mt-3 text-center text-[10px] font-military tracking-[0.16em] text-[#a89d7c]">
+                  WEAPON COMBAT MASTERY — KILLS GRANT WEAPON XP. MAX RANK UNLOCKS ALT-FIRE.
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {WEAPON_MASTERY_INFO.map((w, i) => {
@@ -1799,34 +1967,30 @@ function HangarScreen({
                     return (
                       <div
                         key={w.name}
-                        className="flex items-center gap-3 border bg-[#0e1644]/95 px-4 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]"
-                        style={{ borderColor: maxed ? w.color : 'rgba(80,235,255,0.3)' }}
+                        className="flex items-center gap-3 mil-panel px-4 py-3"
+                        style={{ borderColor: maxed ? '#ffcc00' : undefined }}
                       >
                         <div
-                          className="flex h-10 w-10 shrink-0 items-center justify-center text-lg font-black"
-                          style={{ background: `${w.color}26`, color: w.color, border: `1px solid ${w.color}66` }}
+                          className="flex h-10 w-10 shrink-0 items-center justify-center font-military text-lg font-black mil-recessed"
+                          style={{ color: w.color }}
                         >
                           {i + 1}
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-black uppercase tracking-wide text-[#9bf1ff]">{w.name}</span>
-                            <span className="text-xs font-black text-[#ffe66d]">LV.{lvl} / 5</span>
+                            <span className="text-xs font-military tracking-wide text-[#ded6be]">{w.name}</span>
+                            <span className="text-xs font-military text-[#ffcc00]">LV.{lvl} / 5</span>
                           </div>
-                          <div className="mt-1 flex gap-1">
+                          <div className="mt-1.5 flex items-center gap-1.5">
                             {[1, 2, 3, 4, 5].map((n) => (
-                              <div
-                                key={n}
-                                className="h-1.5 flex-1 rounded-full"
-                                style={{ background: n <= lvl ? w.color : 'rgba(255,255,255,0.12)' }}
-                              />
+                              <span key={n} className={n <= lvl ? 'mil-led-on' : 'mil-led-off'} />
                             ))}
                           </div>
-                          <div className="mt-1.5 text-[11px] font-semibold leading-snug text-white/70">
+                          <div className="mt-1.5 text-[10px] font-semibold leading-snug text-[#a89d7c]">
                             {maxed ? (
-                              <span className="text-[#ffe66d]">★ {w.altFire}</span>
+                              <span className="text-[#ffcc00]">★ {w.altFire}</span>
                             ) : (
-                              <>+{(lvl - 1) * 18}% damage · kill with this weapon to reach LV.{lvl + 1}</>
+                              <>+{(lvl - 1) * 18}% damage · score kills to reach LV.{lvl + 1}</>
                             )}
                           </div>
                         </div>
@@ -1839,18 +2003,18 @@ function HangarScreen({
 
             {tab === 'mods' && (
               <>
-                <div className="mt-3 text-center text-[11px] font-bold uppercase leading-relaxed tracking-[0.16em] text-[#9bf1ff]/55">
-                  Equip one mod per weapon — saved automatically and applied at the start of your next run.
+                <div className="mt-3 text-center text-[10px] font-military tracking-[0.16em] text-[#a89d7c]">
+                  EQUIP ONE FIELD MODIFICATION PER WEAPON FOR CUSTOM TACTICAL ADVANTAGES
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {WEAPON_MASTERY_INFO.map((w, i) => {
                     const mods = WEAPON_MODS[i];
                     const current = weaponMods[i] ?? 0;
                     if (!mods) return null;
-                    const choices = [{ name: 'Factory', desc: 'Standard issue, no modifiers' }, ...mods];
+                    const choices = [{ name: 'Standard Issue', desc: 'Factory caliber, standard ballistic profile' }, ...mods];
                     return (
-                      <div key={`mod-${w.name}`} className="border border-[#50ebff]/30 bg-[#0e1644]/95 px-3 py-3 shadow-[inset_0_0_16px_rgba(80,235,255,0.04)]">
-                        <div className="mb-2 text-xs font-black uppercase tracking-wide" style={{ color: w.color }}>{w.name}</div>
+                      <div key={`mod-${w.name}`} className="mil-panel px-3.5 py-3 text-center">
+                        <div className="mb-2 text-xs font-military tracking-wide text-[#ffcc00]">{w.name}</div>
                         <div className="flex flex-col gap-1.5">
                           {choices.map((choice, ci) => (
                             <button
@@ -1858,16 +2022,16 @@ function HangarScreen({
                               type="button"
                               aria-pressed={current === ci}
                               onClick={() => { onUiSound(); onSelectMod(i, ci); }}
-                              className={`border px-2 py-1.5 text-left transition ${
+                              className={`border px-3 py-2 text-center transition rounded-[2px] ${
                                 current === ci
-                                  ? 'border-[#ffe66d] bg-[#ffe66d]/15 shadow-[0_0_10px_rgba(255,230,109,0.25)]'
-                                  : 'border-white/15 bg-black/20 hover:border-[#50ebff]/60'
+                                  ? 'border-[#ffcc00] bg-[#ffcc00]/15 shadow-[0_0_8px_rgba(255,204,0,0.2)]'
+                                  : 'border-[#3d4a30] bg-[#0f130c] hover:border-[#6b8256]'
                               }`}
                             >
-                              <div className={`text-[11px] font-black uppercase tracking-wide ${current === ci ? 'text-[#ffe66d]' : 'text-white/85'}`}>
-                                {choice.name}{current === ci ? ' · Equipped ✓' : ''}
+                              <div className={`text-[10px] font-military tracking-wide ${current === ci ? 'text-[#ffcc00]' : 'text-[#ded6be]'}`}>
+                                {choice.name}{current === ci ? ' · [EQUIPPED]' : ''}
                               </div>
-                              <div className="text-[10px] font-semibold leading-snug text-white/55">{choice.desc}</div>
+                              <div className="text-[10px] font-semibold leading-snug text-[#a89d7c] mt-0.5">{choice.desc}</div>
                             </button>
                           ))}
                         </div>
@@ -1880,8 +2044,8 @@ function HangarScreen({
 
             {tab === 'perks' && (
               <>
-                <div className="mt-3 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-[#9bf1ff]/55">
-                  Permanent pilot training — 3 ranks each, bought with credits
+                <div className="mt-3 text-center text-[10px] font-military tracking-[0.16em] text-[#a89d7c]">
+                  PERMANENT PILOT TRAINING SPECIALIZATIONS — 3 RANKS EACH
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
                   {(Object.keys(PERK_INFO) as PerkId[]).map((id) => {
@@ -1891,27 +2055,23 @@ function HangarScreen({
                     const maxed = cost === undefined;
                     const affordable = !maxed && credits >= cost;
                     return (
-                      <div key={`perk-${id}`} className="flex flex-col border border-[#ff9b3d]/30 bg-[#0e1644]/95 px-3 py-3 text-center shadow-[inset_0_0_16px_rgba(255,155,61,0.05)]">
-                        <div className="text-xs font-black uppercase tracking-wide text-[#ffc37a]">{info.name}</div>
-                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-white/50">Rank {rank} / {MAX_PERK_RANK}</div>
-                        <div className="mt-2 flex justify-center gap-1">
+                      <div key={`perk-${id}`} className="flex flex-col mil-panel px-3 py-3 text-center">
+                        <div className="text-xs font-military tracking-wide text-[#ffcc00]">{info.name}</div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#a89d7c]">Rank {rank} / {MAX_PERK_RANK}</div>
+                        <div className="mt-2 flex items-center justify-center gap-1.5">
                           {[1, 2, 3].map((level) => (
-                            <span key={level} className={`h-1.5 w-7 ${level <= rank ? 'bg-[#ff9b3d] shadow-[0_0_6px_rgba(255,155,61,0.6)]' : 'bg-white/10'}`} />
+                            <span key={level} className={level <= rank ? 'mil-led-on' : 'mil-led-off'} />
                           ))}
                         </div>
-                        <div className="mt-2 min-h-10 text-[10px] font-semibold leading-snug text-white/60">{info.desc}</div>
+                        <div className="mt-2 min-h-10 text-[10px] font-semibold leading-snug text-[#ded6be]">{info.desc}</div>
                         <button
                           type="button"
                           disabled={!affordable}
                           onClick={() => onBuyPerk(id)}
                           aria-label={maxed ? `${info.name} is at max rank` : affordable ? `Train ${info.name} rank ${rank + 1} for ${cost} credits` : `Train ${info.name} — need ${cost - credits} more credits`}
-                          className={`mt-2 border px-2 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${
-                            affordable
-                              ? 'border-[#ffbd3f]/85 bg-gradient-to-b from-[#d18a24] to-[#8a5410] text-white shadow-[0_3px_0_#5c3608,0_0_12px_rgba(255,189,63,0.35)] hover:from-[#e29a30] hover:to-[#9c6216]'
-                              : 'cursor-not-allowed border-white/20 bg-black/30 text-white/55'
-                          }`}
+                          className={`mt-2 mil-btn ${maxed ? 'mil-btn-secondary' : affordable ? 'mil-btn-primary' : 'mil-btn-secondary'} mil-btn-sm`}
                         >
-                          {maxed ? 'Max Rank' : affordable ? `Train — ${cost} CR` : `Need ${cost - credits} more CR`}
+                          {maxed ? 'MAXED' : affordable ? `TRAIN · ${cost} CR` : `NEED ${(cost ?? 0) - credits} CR`}
                         </button>
                       </div>
                     );
@@ -1921,8 +2081,10 @@ function HangarScreen({
             )}
 
             <div className="mt-6 flex justify-center">
-              <MenuButton onClick={() => { onUiSound(); onBack(); }}>Back</MenuButton>
+              <MenuButton onClick={() => { onUiSound(); onBack(); }}>RETURN TO COMMAND</MenuButton>
             </div>
+
+            <div className="mil-hazard-strip mt-4 rounded-[1px]" />
           </div>
         </div>
       </div>
@@ -1944,7 +2106,7 @@ export default function App() {
   const [hangarUpgrades, setHangarUpgrades] = useState<HangarUpgrades>(() => readHangarUpgrades());
   const [playerModel, setPlayerModel] = useState<HelicopterModel>(() => {
     try {
-      const n = Number(window.localStorage.getItem('helistrike:playerModel'));
+      const n = Number(window.localStorage.getItem(STORAGE_KEYS.PLAYER_MODEL));
       return n === HelicopterModel.NIGHTHAWK || n === HelicopterModel.WARLOCK ? n : HelicopterModel.APACHE;
     } catch {
       return HelicopterModel.APACHE;
@@ -2043,10 +2205,10 @@ export default function App() {
   const [radarLinked, setRadarLinked] = useState(false);
   // Dev/debug-only perf overlay: poll engine renderer stats ~4x per second
   // (never per frame, no React churn during normal play). F2 toggles it, but
-  // only in dev builds (or with localStorage 'helistrike:perf' = '1' for QA
+  // only in dev builds (or with localStorage STORAGE_KEYS.PERF = '1' for QA
   // on production bundles). Hidden entirely from the normal production UI.
   const perfAllowed = import.meta.env.DEV ||
-    (typeof localStorage !== 'undefined' && localStorage.getItem('helistrike:perf') === '1');
+    (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEYS.PERF) === '1');
   const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
   // Debug overlay starts hidden everywhere — F2 (dev / QA flag) reveals it.
   const [showPerf, setShowPerf] = useState(false);
@@ -2057,7 +2219,7 @@ export default function App() {
   const applySettings = (patch: Partial<GameSettings>) => {
     const next = { ...settings, ...patch };
     setSettings(next);
-    window.localStorage.setItem('helistrike:settings', JSON.stringify(next));
+    window.localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(next));
     window.dispatchEvent(new CustomEvent('helistrike:settings', { detail: next }));
   };
 
@@ -2109,7 +2271,7 @@ export default function App() {
     const initial = { ...persisted, touchMode: persisted.touchMode || touch };
     setTouchDevice(touch);
     setSettings(initial);
-    window.localStorage.setItem('helistrike:settings', JSON.stringify(initial));
+    window.localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(initial));
     window.dispatchEvent(new CustomEvent('helistrike:settings', { detail: initial }));
 
     const handleUpdate = (e: CustomEvent) => {
@@ -2142,7 +2304,7 @@ export default function App() {
 
       const storedHighScore = readHighScore();
       if (nextScore > storedHighScore) {
-        window.localStorage.setItem('helistrike:highScore', String(nextScore));
+        window.localStorage.setItem(STORAGE_KEYS.HIGH_SCORE, String(nextScore));
         setHighScore(nextScore);
       }
     };
@@ -2194,7 +2356,7 @@ export default function App() {
       const storedHighScore = readHighScore();
       setIsNewBest(finalScore >= storedHighScore && finalScore > 0);
       if (finalScore > storedHighScore) {
-        window.localStorage.setItem('helistrike:highScore', String(finalScore));
+        window.localStorage.setItem(STORAGE_KEYS.HIGH_SCORE, String(finalScore));
         setHighScore(finalScore);
         engineRef.current?.audio.playNewBest();
       }
@@ -2353,7 +2515,7 @@ export default function App() {
   // Settings > Replay Tutorial: clear the completion flag so the next run
   // starts with the interactive briefing again.
   const replayTutorial = () => {
-    try { window.localStorage.removeItem('helistrike:tutorialDone'); } catch { /* storage unavailable */ }
+    try { window.localStorage.removeItem(STORAGE_KEYS.TUTORIAL_DONE); } catch { /* storage unavailable */ }
     setShowSettings(false);
     setShowHangar(false);
     restartRun();
@@ -2377,7 +2539,7 @@ export default function App() {
 
   const selectPlayerModel = (model: HelicopterModel) => {
     setPlayerModel(model);
-    window.localStorage.setItem('helistrike:playerModel', String(model));
+    window.localStorage.setItem(STORAGE_KEYS.PLAYER_MODEL, String(model));
     window.dispatchEvent(new CustomEvent('helistrike:player-model', { detail: { model } }));
   };
 
@@ -2404,7 +2566,7 @@ export default function App() {
     const next = credits - cost;
     uiPurchase();
     setCredits(next);
-    window.localStorage.setItem('helistrike:credits', String(next));
+    window.localStorage.setItem(STORAGE_KEYS.CREDITS, String(next));
     setPerks(writePerkRank(id, rank + 1));
   };
 
@@ -2415,6 +2577,25 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Quick upgrade card selection [1, 2, 3]
+      if (upgradeOffer && upgradeOffer.length > 0) {
+        if ((e.key === '1' || e.code === 'Numpad1') && upgradeOffer[0]) {
+          uiClick();
+          chooseUpgrade(upgradeOffer[0].id);
+          return;
+        }
+        if ((e.key === '2' || e.code === 'Numpad2') && upgradeOffer[1]) {
+          uiClick();
+          chooseUpgrade(upgradeOffer[1].id);
+          return;
+        }
+        if ((e.key === '3' || e.code === 'Numpad3') && upgradeOffer[2]) {
+          uiClick();
+          chooseUpgrade(upgradeOffer[2].id);
+          return;
+        }
+      }
+
       // Quick restart from the game-over screen.
       if (e.key === 'Enter' && mode === 'gameover') {
         restartRun();
@@ -2487,547 +2668,651 @@ export default function App() {
       )}
 
       <div className={`pointer-events-none absolute inset-0 z-20 transition-opacity duration-300 ${hudDim}`}>
-        {/* ══ TOP-LEFT: wave, objectives, mission, progression — one column */}
+        {/* ══ TOP-CENTER: XP & Level Console + Wave Counter + Boss Health Bar ══ */}
         {mode === 'playing' && (
-          <div className="pointer-events-none absolute left-3 top-2.5 flex w-[min(232px,44vw)] flex-col items-start gap-1.5 sm:left-4 sm:top-4">
-            {/* Compact wave + run timer */}
-            <div className="hud-wave-banner flex w-full items-center justify-between gap-2 px-2.5 py-1">
-              <span className="font-display text-[9px] uppercase tracking-[0.16em] text-white" style={textShadow}>
-                Wave {wave}
-              </span>
-              <span className="flex items-center gap-0.5 leading-none">
-                {Array.from({ length: 5 }).map((_, i) =>
-                  i < Math.min(wave, 5) ? (
-                    <Skull key={i} size={10} className="text-[#ff3344] drop-shadow-[0_0_4px_rgba(239,35,60,0.95)]" />
-                  ) : (
-                    <Skull key={i} size={10} className="text-white/40 opacity-40" />
-                  ),
-                )}
-              </span>
-              <span className="font-ui text-xs font-bold tabular-nums tracking-widest text-[#ffe66d]" style={textShadow}>
-                {formatDuration(elapsed)}
-              </span>
-            </div>
+          <div className="pointer-events-none absolute left-1/2 top-2.5 -translate-x-1/2 flex flex-col items-center z-30 sm:top-3.5">
+            <div className="hs-panel flex items-center gap-3.5 px-4 py-2 shadow-2xl">
+              <span className="mil-rivet mil-rivet-tl" />
+              <span className="mil-rivet mil-rivet-tr" />
+              <span className="mil-rivet mil-rivet-bl" />
+              <span className="mil-rivet mil-rivet-br" />
 
-            {/* Tactical objectives checklist */}
-            <div className="hud-panel flex w-full flex-col gap-1.5 px-2.5 py-1.5">
-              <div className="hud-label text-[#ffd35c]">◆ Objectives</div>
-              {objectives && objectives.count > 0 ? (
-                <>
-                  <div className="hud-objective-row">
-                    <span className={`hud-obj-check ${!objectives.sam ? 'is-done' : ''}`}>{!objectives.sam ? '✓' : ''}</span>
-                    <span className={objectives.sam ? '' : 'text-white/40'}>Destroy SAMs</span>
-                    <span className="hud-obj-count">{objectives.sam ? 'ACTIVE' : 'DONE'}</span>
-                  </div>
-                  <div className="hud-objective-row">
-                    <span className={`hud-obj-check ${!objectives.radar ? 'is-done' : ''}`}>{!objectives.radar ? '✓' : ''}</span>
-                    <span className={objectives.radar ? '' : 'text-white/40'}>Destroy Radar</span>
-                    <span className="hud-obj-count">{objectives.radar ? 'ACTIVE' : 'DONE'}</span>
-                  </div>
-                  <div className="hud-objective-row">
-                    <span className={`hud-obj-check ${!objectives.depot ? 'is-done' : ''}`}>{!objectives.depot ? '✓' : ''}</span>
-                    <span className={objectives.depot ? '' : 'text-white/40'}>Destroy Depot</span>
-                    <span className="hud-obj-count">{objectives.depot ? 'ACTIVE' : 'DONE'}</span>
-                  </div>
-                </>
-              ) : (
-                <div className="hud-objective-row">
-                  <span className="hud-obj-check is-done">✓</span>
-                  <span className="text-[#55f2a2]">Sector Secured</span>
+              {/* Pilot Level Badge */}
+              <div className="flex flex-col items-center">
+                <span className="font-hud text-[11px] font-bold text-[#a89d7c] leading-none tracking-wider">RANK</span>
+                <span className="font-display text-xl sm:text-2xl text-[#ffcc00] leading-none drop-shadow-[0_2px_0_#881c0d] mt-0.5">
+                  LV.{runLevel}
+                </span>
+              </div>
+
+              {/* XP Progress Bar (Thicker 18-20px bar with readable % in font-tech) */}
+              <div className="flex flex-col gap-1 w-36 sm:w-60">
+                <div className="flex justify-between items-center text-xs font-hud font-bold text-[#ded6be]">
+                  <span className="text-[#ffcc00] tracking-wide">EXPERIENCE</span>
+                  <span className="font-tech font-bold text-[#ffcc00]">{Math.round(runXpProgress * 100)}%</span>
                 </div>
-              )}
-            </div>
+                <div className="h-3.5 sm:h-4 hs-bar-track relative flex items-center">
+                  <div
+                    className="hs-bar-fill bg-gradient-to-r from-[#b37400] via-[#ffaa00] to-[#ffcc00] shadow-[0_0_10px_rgba(255,204,0,0.6)]"
+                    style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
+                  />
+                </div>
+              </div>
 
-            {/* Active mission */}
-            {mission && (
-              <div className="hud-panel w-full border-[#50ebff]/55 px-2.5 py-1.5">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="hud-label text-[#50ebff]">◆ Mission</span>
-                  <span className="text-[9px] font-black uppercase tracking-wider text-[#ffe66d]">
-                    {mission.rewardCredits} CR · {mission.rewardSalvage} salvage
+              {/* Compact Wave badge */}
+              <div className="flex flex-col items-center border-l border-[#4a593b] pl-3">
+                <span className="font-hud text-[11px] font-bold text-[#a89d7c] leading-none tracking-wider">SECTOR</span>
+                <div className="flex items-center gap-1 mt-0.5">
+                  <span className="font-military text-base text-white leading-none">WAVE {wave}</span>
+                  <span className="flex items-center gap-0.5">
+                    {Array.from({ length: Math.min(wave, 5) }).map((_, i) => (
+                      <Skull key={i} size={10} className="text-[#ff3344] drop-shadow-[0_0_4px_rgba(239,35,60,0.95)]" />
+                    ))}
                   </span>
                 </div>
-                <div className="mt-0.5 truncate text-[11px] font-black uppercase tracking-wide text-white" style={textShadow}>
-                  {mission.title}
+              </div>
+            </div>
+
+            {/* Industrial Boss Health Bar */}
+            {bossInfo && (
+              <div className="mt-2 w-[min(520px,88vw)] animate-pulse">
+                <div className="hs-panel hs-panel-danger px-3.5 py-2">
+                  <div className="mil-hazard-strip-danger mb-1.5 rounded-[1px]" />
+                  <div className="flex justify-between items-center">
+                    <span className="font-military text-sm text-[#ff4747] tracking-wider">⚠ ARCHON HEAVY GUNSHIP</span>
+                    <span className="font-tech text-sm font-bold text-[#ff8a8a]">
+                      {Math.round((bossInfo.hp / Math.max(1, bossInfo.maxHp)) * 100)}%
+                    </span>
+                  </div>
+                  <div className="h-4 hs-bar-track mt-1.5">
+                    <div
+                      className="hs-bar-fill bg-gradient-to-r from-[#8e1515] via-[#d32f2f] to-[#ff5252] shadow-[0_0_10px_rgba(211,47,47,0.8)]"
+                      style={{ width: `${clampPercent((bossInfo.hp / Math.max(1, bossInfo.maxHp)) * 100)}%` }}
+                    />
+                  </div>
                 </div>
-                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
-                  <div className="h-full bg-[#50ebff] transition-[width] duration-150" style={{ width: `${clampPercent((mission.progress / Math.max(1, mission.targetProgress)) * 100)}%` }} />
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-2 text-[9px] font-black uppercase tracking-wider">
-                  <span className={mission.bonus?.state === 'FAILED' ? 'text-[#ff6f7e]' : mission.bonus?.state === 'COMPLETE' ? 'text-[#55f2a2]' : 'text-white/65'}>
-                    {mission.bonus ? `Bonus: ${mission.bonus.label}${mission.bonus.state === 'FAILED' ? ' — missed' : ''}` : 'Primary objective'}
-                  </span>
-                  <span className="text-white/70">{Math.min(mission.progress, mission.targetProgress)}/{mission.targetProgress}</span>
-                </div>
-                {radarLinked && <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-[#ff9b3d]">Radar link · SAM tracking boosted</div>}
               </div>
             )}
+          </div>
+        )}
 
-            {/* Compact score + credits + XP strip */}
-            <div className="hud-panel w-full px-2.5 py-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="hud-label">Score</span>
-                <span className="font-ui text-sm font-bold" style={textShadow}>{score.toLocaleString()}</span>
-              </div>
-              <div className="mt-0.5 flex items-center justify-between gap-2">
-                <span className="hud-label">Credits</span>
-                <span className="flex items-center gap-1 text-sm font-bold text-[#ffe66d]" style={textShadow}>
-                  <CoinIcon />{credits.toLocaleString()}
+        {/* ══ TOP-LEFT: Objectives & Active Mission ══ */}
+        {mode === 'playing' && (
+          <div className="pointer-events-none absolute left-3 top-2.5 flex w-[min(280px,46vw)] flex-col gap-2 z-30 sm:left-4 sm:top-4">
+            {/* Tactical Objectives (Collapsible / Compact) */}
+            <div className="hs-panel hs-panel-sm flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="hs-heading text-xs text-[#ffcc00] flex items-center gap-1.5">
+                  <span>◆</span>
+                  <span>OBJECTIVES</span>
+                </span>
+                <span className="font-tech text-xs text-[#ded6be] font-bold tabular-nums">
+                  {formatDuration(elapsed)}
                 </span>
               </div>
-              {unsecuredCredits > 0 && (
-                <div className="text-right text-[9px] font-black uppercase tracking-wider text-[#ffbd3f]" style={textShadow}>
-                  Unsecured +{unsecuredCredits.toLocaleString()}
+
+              {objectives && objectives.count > 0 ? (
+                <div className="flex flex-col gap-1 text-[13px] font-hud font-semibold">
+                  <div className="flex items-center justify-between">
+                    <span className={objectives.sam ? 'text-[#ded6be]' : 'text-[#8df578]'}>
+                      {objectives.sam ? '● SAM SITES' : '✓ SAMS'}
+                    </span>
+                    <span className={`font-tech text-xs font-bold ${objectives.sam ? 'text-[#ffcc00]' : 'text-[#8df578]'}`}>
+                      {objectives.sam ? 'ACTIVE' : 'CLEARED'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={objectives.radar ? 'text-[#ded6be]' : 'text-[#8df578]'}>
+                      {objectives.radar ? '● RADAR SITES' : '✓ RADARS'}
+                    </span>
+                    <span className={`font-tech text-xs font-bold ${objectives.radar ? 'text-[#ffcc00]' : 'text-[#8df578]'}`}>
+                      {objectives.radar ? 'ACTIVE' : 'CLEARED'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={objectives.depot ? 'text-[#ded6be]' : 'text-[#8df578]'}>
+                      {objectives.depot ? '● FUEL DEPOTS' : '✓ DEPOTS'}
+                    </span>
+                    <span className={`font-tech text-xs font-bold ${objectives.depot ? 'text-[#ffcc00]' : 'text-[#8df578]'}`}>
+                      {objectives.depot ? 'ACTIVE' : 'CLEARED'}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[13px] font-hud font-bold text-[#8df578] flex items-center gap-1">
+                  <span>✓</span>
+                  <span>ALL SECTOR OBJECTIVES SECURED</span>
                 </div>
               )}
-              {salvage > 0 && (
-                <div className="text-right text-[9px] font-black uppercase tracking-wider text-[#55f2c2]" style={textShadow}>
-                  Salvage {salvage.toLocaleString()} → {salvageCredits.toLocaleString()} CR
-                </div>
-              )}
-              <div className="mt-0.5 flex items-center justify-between gap-2">
-                <span className="hud-label">XP · LV{runLevel}</span>
-                <span className="text-[10px] font-black text-white/70">{Math.round(runXpProgress * 100)}%</span>
-              </div>
-              <div className="mt-0.5 h-1 w-full overflow-hidden rounded-[2px] bg-black/40">
-                <div
-                  className="h-full rounded-[2px] bg-gradient-to-r from-[#2b9fd8] to-[#56e6ff] transition-[width] duration-200"
-                  style={{ width: `${clampPercent(runXpProgress * 100)}%` }}
-                />
-              </div>
             </div>
+
+            {/* Active Mission (Dominant Visual Priority) */}
+            {mission && (
+              <div className="hs-panel border-[#ffcc00]/60 shadow-[0_0_12px_rgba(255,204,0,0.2)]">
+                <div className="flex items-center justify-between gap-2 border-b border-[#3d4a30] pb-1">
+                  <span className="hs-heading text-xs text-[#ffcc00] flex items-center gap-1">
+                    <span>★</span>
+                    <span>MISSION</span>
+                  </span>
+                  <span className="font-tech text-xs font-bold text-[#ffcc00] bg-[#2a220a] px-2 py-0.5 rounded-[2px] border border-[#ffcc00]/40">
+                    +{mission.rewardCredits} CR
+                  </span>
+                </div>
+
+                <div className="mt-1.5 text-base font-hud font-bold text-white tracking-wide leading-snug">
+                  {mission.title}
+                </div>
+
+                <div className="mt-1.5 flex justify-between items-center text-xs font-hud">
+                  <span className="text-[#a89d7c]">PROGRESS</span>
+                  <span className="font-tech text-xs font-bold text-[#ded6be]">
+                    {Math.min(mission.progress, mission.targetProgress)} / {mission.targetProgress}
+                  </span>
+                </div>
+
+                <div className="mt-1 h-2 hs-bar-track">
+                  <div
+                    className="hs-bar-fill bg-gradient-to-r from-[#d48b12] to-[#ffcc00] shadow-[0_0_6px_rgba(255,204,0,0.6)]"
+                    style={{ width: `${clampPercent((mission.progress / Math.max(1, mission.targetProgress)) * 100)}%` }}
+                  />
+                </div>
+
+                {mission.bonus && (
+                  <div className="mt-1.5 flex items-center justify-between text-xs font-hud pt-1 border-t border-[#2d3824]">
+                    <span className={mission.bonus.state === 'FAILED' ? 'text-[#ff6666]' : mission.bonus.state === 'COMPLETE' ? 'text-[#8df578]' : 'text-[#e5c158]'}>
+                      ★ {mission.bonus.label}
+                    </span>
+                    <span className="font-tech text-[11px] text-[#a89d7c]">
+                      {mission.bonus.state === 'COMPLETE' ? '✓ DONE' : mission.bonus.state === 'FAILED' ? 'FAILED' : 'BONUS'}
+                    </span>
+                  </div>
+                )}
+                {radarLinked && (
+                  <div className="mt-1 text-[11px] font-hud font-bold text-[#ff9900] tracking-wide">
+                    RADAR LINK · SAM TRACKING ENHANCED
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Center stack: only temporary state — spawn shield countdown.
-            Threat/SAM live in the right column, mission in the top-left. */}
-        <div className="pointer-events-none absolute left-1/2 top-[4.6rem] flex -translate-x-1/2 flex-col items-center gap-1.5">
-        {/* Spawn protection — visible shield countdown during the post-GO grace */}
-        {mode === 'playing' && opening?.phase === 'grace' && (
-          <div className="hud-panel border-[#50ebff]/70 px-3 py-1 text-center shadow-[0_0_16px_rgba(80,235,255,0.35)]">
-            <div className="text-[11px] font-black uppercase tracking-[0.2em] text-[#7df9ff]" style={textShadow}>
-              Shield · Invulnerable {Math.max(0, opening.remaining ?? 0).toFixed(1)}s
+        {/* Center state: spawn shield countdown */}
+        <div className="pointer-events-none absolute left-1/2 top-[5.2rem] flex -translate-x-1/2 flex-col items-center gap-1.5 z-30">
+          {mode === 'playing' && opening?.phase === 'grace' && (
+            <div className="hs-panel hs-panel-warning px-4 py-1.5 text-center shadow-[0_0_16px_rgba(255,204,0,0.35)]">
+              <div className="text-xs font-military tracking-wide text-[#ffcc00]">
+                INVULNERABILITY SHIELD ACTIVE · {Math.max(0, opening.remaining ?? 0).toFixed(1)}S
+              </div>
             </div>
-          </div>
-        )}
+          )}
         </div>
 
-        {/* RIGHT COLUMN: minimap, pause, extraction, delivery — one auto-stack
-            so panels never overlap or drift as content comes and goes. */}
-        <div className="pointer-events-none absolute right-3 top-2.5 flex flex-col items-end gap-1.5 sm:right-4 sm:top-4">
-          {/* Tactical minimap — north-up radar, ~12 Hz engine feed */}
-          {mode === 'playing' && <MinimapPanel />}
-          {mode === 'playing' && !upgradeOffer && (
-            <button
-              type="button"
-              onClick={pauseGame}
-              className="pointer-events-auto rounded-[6px] border-2 border-[#50ebff]/80 bg-[#101a4a]/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.14em] text-[#d8fbff] shadow-[0_4px_0_#0a2f4d,0_8px_18px_rgba(0,0,0,0.24),0_0_12px_rgba(80,235,255,0.25)] transition hover:-translate-y-0.5 hover:bg-[#16205c] active:translate-y-1 active:shadow-[0_2px_0_#0a2f4d,0_5px_12px_rgba(0,0,0,0.22)]"
-              style={textShadow}
-            >
-              Pause
-            </button>
-          )}
-
-          {/* Threat level — lives top-right per the HUD hierarchy */}
-          {threatInfo && mode === 'playing' && (
-            <div className={`hud-panel w-[min(212px,40vw)] px-2.5 py-1.5 ${threatInfo.level >= 3 ? 'border-[#ff3344]/70' : ''}`}>
-              <div className="flex items-center justify-between gap-2">
-                <span className="hud-label text-[#ff6f7e]">▲ Threat</span>
-                <span className="text-[9px] font-black uppercase tracking-wider text-white/70">LV {threatInfo.level}</span>
+        {/* ══ RIGHT COLUMN: Minimap, Pause & Contextual Mission/Threat Intel (Single non-overlapping flex stack) ══ */}
+        {mode === 'playing' && (
+          <div className="pointer-events-none absolute right-3 top-2.5 flex flex-col items-end gap-2 z-30 sm:right-4 sm:top-4 max-h-[calc(100vh-6rem)]">
+            <div className="hs-panel p-1.5 shadow-2xl">
+              <span className="mil-rivet mil-rivet-tl" />
+              <span className="mil-rivet mil-rivet-tr" />
+              <span className="mil-rivet mil-rivet-bl" />
+              <span className="mil-rivet mil-rivet-br" />
+              <div className="mb-1 text-center font-military text-[10px] tracking-wider text-[#a89d7c]">
+                TACTICAL RADAR
               </div>
-              <div className="mt-0.5 truncate text-[11px] font-black uppercase tracking-wide text-white" style={textShadow}>
-                {threatInfo.name}
-              </div>
-              <div className="mt-0.5 flex items-center justify-between text-[9px] font-black uppercase tracking-wider">
-                <span className="text-[#ffbd3f]">Reward x{threatInfo.rewardMultiplier.toFixed(2)}</span>
-                <span className="text-white/55">{Math.round(threatInfo.points)} pts</span>
-              </div>
+              <MinimapPanel />
             </div>
-          )}
 
-          {/* Incoming SAM missile warning — highest-priority alert */}
-          {samThreat && mode === 'playing' && (
-            <div className={`hud-panel w-[min(212px,40vw)] border-[#ff3344]/70 px-2.5 py-1.5 ${samThreat.state === 'INBOUND' ? 'animate-pulse' : ''}`}>
-              <div className="flex items-center justify-between gap-2">
-                <span className="hud-label text-[#ff5d5d]">⚠ SAM {samThreat.state}</span>
-                <span className="text-[9px] font-black text-white/70">{samThreat.distance}m</span>
-              </div>
-              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/50">
-                <div className="h-full bg-[#ff3344] transition-[width] duration-100" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
-              </div>
-              {samThreat.state === 'INBOUND' && (
-                <div className="mt-0.5 text-[9px] font-black uppercase tracking-widest text-[#ffd3d7]" style={textShadow}>Missile inbound — deploy flares (C)</div>
-              )}
-            </div>
-          )}
+            {!upgradeOffer && (
+              <button
+                type="button"
+                onClick={pauseGame}
+                className="pointer-events-auto mil-btn mil-btn-secondary mil-btn-sm py-1 px-3 text-xs"
+              >
+                PAUSE (ESC)
+              </button>
+            )}
 
-        {extraction && mode === 'playing' && (
-          <div className="pointer-events-none w-[min(212px,40vw)]">
-            <div className="hud-panel border-[#55f2a2]/60 px-2.5 py-1.5">
-              <div className="hud-label text-[#55f2a2]">Extraction Available</div>
-              <div className="mt-1 flex justify-between text-xs font-black"><span>{extraction.distance}m</span><span className="text-[#ffbd3f]">Secure +{(unsecuredCredits + salvageCredits).toLocaleString()} CR</span></div>
-              {extraction.active && (
-                <div className="mt-2"><div className="text-[10px] font-black uppercase">Extracting {Math.round(extraction.progress * 100)}%</div><div className="mt-1 h-1.5 bg-black/45"><div className="h-full bg-[#55f2a2]" style={{ width: `${clampPercent(extraction.progress * 100)}%` }} /></div></div>
-              )}
-              {extraction.carrying && <div className="mt-1 text-[9px] font-black text-[#ffbd3f]">ACTIVE DELIVERY WILL BE ABANDONED</div>}
-            </div>
-          </div>
-        )}
-
-        {extraction && extraction.distance > 70 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[24%] -translate-x-1/2 text-center">
-            <div className="text-3xl font-black text-[#55f2a2]" style={{ ...textShadow, transform: `rotate(${extraction.bearing}deg)` }}>▲</div>
-            <div className="text-[10px] font-black uppercase tracking-widest" style={textShadow}>Extract · {extraction.distance}m</div>
-          </div>
-        )}
-
-        {/* Compact delivery contract card */}
-        {delivery && mode === 'playing' && (
-          <div className="pointer-events-none w-[min(212px,40vw)]">
-            <div className={`hud-panel px-2.5 py-2 ${delivery.difficulty === 'HIGH_VALUE' ? 'border-[#d78cff]/70' : 'border-[#55f2c2]/45'}`}>
-              <div className="flex items-center justify-between gap-2">
-                <span className="hud-label text-[#55f2c2]">Delivery</span>
-                <span className={`rounded-[3px] px-1.5 py-0.5 text-[9px] font-black tracking-wider ${
-                  delivery.difficulty === 'HIGH_VALUE'
-                    ? 'bg-[#d78cff]/25 text-[#edc8ff]'
-                    : delivery.difficulty === 'RISKY'
-                      ? 'bg-[#ff8a44]/25 text-[#ffbd8e]'
-                      : 'bg-white/10 text-white/55'
-                }`}>
-                  {delivery.difficulty.replace('_', ' ')}
-                </span>
-              </div>
-              <div className="mt-1 text-sm font-black uppercase tracking-wide text-white" style={textShadow}>
-                <span className="mr-1.5 text-[#ffbd3f]">{delivery.cargoIcon}</span>{delivery.cargoName}
-              </div>
-              <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] font-black uppercase tracking-wider">
-                <span className={delivery.action === 'PICKUP' ? 'text-[#ffbd3f]' : 'text-[#55f2c2]'}>{delivery.action}</span>
-                <span className="text-white">{delivery.distance >= 1000 ? `${(delivery.distance / 1000).toFixed(1)} km` : `${delivery.distance} m`}</span>
-              </div>
-              <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-wide text-white/55">{delivery.destinationName}</div>
-              <div className="mt-1.5 flex items-end justify-between gap-2 border-t border-white/12 pt-1.5">
-                <div>
-                  <div className="hud-label">Reward</div>
-                  <div className="text-sm font-black text-[#ffe66d]">{delivery.reward} CR</div>
-                  {delivery.samRiskBonus > 0 && <div className="text-[9px] font-black uppercase text-[#ff9b3d]">+{delivery.samRiskBonus} SAM risk</div>}
+            {/* Contextual SAM Threat / Cargo / Extraction / Threat Alert Card */}
+            {samThreat && samThreat.state === 'INBOUND' ? (
+              <div className="hs-panel hs-panel-danger w-[min(260px,44vw)] animate-pulse">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-military text-sm text-[#ff6666] tracking-wide">⚠ MISSILE INBOUND</span>
+                  <span className="font-tech text-sm font-bold text-white">{samThreat.distance}M</span>
                 </div>
-                {delivery.timeBonusRemaining !== null && (
-                  <div className="text-right">
-                    <div className="hud-label">Time Bonus</div>
-                    <div className={delivery.timeBonusRemaining > 0 ? 'text-sm font-black text-[#55f2c2]' : 'text-sm font-black text-white/35'}>
-                      {formatDuration(delivery.timeBonusRemaining)}
+                <div className="mt-1 h-2 hs-bar-track">
+                  <div className="hs-bar-fill bg-[#d32f2f]" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
+                </div>
+                <div className="mt-1 text-center font-military text-xs text-[#ffaaaa] tracking-wider">
+                  DEPLOY FLARES (C)
+                </div>
+              </div>
+            ) : samThreat && (samThreat.state === 'LOCKING' || samThreat.state === 'TRACKING') ? (
+              <div className="hs-panel hs-panel-warning w-[min(260px,44vw)]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-military text-xs text-[#ffa726] tracking-wide">⚠ SAM {samThreat.state}</span>
+                  <span className="font-tech text-xs font-bold text-white">{samThreat.distance}M</span>
+                </div>
+                <div className="mt-1 h-1.5 hs-bar-track">
+                  <div className="hs-bar-fill bg-[#ff7700]" style={{ width: `${clampPercent(samThreat.progress * 100)}%` }} />
+                </div>
+              </div>
+            ) : delivery ? (
+              <div className="hs-panel w-[min(260px,44vw)] border-[#ffcc00]/50">
+                <div className="flex items-center justify-between gap-2 border-b border-[#3d4a30] pb-1">
+                  <span className="font-military text-xs text-[#ffcc00] flex items-center gap-1">
+                    <span>📦</span>
+                    <span>CARGO CONTRACT</span>
+                  </span>
+                  <span className="font-hud text-[11px] font-bold px-1.5 py-0.5 rounded-[2px] bg-[#1a2014] text-[#ffcc00] border border-[#ffcc00]/30">
+                    {delivery.difficulty.replace('_', ' ')}
+                  </span>
+                </div>
+
+                <div className="mt-1.5 text-sm font-hud font-bold text-white tracking-wide">
+                  <span className="mr-1 text-[#ffcc00]">{delivery.cargoIcon}</span>
+                  {delivery.cargoName}
+                </div>
+
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span className={`font-hud text-xs font-bold ${delivery.action === 'PICKUP' ? 'text-[#ffcc00]' : 'text-[#8df578]'}`}>
+                    {delivery.action}
+                  </span>
+                  <span className="font-tech text-sm font-bold text-[#ded6be]">
+                    {formatDistance(delivery.distance)}
+                  </span>
+                </div>
+
+                <div className="mt-0.5 truncate text-xs font-hud text-[#a89d7c]">
+                  → {delivery.destinationName}
+                </div>
+
+                <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-[#3d4a30] pt-1 text-xs">
+                  <div>
+                    <span className="font-hud text-[10px] text-[#a89d7c] block">BOUNTY</span>
+                    <span className="font-tech text-xs font-bold text-[#ffcc00]">{delivery.reward} CR</span>
+                  </div>
+                  {delivery.timeBonusRemaining !== null && (
+                    <div className="text-right">
+                      <span className="font-hud text-[10px] text-[#a89d7c] block">TIME BONUS</span>
+                      <span className={`font-tech text-xs font-bold ${delivery.timeBonusRemaining > 0 ? 'text-[#8df578]' : 'text-white/35'}`}>
+                        {formatDuration(delivery.timeBonusRemaining)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {(delivery.state === 'PICKUP_READY' || delivery.state === 'DELIVERING') && (
+                  <div className="mt-1.5">
+                    <div className="flex items-center justify-between text-xs font-hud font-bold">
+                      <span className={delivery.state === 'DELIVERING' ? 'text-[#8df578]' : 'text-[#ffcc00]'}>
+                        HOLDING POSITION
+                      </span>
+                      <span className="font-tech text-xs text-[#ded6be]">{Math.round(clampPercent(delivery.progress * 100))}%</span>
+                    </div>
+                    <div className="mt-1 h-2 hs-bar-track">
+                      <div
+                        className={`hs-bar-fill ${delivery.state === 'DELIVERING' ? 'bg-[#58a72b]' : 'bg-[#ffcc00]'}`}
+                        style={{ width: `${clampPercent(delivery.progress * 100)}%` }}
+                      />
                     </div>
                   </div>
                 )}
               </div>
-              {(delivery.state === 'PICKUP_READY' || delivery.state === 'DELIVERING') && (
-                <div className="mt-2">
-                  <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
-                    <span className={delivery.state === 'DELIVERING' ? 'text-[#55f2c2]' : 'text-[#ffbd3f]'}>
-                      Hold position
-                    </span>
-                    <span className="text-white/60">{Math.round(clampPercent(delivery.progress * 100))}%</span>
-                  </div>
-                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-black/45">
-                    <div
-                      className={`h-full transition-[width] duration-75 ${delivery.state === 'DELIVERING' ? 'bg-[#55f2c2]' : 'bg-[#ffbd3f]'}`}
-                      style={{ width: `${clampPercent(delivery.progress * 100)}%` }}
-                    />
-                  </div>
+            ) : extraction ? (
+              <div className="hs-panel hs-panel-success w-[min(260px,44vw)]">
+                <div className="font-military text-xs text-[#8df578] flex items-center gap-1">
+                  <span>🚁</span>
+                  <span>EXTRACTION ZONE OPEN</span>
                 </div>
-              )}
-            </div>
+                <div className="mt-1 flex justify-between items-center text-xs font-hud">
+                  <span className="text-[#ded6be]">DISTANCE: {formatDistance(extraction.distance)}</span>
+                  <span className="font-tech font-bold text-[#ffcc00]">
+                    +{(unsecuredCredits + salvageCredits).toLocaleString()} CR
+                  </span>
+                </div>
+                {extraction.active && (
+                  <div className="mt-1.5">
+                    <div className="font-hud text-xs font-bold text-[#8df578]">EXTRACTING {Math.round(extraction.progress * 100)}%</div>
+                    <div className="mt-0.5 h-2 hs-bar-track">
+                      <div className="hs-bar-fill bg-[#58a72b]" style={{ width: `${clampPercent(extraction.progress * 100)}%` }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : threatInfo ? (
+              <div className={`hs-panel w-[min(240px,40vw)] ${threatInfo.level >= 3 ? 'hs-panel-danger animate-pulse' : ''}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-military text-xs text-[#ffcc00]">THREAT RATING</span>
+                  <span className="font-tech text-xs font-bold text-[#ded6be]">LV {threatInfo.level}</span>
+                </div>
+                <div className="mt-0.5 flex items-center justify-between text-xs font-hud font-bold">
+                  <span className="text-white">{threatInfo.name}</span>
+                  <span className="text-[#ffcc00] font-tech">REWARD ×{threatInfo.rewardMultiplier.toFixed(2)}</span>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
-        </div>
 
-        {/* Edge-style route direction cue; the world beacon takes over nearby. */}
-        {delivery && delivery.action !== 'COMPLETE' && delivery.distance > 70 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[20%] -translate-x-1/2 text-center">
+        {/* Edge-style route direction waypoint */}
+        {delivery && delivery.action !== 'COMPLETE' && delivery.distance > 50 && mode === 'playing' && (
+          <div className="pointer-events-none absolute left-1/2 top-[18%] -translate-x-1/2 text-center z-30">
             <div
-              className={`mx-auto text-3xl font-black ${delivery.action === 'PICKUP' ? 'text-[#ffbd3f]' : 'text-[#55f2c2]'}`}
+              className={`mx-auto text-3xl font-black ${delivery.action === 'PICKUP' ? 'text-[#ffcc00]' : 'text-[#8df578]'}`}
               style={{ ...textShadow, transform: `rotate(${delivery.bearing}deg)` }}
             >
               ▲
             </div>
-            <div className="mt-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-white" style={textShadow}>
-              {delivery.action} · {delivery.distance}m
+            <div className="mt-0.5 hs-panel hs-panel-sm inline-flex items-center gap-1.5 border-[#ffcc00]/60 shadow-[0_4px_16px_rgba(0,0,0,0.7)]">
+              <span className="text-base">{delivery.cargoIcon || '📦'}</span>
+              <span className="font-military text-xs text-[#ffcc00] tracking-wide">{delivery.action}</span>
+              <span className="font-tech text-xs font-bold text-white">· {formatDistance(delivery.distance)}</span>
             </div>
           </div>
         )}
 
         {/* Arcade announcement toast */}
         {announcement && mode === 'playing' && (
-          <div key={announcement.key} className="arcade-announce pointer-events-none absolute left-1/2 top-[30%] -translate-x-1/2 text-center">
-            <div className="font-display text-2xl uppercase tracking-widest" style={{ ...textShadow, color: announcement.color }}>
+          <div key={announcement.key} className="arcade-announce pointer-events-none absolute left-1/2 top-[30%] -translate-x-1/2 text-center z-30">
+            <div className="arcade-title-lg text-center" style={{ color: announcement.color }}>
               {announcement.text}
             </div>
             {announcement.sub && (
-              <div className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-white" style={textShadow}>
+              <div className="mt-1 text-xs font-military tracking-[0.2em] text-[#ded6be]" style={textShadow}>
                 {announcement.sub}
               </div>
             )}
           </div>
         )}
 
-        {/* Boss health bar — below the combo display so it never collides
-            with the Threat panel at top-[4.6rem]. */}
-        {bossInfo && mode === 'playing' && (
-          <div className="absolute left-1/2 top-[21rem] w-[min(480px,70vw)] -translate-x-1/2">
-            <div className="hud-panel px-3 py-2">
-              <div className="hud-label text-[#e79bff]">Hostile Gunship — Archon</div>
-              <div className="mt-1.5 h-3.5 overflow-hidden rounded-[2px] border border-black/60 bg-black/55 shadow-[0_2px_0_rgba(0,0,0,0.35)]">
-                <div
-                  className="h-full bg-gradient-to-r from-[#6b1fc2] to-[#d84cff] transition-[width] duration-200"
-                  style={{ width: `${clampPercent((bossInfo.hp / Math.max(1, bossInfo.maxHp)) * 100)}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* BOTTOM-LEFT: Hull, Fuel, flares and defensive states. Values read
-            as current/max so a bare number never masquerades as a percentage. */}
-        <div className={`pointer-events-none absolute left-3 flex flex-col items-start gap-1.5 sm:left-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
-          <div className={`hud-panel flex w-[min(230px,42vw)] flex-col gap-1 px-2.5 py-1.5 ${health <= maxHealth * 0.3 ? 'hud-danger' : ''}`}>
-            <div className="hud-label">Hull</div>
-            <div className="flex items-center gap-2">
-              <HeartIcon />
-              <Meter value={(health / Math.max(1, maxHealth)) * 100} color={health > maxHealth * 0.3 ? 'bg-[#35e66d]' : 'bg-[#ef233c]'} />
-              <span className="font-ui text-base font-bold leading-none tabular-nums" style={textShadow}>
-                {Math.round(health)}<span className="text-[10px] text-white/45"> / {Math.round(maxHealth)}</span>
-              </span>
-            </div>
-            {health <= maxHealth * 0.25 && mode === 'playing' && (
-              <div className="text-[9px] font-black uppercase tracking-widest text-[#ff5d5d] animate-pulse" style={textShadow}>⚠ HULL CRITICAL</div>
-            )}
-            <div className="hud-label mt-0.5">Fuel</div>
-            <div className="flex items-center gap-2">
-              <GasIcon />
-              <Meter value={(fuel / Math.max(1, maxFuel)) * 100} color={fuel > maxFuel * 0.2 ? 'bg-[#2bd66f]' : 'bg-[#ff3344]'} />
-              <span className="font-ui text-base font-bold leading-none tabular-nums" style={textShadow}>
-                {Math.round(fuel)}<span className="text-[10px] text-white/45"> / {Math.round(maxFuel)}</span>
-              </span>
-            </div>
-            {fuel <= maxFuel * 0.15 && mode === 'playing' && (
-              <div className="text-[9px] font-black uppercase tracking-widest text-[#ff5d5d] animate-pulse" style={textShadow}>⚠ LOW FUEL — FIND PICKUP</div>
-            )}
-          </div>
-
-          {countermeasureInfo && mode === 'playing' && (
-            <div className="hud-panel px-2.5 py-1.5">
-              <div className="flex items-center justify-between">
-                <div className="hud-label text-[#ffbd3f]">Flares · C</div>
-                {countermeasureInfo.ready && countermeasureInfo.charges > 0 && <div className="text-[9px] font-black uppercase tracking-wider text-[#55f2a2]">READY</div>}
-              </div>
-              <div className="mt-0.5 text-sm tracking-[0.18em] text-[#ffbd3f]">
-                {'●'.repeat(countermeasureInfo.charges)}<span className="text-white/25">{'○'.repeat(Math.max(0, countermeasureInfo.maxCharges - countermeasureInfo.charges))}</span>
-              </div>
-              {countermeasureInfo.cooldown > 0 && <div className="text-[10px] font-black text-white/65">{countermeasureInfo.cooldown.toFixed(1)}s</div>}
-            </div>
-          )}
-
-          {/* Defensive / boost states — icon + label, never color alone */}
-          {statusInfo && mode === 'playing' && (statusInfo.shield > 0 || statusInfo.damageBoost > 0 || statusInfo.speedBoost > 0 || statusInfo.afterburner) && (
-            <div className="flex flex-col items-start gap-1">
-              {statusInfo.shield > 0 && (
-                <div className="hud-status flex items-center gap-1 border-[#80d8ff]/50 text-[#bfeeff]" style={textShadow}><Shield size={11} /> Shield {Math.ceil(statusInfo.shield)}s</div>
-              )}
-              {statusInfo.damageBoost > 0 && (
-                <div className="hud-status flex items-center gap-1 border-[#ffe66d]/50 text-[#ffe66d]" style={textShadow}><Bomb size={11} /> Damage {Math.ceil(statusInfo.damageBoost)}s</div>
-              )}
-              {statusInfo.speedBoost > 0 && (
-                <div className="hud-status flex items-center gap-1 border-[#ff88ff]/50 text-[#ffd0ff]" style={textShadow}><Sparkles size={11} /> Boost {Math.ceil(statusInfo.speedBoost)}s</div>
-              )}
-              {statusInfo.afterburner && (
-                <div className="hud-status flex items-center gap-1 animate-pulse border-[#ff7722]/60 text-[#ffb066]" style={textShadow}><Flame size={11} /> Afterburner</div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Combo Display with expiry timer bar — sits below the center stack
-            so it never collides with Threat/objectives/SAM banner. */}
-        {comboInfo && comboInfo.count > 1 && mode === 'playing' && (
-          <div className="pointer-events-none absolute left-1/2 top-[16.5rem] -translate-x-1/2 text-center">
-            <div className="font-display text-lg text-yellow-300" style={textShadow}>
-              {comboInfo.count}x COMBO
-            </div>
-            <div className="text-sm font-bold text-yellow-200" style={textShadow}>
-              x{comboInfo.multiplier.toFixed(1)} MULTIPLIER
-            </div>
-            <div className="mx-auto mt-1.5 h-1.5 w-40 overflow-hidden rounded-full border border-black/40 bg-black/40">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-yellow-500 to-yellow-300 transition-[width] duration-100"
-                style={{ width: `${clampPercent((comboInfo.timer / 3.0) * 100)}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* BOTTOM-RIGHT: weapon, ammo/reload, salvo, Devastation. Credits,
-            score and XP now live in the top-left column. */}
-        <div className={`pointer-events-none absolute right-3 flex w-[min(230px,42vw)] flex-col items-end gap-1.5 sm:right-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
-          {weaponInfo && mode === 'playing' && (
-            <div className="hud-panel w-full px-2.5 py-1.5">
-              <div className="flex items-center gap-2">
-                <BulletIcon />
-                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>{weaponInfo.name}</span>
-                {(weaponInfo.level ?? 1) > 1 && (
-                  <span className="rounded-[3px] border border-[#ffe66d]/70 bg-[#3d2f05]/70 px-1.5 py-0.5 text-[10px] font-black text-[#ffe66d]">LV.{weaponInfo.level}</span>
+        {/* ══ BOTTOM-LEFT: Unified Player Status Console (Hull, Fuel, Flares, Status) ══ */}
+        {mode === 'playing' && (
+          <div className={`pointer-events-none absolute left-3 flex flex-col items-start gap-2 z-30 sm:left-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
+            <div className={`hs-panel flex w-[min(260px,44vw)] flex-col gap-2 ${health <= maxHealth * 0.3 ? 'hs-panel-danger' : ''}`}>
+              {/* Hull Integrity */}
+              <div>
+                <div className="flex justify-between items-center font-hud">
+                  <span className="font-bold text-sm text-[#ded6be] tracking-wide">HULL INTEGRITY</span>
+                  <span className="font-tech text-base font-bold text-white tabular-nums">
+                    {Math.round(health)} / {Math.round(maxHealth)}
+                  </span>
+                </div>
+                <div className="h-3.5 hs-bar-track mt-1">
+                  <div
+                    className={`hs-bar-fill ${
+                      health > maxHealth * 0.5
+                        ? 'bg-gradient-to-r from-[#2b5614] to-[#58a72b] shadow-[0_0_8px_rgba(88,167,43,0.6)]'
+                        : health > maxHealth * 0.25
+                        ? 'bg-gradient-to-r from-[#8a5410] to-[#ffaa00] shadow-[0_0_8px_rgba(255,170,0,0.6)]'
+                        : 'bg-gradient-to-r from-[#7f1d1d] to-[#d32f2f] shadow-[0_0_10px_rgba(211,47,47,0.9)] animate-pulse'
+                    }`}
+                    style={{ width: `${clampPercent((health / Math.max(1, maxHealth)) * 100)}%` }}
+                  />
+                </div>
+                {health <= maxHealth * 0.25 && (
+                  <div className="mt-1 text-center font-military text-xs text-[#ff6666] tracking-wider animate-pulse">
+                    ⚠ HULL CRITICAL
+                  </div>
                 )}
               </div>
-              <div className="mt-1 flex items-center gap-2">
-                {weaponInfo.reloading ? (
-                  <span className="text-sm font-black text-yellow-300" style={textShadow}>RELOADING… {Math.ceil(weaponInfo.reloadTimer)}s</span>
-                ) : (
-                  <span className="text-sm font-black tabular-nums" style={textShadow}>{weaponInfo.ammo} / {weaponInfo.maxAmmo}</span>
-                )}
-              </div>
-            </div>
-          )}
 
-          {salvoInfo && mode === 'playing' && (
-            <div className="hud-panel w-full px-2.5 py-1.5">
-              <div className="flex items-center gap-2">
-                <TargetIcon />
-                <span className="text-xs font-black uppercase tracking-wider" style={textShadow}>Multi-Salvo</span>
+              {/* Fuel Capacity (Secondary Thinner Bar) */}
+              <div>
+                <div className="flex justify-between items-center font-hud">
+                  <span className="font-bold text-xs text-[#a89d7c] tracking-wide">FUEL CAPACITY</span>
+                  <span className="font-tech text-xs font-bold text-[#ded6be] tabular-nums">
+                    {Math.round(fuel)} / {Math.round(maxFuel)}
+                  </span>
+                </div>
+                <div className="h-2 hs-bar-track mt-0.5">
+                  <div
+                    className={`hs-bar-fill ${
+                      fuel > maxFuel * 0.2
+                        ? 'bg-gradient-to-r from-[#73470e] to-[#e5a820]'
+                        : 'bg-gradient-to-r from-[#7f1d1d] to-[#d32f2f] animate-pulse'
+                    }`}
+                    style={{ width: `${clampPercent((fuel / Math.max(1, maxFuel)) * 100)}%` }}
+                  />
+                </div>
               </div>
-              <div className="mt-1 flex items-center gap-2">
-                {salvoInfo.isPainting ? (
-                  <div className="flex items-center gap-2">
-                    <span className="animate-pulse text-xs font-black uppercase text-red-400" style={textShadow}>Locking:</span>
-                    <div className="flex gap-0.5">
-                      {[0, 1, 2, 3, 4, 5].map((idx) => (
-                        <div key={idx} className={`h-4 w-3 rounded-[2px] border transition-all duration-150 ${idx < salvoInfo.locks ? 'border-red-300 bg-[#ff3344]' : 'border-black/45 bg-black/40'}`} />
+
+              {/* Flares System */}
+              {countermeasureInfo && (
+                <div className="flex items-center justify-between pt-1.5 border-t border-[#3d4a30]">
+                  <div>
+                    <span className="font-hud text-xs font-bold text-[#ffcc00]">FLARES (C)</span>
+                    <div className="mt-0.5 flex items-center gap-1.5">
+                      {Array.from({ length: countermeasureInfo.maxCharges }).map((_, i) => (
+                        <span key={i} className={i < countermeasureInfo.charges ? 'mil-led-on' : 'mil-led-off'} />
                       ))}
                     </div>
                   </div>
-                ) : salvoInfo.cooldown > 0 ? (
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-black text-white/50" style={textShadow}>COOLDOWN</span>
-                    <div className="h-2 w-16 overflow-hidden rounded-[2px] border border-black/45 bg-black/40">
-                      <div className="h-full bg-red-400/50" style={{ width: `${(salvoInfo.cooldown / 5.0) * 100}%` }} />
-                    </div>
-                    <span className="text-xs font-black text-white/60" style={textShadow}>{salvoInfo.cooldown}s</span>
-                  </div>
-                ) : (
-                  <span className="animate-pulse text-xs font-extrabold text-[#35e66d]" style={textShadow}>READY (HOLD Q / R-CLICK)</span>
+                  {countermeasureInfo.cooldown > 0 ? (
+                    <span className="font-tech text-xs font-bold text-[#a89d7c]">{countermeasureInfo.cooldown.toFixed(1)}s</span>
+                  ) : (
+                    <span className="font-military text-xs text-[#8df578]">READY</span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Active Defensive Buffs */}
+            {statusInfo && (statusInfo.shield > 0 || statusInfo.damageBoost > 0 || statusInfo.speedBoost > 0 || statusInfo.afterburner) && (
+              <div className="flex flex-wrap gap-1.5">
+                {statusInfo.shield > 0 && (
+                  <div className="hud-status flex items-center gap-1 border-[#00e5ff]/50 text-[#80f0ff] font-hud text-xs font-bold px-2 py-0.5"><Shield size={12} /> SHIELD {Math.ceil(statusInfo.shield)}S</div>
+                )}
+                {statusInfo.damageBoost > 0 && (
+                  <div className="hud-status flex items-center gap-1 border-[#ffcc00]/50 text-[#ffea80] font-hud text-xs font-bold px-2 py-0.5"><Bomb size={12} /> DAMAGE {Math.ceil(statusInfo.damageBoost)}S</div>
+                )}
+                {statusInfo.speedBoost > 0 && (
+                  <div className="hud-status flex items-center gap-1 border-[#ff66cc]/50 text-[#ffa6e6] font-hud text-xs font-bold px-2 py-0.5"><Sparkles size={12} /> BOOST {Math.ceil(statusInfo.speedBoost)}S</div>
+                )}
+                {statusInfo.afterburner && (
+                  <div className="hud-status flex items-center gap-1 animate-pulse border-[#ff7700]/60 text-[#ffb066] font-hud text-xs font-bold px-2 py-0.5"><Flame size={12} /> AFTERBURNER</div>
                 )}
               </div>
-            </div>
-          )}
-
-          {/* Devastation super meter */}
-          {superInfo && mode === 'playing' && (
-            <div className="w-full">
-              <div className="mb-1 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.22em]">
-                <span className={superInfo.ready ? 'text-[#ff5d3a]' : 'text-white/55'} style={textShadow}>
-                  {superInfo.activeRemaining > 0 ? 'OVERCHARGE' : superInfo.cooldownRemaining > 0 ? 'DEV RECHARGING' : 'Devastation'}
-                </span>
-                {superInfo.ready && <span className="animate-pulse text-[#ffb199]" style={textShadow}>Press E</span>}
-                {superInfo.activeRemaining > 0 && <span className="text-[#ff8f6b]" style={textShadow}>{superInfo.activeRemaining.toFixed(1)}s</span>}
-                {superInfo.cooldownRemaining > 0 && superInfo.activeRemaining <= 0 && <span className="text-white/45" style={textShadow}>{Math.ceil(superInfo.cooldownRemaining)}s</span>}
-              </div>
-              <div className="h-2.5 w-full overflow-hidden border border-white/25 bg-black/45">
-                <div
-                  className={`h-full transition-[width] duration-150 ${superInfo.ready ? 'animate-pulse' : ''}`}
-                  style={{
-                    width: `${Math.min(100, (superInfo.charge / SUPER_MAX_CHARGE) * 100)}%`,
-                    background: superInfo.activeRemaining > 0
-                      ? 'linear-gradient(90deg,#ff5d3a,#ffd35c)'
-                      : superInfo.ready
-                        ? 'linear-gradient(90deg,#ff9b3d,#ff5d3a)'
-                        : 'linear-gradient(90deg,#7a3b2e,#ff9b3d)',
-                  }}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* BOTTOM-CENTER: loadout ability cards — hidden until upgrades exist */}
-        {mode === 'playing' && hasLoadoutUpgrades && (
-          <div className="pointer-events-none absolute bottom-5 left-1/2 flex -translate-x-1/2 items-end gap-1.5">
-            {[
-              { icon: <Rocket size={15} />, name: weaponInfo?.name ?? 'Gun', lv: weaponInfo?.level ?? 1, accent: '#3ae06b' },
-              { icon: <Cog size={15} />, name: 'Engine', lv: hangarUpgrades.engine, accent: '#ffbd3f' },
-              { icon: <Shield size={15} />, name: 'Armor', lv: hangarUpgrades.armor, accent: '#4aa8ff' },
-              { icon: <Fuel size={15} />, name: 'Fuel', lv: hangarUpgrades.fuel, accent: '#ffd35c' },
-              {
-                icon: <Bomb size={15} />,
-                name: 'Salvo',
-                lv: salvoInfo ? (salvoInfo.isPainting ? 'LOCK' : salvoInfo.cooldown > 0 ? 'CD' : 'RDY') : 0,
-                accent: '#ff5566',
-              },
-              { icon: <Sparkles size={15} />, name: 'Flares', lv: countermeasureInfo?.charges ?? 0, accent: '#c07bff' },
-            ].map((c, i) => (
-              <div key={c.name} className="hud-ability-card" style={{ borderColor: c.accent }}>
-                <span className="hud-card-num">{i + 1}</span>
-                <span className="leading-none" style={{ color: c.accent, filter: `drop-shadow(0 0 5px ${c.accent}99)` }}>{c.icon}</span>
-                <span className="hud-card-name" style={{ color: c.accent }}>{c.name}</span>
-                <span className="text-[0.55rem] font-black tracking-wide text-white/70">
-                  {typeof c.lv === 'number' ? `LV ${c.lv}` : c.lv}
-                </span>
-              </div>
-            ))}
+            )}
           </div>
         )}
 
-        {/* Contextual onboarding — short fading hints, never a persistent bar */}
+        {/* ══ BOTTOM-CENTER: Weapon & Combat Console + Combo Streak ══ */}
+        {mode === 'playing' && (
+          <div className={`pointer-events-none absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 z-30 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
+            {/* Active Combo Streak Dock */}
+            {comboInfo && comboInfo.count > 1 && (
+              <div className="hs-panel hs-panel-sm px-3 py-1 flex items-center gap-2.5 border-[#ffcc00]/60 shadow-[0_0_12px_rgba(255,204,0,0.35)]">
+                <span className="font-display text-sm sm:text-base text-[#ffcc00] leading-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+                  {comboInfo.count}× COMBO
+                </span>
+                <span className="font-tech text-xs font-bold text-white">
+                  ×{comboInfo.multiplier.toFixed(1)} MULT
+                </span>
+                <div className="h-1.5 w-16 hs-bar-track">
+                  <div
+                    className="hs-bar-fill bg-gradient-to-r from-[#d48b12] to-[#ffcc00]"
+                    style={{ width: `${clampPercent((comboInfo.timer / 3.0) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {weaponInfo && (
+              <div className="hs-panel flex flex-col items-center px-4 py-2 shadow-2xl min-w-[240px]">
+                {/* 4-Weapon Quick Select Slots */}
+                <div className="flex items-center justify-between w-full mb-1.5 pb-1 border-b border-[#3d4a30] gap-1">
+                  {[
+                    { key: '1', name: 'MG', type: 0 },
+                    { key: '2', name: 'MSL', type: 1 },
+                    { key: '3', name: 'RKT', type: 2 },
+                    { key: '4', name: 'SHT', type: 3 },
+                  ].map((slot) => {
+                    const isActive = weaponInfo.type === slot.type;
+                    return (
+                      <div
+                        key={slot.key}
+                        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-[2px] border text-[10px] font-tech font-bold transition-all ${
+                          isActive
+                            ? 'border-[#ffcc00] bg-[#332205] text-[#ffcc00] shadow-[0_0_8px_rgba(255,204,0,0.35)]'
+                            : 'border-[#334026] bg-[#141812] text-[#7a8c6a]'
+                        }`}
+                      >
+                        <span className={isActive ? 'text-[#ffcc00]' : 'text-[#4a593b]'}>[{slot.key}]</span>
+                        <span>{slot.name}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Weapon Name & LV */}
+                <div className="flex items-center justify-between w-full gap-3 border-b border-[#3d4a30] pb-1">
+                  <div className="flex items-center gap-1.5">
+                    <BulletIcon />
+                    <span className="font-military text-sm text-white tracking-wide">{weaponInfo.name}</span>
+                  </div>
+                  {(weaponInfo.level ?? 1) > 1 && (
+                    <span className="px-1.5 py-0.5 font-hud text-xs font-bold rounded-[2px] bg-[#332205] border border-[#f5ba2c] text-[#ffcc00]">
+                      LV.{weaponInfo.level}
+                    </span>
+                  )}
+                </div>
+
+              {/* Ammo (LARGE High-Contrast Numbers 24-28px) */}
+              <div className="my-1.5 flex flex-col items-center">
+                {weaponInfo.reloading ? (
+                  <div className="flex flex-col items-center gap-1">
+                    <span className="font-military text-sm text-[#ffcc00] animate-pulse">RELOADING…</span>
+                    <div className="h-2 w-36 hs-bar-track">
+                      <div
+                        className="hs-bar-fill bg-[#ffcc00] transition-[width] duration-100"
+                        style={{ width: `${clampPercent((1 - weaponInfo.reloadTimer / 2.0) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-baseline gap-1">
+                    <span className="font-tech text-2xl sm:text-3xl font-extrabold text-white tracking-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+                      {weaponInfo.ammo}
+                    </span>
+                    <span className="font-tech text-base text-[#a89d7c] font-bold">
+                      / {weaponInfo.maxAmmo}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Sub-bar: Salvo & Devastation Super */}
+              <div className="flex items-center justify-between w-full pt-1.5 border-t border-[#3d4a30] gap-3 text-xs font-hud">
+                {/* Multi-Salvo */}
+                {salvoInfo && (
+                  <div className="flex items-center gap-1.5">
+                    <TargetIcon />
+                    {salvoInfo.isPainting ? (
+                      <span className="font-military text-xs text-[#ff6666] animate-pulse">LOCKS {salvoInfo.locks}/5</span>
+                    ) : salvoInfo.cooldown > 0 ? (
+                      <span className="font-tech text-xs text-[#a89d7c]">{salvoInfo.cooldown}s</span>
+                    ) : (
+                      <span className="font-military text-xs text-[#8df578]">SALVO READY</span>
+                    )}
+                  </div>
+                )}
+
+                {/* Devastation Super */}
+                {superInfo && (
+                  <div className="flex items-center gap-1.5 border-l border-[#3d4a30] pl-2.5">
+                    <Zap size={12} className={superInfo.ready ? 'text-[#ffcc00]' : 'text-[#a89d7c]'} />
+                    {superInfo.ready ? (
+                      <span className="font-military text-xs text-[#ffcc00] animate-pulse">SUPER READY (E)</span>
+                    ) : (
+                      <span className="font-tech text-xs text-[#ded6be]">SUPER {Math.round(superInfo.charge)}%</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ BOTTOM-RIGHT: Credits, Score, Unsecured Pay ══ */}
+        {mode === 'playing' && (
+          <div className={`pointer-events-none absolute right-3 flex flex-col items-end gap-1.5 z-30 sm:right-4 ${touchDevice ? 'bottom-64' : 'bottom-4'}`}>
+            <div className="hs-panel px-3.5 py-2 min-w-[170px] flex flex-col gap-1">
+              <div className="flex justify-between items-center">
+                <span className="font-hud text-xs font-bold text-[#a89d7c] tracking-wider">CREDITS</span>
+                <span className="font-tech text-lg font-bold text-[#ffcc00] tabular-nums drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+                  {credits.toLocaleString()} CR
+                </span>
+              </div>
+              <div className="flex justify-between items-center border-t border-[#3d4a30] pt-1">
+                <span className="font-hud text-xs font-bold text-[#a89d7c] tracking-wider">SCORE</span>
+                <span className="font-tech text-sm font-bold text-white tabular-nums">
+                  {score.toLocaleString()}
+                </span>
+              </div>
+              {unsecuredCredits > 0 && (
+                <div className="text-right font-hud text-xs font-bold text-[#ff9900] pt-0.5">
+                  + {unsecuredCredits.toLocaleString()} UNSECURED
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Contextual onboarding hints (fades after 4s) */}
         {mode === 'playing' && !touchDevice && <ControlHints runId={hintsKey} />}
       </div>
 
       {mode === 'playing' && waveMessage && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/10">
-          <h2 className="font-display whitespace-pre-line text-center text-3xl uppercase tracking-widest text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.55)] sm:text-4xl">
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/20">
+          <h2 className="arcade-title-hero whitespace-pre-line text-center">
             {waveMessage}
           </h2>
         </div>
       )}
 
-      {/* Opening countdown: GET READY 3-2-1 — hidden while the tutorial runs */}
+      {/* Opening countdown */}
       {mode === 'playing' && !tutorial?.active && opening?.phase === 'countdown' && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-1">
-          <div className="font-display text-xl uppercase tracking-[0.34em] text-[#9bf1ff] sm:text-2xl" style={textShadow}>
-            Get Ready — {opening.count ?? 3}
+        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-2">
+          <div className="arcade-title-hero text-center">
+            GET READY — {opening.count ?? 3}
           </div>
-          <div className="mt-1 text-[11px] font-black uppercase tracking-[0.24em] text-[#7df9ff]" style={textShadow}>
-            Shield active · you cannot be hurt
+          <div className="text-xs font-military tracking-[0.24em] text-[#8df578] drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+            INVULNERABILITY SHIELD ACTIVE
           </div>
         </div>
       )}
       {mode === 'playing' && goFlash > 0 && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
-          <div className="font-display text-8xl text-[#55f2a2] drop-shadow-[0_5px_0_rgba(0,0,0,0.6)]">GO</div>
+          <div className="arcade-title-hero text-8xl text-[#6ee740]">GO!</div>
         </div>
       )}
 
       {/* First-run interactive tutorial card */}
       {mode === 'playing' && tutorial?.active && (
-        <div className="absolute bottom-24 left-1/2 z-30 w-[min(430px,88vw)] -translate-x-1/2">
-          <div className="hud-panel border-[#ffe66d]/60 px-4 py-3 text-center shadow-[0_0_22px_rgba(255,230,109,0.25)]">
+        <div className="absolute bottom-24 left-1/2 z-30 w-[min(450px,90vw)] -translate-x-1/2">
+          <div className="menu-card px-4 py-3 text-center">
             <div className="flex items-center justify-between">
-              <span className="text-[9px] font-black uppercase tracking-[0.24em] text-[#ffe66d]/80">
-                Tutorial {(tutorial.index ?? 0) + 1}/{tutorial.total ?? 0}
+              <span className="mil-label">
+                TUTORIAL STEP {(tutorial.index ?? 0) + 1}/{tutorial.total ?? 0}
               </span>
               <button
                 type="button"
                 onClick={() => engineRef.current?.skipTutorial()}
-                className="pointer-events-auto text-[9px] font-black uppercase tracking-[0.18em] text-white/55 underline-offset-2 transition hover:text-white hover:underline"
+                className="pointer-events-auto text-[9px] font-military text-[#a89d7c] hover:text-[#ffcc00]"
               >
-                Skip Tutorial
+                SKIP TUTORIAL
               </button>
             </div>
-            <div className="font-display mt-1 text-lg uppercase tracking-[0.14em] text-white" style={textShadow}>
+            <div className="arcade-title-md mt-1 text-white">
               {tutorial.title}
             </div>
-            <div className="mt-0.5 text-xs font-bold text-[#bfeeff]" style={textShadow}>
+            <div className="mt-1 text-xs font-semibold text-[#ded6be]">
               {tutorial.desc}
             </div>
             <div className="mt-2 flex gap-1">
               {Array.from({ length: tutorial.total ?? 0 }).map((_, i) => (
-                <div key={i} className={`h-1 flex-1 rounded-full ${i <= (tutorial.index ?? 0) ? 'bg-[#ffe66d]' : 'bg-white/20'}`} />
+                <div key={i} className={`h-1.5 flex-1 rounded-[1px] ${i <= (tutorial.index ?? 0) ? 'bg-[#ffcc00]' : 'bg-[#0f130c]'}`} />
               ))}
             </div>
           </div>
@@ -3044,19 +3329,19 @@ export default function App() {
             type="button"
             aria-label="Deploy flares to break missile locks"
             onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:countermeasure')); }}
-            className="pointer-events-auto absolute bottom-36 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#ffbd3f] bg-[#613914]/80 text-[10px] font-black uppercase text-[#ffe0a0]"
+            className="pointer-events-auto absolute bottom-36 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#f5ba2c] bg-[#332205]/90 text-[10px] font-military text-[#ffcc00] shadow-lg"
           >
             <span aria-hidden="true">🔥</span>
-            Flares
+            FLARES
           </button>
           <button
             type="button"
             aria-label="Trigger Devastation super attack when meter is full"
             onPointerDown={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('helistrike:super')); }}
-            className="pointer-events-auto absolute bottom-56 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#ff5d3a] bg-[#5c1a0d]/80 text-[10px] font-black uppercase text-[#ffb199]"
+            className="pointer-events-auto absolute bottom-56 right-8 flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-full border-2 border-[#d32f2f] bg-[#4a0808]/90 text-[10px] font-military text-[#ff8a8a] shadow-lg"
           >
             <span aria-hidden="true">💥</span>
-            Super
+            SUPER
           </button>
         </div>
       )}
@@ -3070,53 +3355,56 @@ export default function App() {
         />
       )}
 
-      {/* Weapon upgrade roulette */}
+      {/* Level-Up Upgrade Cards */}
       {upgradeOffer && mode === 'playing' && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#04081f]/65 backdrop-blur-[1px]">
-          <div
-            className="w-[min(680px,92vw)] border-2 border-[#50ebff]/70 bg-[#0a1140]/97 p-5 shadow-[0_24px_60px_rgba(0,0,0,0.6),0_0_30px_rgba(80,235,255,0.15)] sm:p-7"
-            style={{ clipPath: 'polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px))' }}
-          >
-            <div className="mb-1 flex items-center justify-center gap-1 text-center text-[11px] font-black uppercase tracking-[0.3em] text-[#7df9ff] drop-shadow-[0_0_8px_rgba(80,235,255,0.6)]">
-              <Zap size={12} /> Level Up
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/80 px-3 py-4 backdrop-blur-[2px]">
+          <div className="menu-card w-[min(720px,94vw)] p-5 sm:p-7">
+            <span className="mil-rivet mil-rivet-tl" />
+            <span className="mil-rivet mil-rivet-tr" />
+            <span className="mil-rivet mil-rivet-bl" />
+            <span className="mil-rivet mil-rivet-br" />
+
+            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
+
+            <div className="menu-title-slab mb-4 text-center">
+              <div className="flex items-center justify-center gap-1.5 text-[10px] font-military tracking-[0.26em] text-[#ffcc00] text-center w-full">
+                <Zap size={12} className="text-[#ffcc00]" />
+                <span>FIELD PROMOTION</span>
+                <Zap size={12} className="text-[#ffcc00]" />
+              </div>
+              <h2 className="arcade-title-lg my-1 text-center w-full whitespace-nowrap">LEVEL UP!</h2>
+              <div className="text-[10px] font-military tracking-[0.18em] text-[#a89d7c] text-center w-full">
+                SELECT ONE TACTICAL UPGRADE PROTOCOL
+              </div>
             </div>
-            <h2 className="font-display bg-gradient-to-b from-[#7df9ff] via-[#50ebff] to-[#ff4fd8] bg-clip-text mb-5 text-center text-lg uppercase tracking-widest text-transparent" style={textShadow}>
-              Choose an Upgrade
-            </h2>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              {upgradeOffer.map((opt, idx) => {
-                const accent = ['#50ebff', '#ff4fd8', '#ffe66d', '#55f2a2', '#ff9b3d'][idx % 5];
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => chooseUpgrade(opt.id)}
-                    className="group flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-5 text-center transition hover:-translate-y-1 active:translate-y-0"
-                    style={{
-                      borderColor: `${accent}66`,
-                      background: 'linear-gradient(180deg, rgba(16,26,66,0.95), rgba(8,13,42,0.96))',
-                      boxShadow: `inset 0 0 18px ${accent}14`,
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = accent;
-                      e.currentTarget.style.boxShadow = `0 10px 28px ${accent}40, inset 0 0 24px ${accent}1f`;
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = `${accent}66`;
-                      e.currentTarget.style.boxShadow = `inset 0 0 18px ${accent}14`;
-                    }}
-                  >
-                    <span className="text-4xl transition-transform group-hover:scale-125" style={{ filter: `drop-shadow(0 0 12px ${accent}80)` }}>{opt.icon}</span>
-                    <span className="text-[9px] font-black uppercase tracking-[0.22em] text-white/50">{opt.category}</span>
-                    <span className="text-sm font-black uppercase tracking-wide" style={{ color: accent }}>{opt.title}</span>
-                    <span className="text-xs font-semibold leading-snug text-white/85">{opt.desc}</span>
-                  </button>
-                );
-              })}
+
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+              {upgradeOffer.map((opt, idx) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => { uiClick(); chooseUpgrade(opt.id); }}
+                  className="group relative flex flex-col items-center gap-2 mil-panel px-4 py-5 text-center transition hover:-translate-y-1 active:translate-y-0.5 hover:border-[#ffcc00] hover:shadow-[0_0_18px_rgba(255,204,0,0.4)]"
+                >
+                  <div className="absolute top-2 left-2 px-1.5 py-0.5 rounded-[2px] bg-[#141a0f] border border-[#ffcc00]/50 text-[9px] font-tech font-bold text-[#ffcc00] shadow-[0_0_6px_rgba(255,204,0,0.2)]">
+                    KEY [{idx + 1}]
+                  </div>
+                  <span className="text-4xl transition-transform group-hover:scale-110 drop-shadow-[0_2px_6px_rgba(0,0,0,0.8)] mt-1">{opt.icon}</span>
+                  <span className="text-[9px] font-military tracking-[0.2em] text-[#a89d7c] uppercase">{opt.category}</span>
+                  <span className="text-sm font-military tracking-wide text-[#ffcc00]">{opt.title}</span>
+                  <span className="text-xs font-semibold leading-snug text-[#ded6be] min-h-10">{opt.desc}</span>
+                  <span className="mt-2 mil-btn mil-btn-primary mil-btn-sm w-full py-1 text-[10px] tracking-[0.14em]">
+                    EQUIP [KEY {idx + 1}]
+                  </span>
+                </button>
+              ))}
             </div>
-            <div className="mt-4 text-center text-[11px] font-bold uppercase tracking-wider text-[#9bf1ff]/60">
-              Game paused — pick one
+
+            <div className="mt-4 text-center text-[10px] font-military tracking-wider text-[#a89d7c]">
+              SIMULATION PAUSED — CHOOSE PROTOCOL TO CONTINUE SORTIE
             </div>
+
+            <div className="mil-hazard-strip mt-3 rounded-[1px]" />
           </div>
         </div>
       )}

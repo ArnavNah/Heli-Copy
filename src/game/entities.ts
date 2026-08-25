@@ -8,6 +8,7 @@ import {
   copyPhysicsPos,
   EnemyLock,
   EnemyModifier,
+  EnemyMovementClass,
   EnemyType,
   EnemyVariant,
   HelicopterModel,
@@ -96,15 +97,31 @@ function disableShadowCasting(root: THREE.Object3D) {
 export const MOVEMENT_CONFIG = {
   /** Normal cruise speed cap (u/s). */
   maxHorizontalSpeed: 68,
-  /** Snappy acceleration — reaches cruise in ~0.24s. */
+  /** Snappy normal acceleration — reaches cruise in ~0.24s. */
   horizontalAcceleration: 290,
-  /** Strong braking — release-to-hover in ~0.30s from cruise. */
-  horizontalBraking: 230,
-  /** Aggressive counter-steering for responsive combat reversal. */
-  reverseAcceleration: 400,
-  /** Strong low-speed authority, with only a small amount of high-speed inertia. */
-  lateralResponse: 1.08,
-  highSpeedResponse: 0.92,
+  /** Strong braking — release-to-hover in ~0.28s from cruise. */
+  horizontalBraking: 250,
+  /** Aggressive counter-steering for responsive 180° combat reversal. */
+  reverseAcceleration: 420,
+  /** Directional steering acceleration for curved physical turn transitions. */
+  steeringAcceleration: 310,
+  /** Strong low-speed authority, with natural turning inertia at high speed. */
+  lowSpeedSteeringMultiplier: 1.18,
+  highSpeedSteeringMultiplier: 0.88,
+  /** Analog stick radial deadzone. */
+  analogDeadzone: 0.15,
+  /** Body yaw critically-damped spring dynamics (rad/s² and rad/s). */
+  bodyYawSpring: 64.0,
+  bodyYawDamping: 14.5,
+  maxYawSpeed: 4.8, // ~275°/sec max angular velocity
+  maxYawAcceleration: 34.0, // max angular acceleration rate
+  /** Max bank roll and pitch limits (radians). */
+  maxRoll: 0.32, // ~18.3°
+  maxPitch: 0.16, // ~9.2°
+  /** Bank response speeds (/s). */
+  bankResponse: 8.5,
+  bankReturnResponse: 5.0,
+  visualAccelerationSmoothing: 14.0,
   /** Vertical flight is deliberately a little heavier than horizontal flight. */
   maxVerticalSpeed: 32,
   verticalAcceleration: 125,
@@ -117,6 +134,7 @@ export const MOVEMENT_CONFIG = {
   /** Afterburner changes the speed envelope and slightly improves acceleration. */
   afterburnerMultiplier: 1.55,
   afterburnerAccelerationMultiplier: 1.08,
+  afterburnerSteeringMultiplier: 0.90,
   /** Speed-boost power-up multiplier. */
   speedBoostMultiplier: 1.24,
   /** Minimum altitude above terrain/buildings (u). */
@@ -236,6 +254,9 @@ export class Helicopter extends Entity {
   smoothedHoverFloor: number = 0;
   aimPosition: THREE.Vector3 = new THREE.Vector3(0, 26, -30);
 
+  // Body yaw angular velocity (rad/s)
+  bodyYawVelocity: number = 0;
+
   // Dash variables
   dashTimer: number = 0;
   dashDuration: number = MOVEMENT_CONFIG.dashDuration;
@@ -244,8 +265,10 @@ export class Helicopter extends Entity {
 
   triggerDash(dx: number, dz: number) {
     this.dashTimer = this.dashDuration;
-    this.dashRollDirection = dx;
-    this.dashPitchDirection = -dz; // Negative Z is forward
+    const cy = Math.cos(this.mesh.rotation.y);
+    const sy = Math.sin(this.mesh.rotation.y);
+    this.dashRollDirection = dx * cy - dz * sy;
+    this.dashPitchDirection = dx * sy + dz * cy;
   }
 
   constructor(scene: THREE.Scene, world: CANNON.World, model: HelicopterModel = HelicopterModel.APACHE) {
@@ -257,28 +280,29 @@ export class Helicopter extends Entity {
     const baseGroup = new THREE.Group();
 
     // Model-tinted shared materials (Nighthawk is dark slate, Warlock olive,
-    // Apache keeps the original green — so each model keeps its own identity)
+    // Materials per model (Apache = vibrant military olive green matching reference diorama,
+    // Nighthawk = stealth slate, Warlock = heavy twin-rotor camo green)
     const bodyMat = createLowPolyMaterial(
       model === HelicopterModel.NIGHTHAWK
-        ? 0x242c30
+        ? 0x2c3338
         : model === HelicopterModel.WARLOCK
-          ? 0x3a4436
-          : 0x2d3a2e,
+          ? 0x3d4f2e
+          : 0x4d5f36,
     );
     const darkBodyMat = createLowPolyMaterial(
       model === HelicopterModel.NIGHTHAWK
-        ? 0x101820
+        ? 0x181c20
         : model === HelicopterModel.WARLOCK
-          ? 0x242c2a
-          : 0x1a211a,
+          ? 0x26331c
+          : 0x2f3c20,
     );
     const glassMat = createLowPolyMaterial(
-      model === HelicopterModel.NIGHTHAWK ? 0x101820 : 0x1c2b33,
+      model === HelicopterModel.NIGHTHAWK ? 0x141e24 : 0x1c2b36,
     );
-    const metalMat = createLowPolyMaterial(0x5a6360);
-    const bladeMat = createLowPolyMaterial(0x161a18);
-    const ordnanceMat = createLowPolyMaterial(0x212b25);
-    const accentMat = createLowPolyMaterial(0xb33127);
+    const metalMat = createLowPolyMaterial(0x5a6368);
+    const bladeMat = createLowPolyMaterial(0x1a1e20);
+    const ordnanceMat = createLowPolyMaterial(0x283424);
+    const accentMat = createLowPolyMaterial(0xde5932);
 
     if (model === HelicopterModel.NIGHTHAWK) {
       this.buildNighthawk(baseGroup, bodyMat, darkBodyMat, glassMat, metalMat, bladeMat, accentMat);
@@ -410,6 +434,8 @@ export class Helicopter extends Entity {
     this.body.fixedRotation = true;
     this.body.updateMassProperties();
     world.addBody(this.body);
+
+    this.mesh.rotation.y = Math.PI;
   }
 
   /** Default Apache attack helicopter (original design). */
@@ -943,6 +969,7 @@ export class Helicopter extends Entity {
     this.crashTiltStrength = 1;
     this.idleBlend = 0;
     this.idleBobY = 0;
+    this.bodyYawVelocity = 0;
     this.gunAimMode = false;
     this.terrainSafetyActive = false;
     this.trailEffectTimer = 0;
@@ -1015,14 +1042,10 @@ export class Helicopter extends Entity {
         // controller resumes from a clean baseline instead of unwinding a full turn.
         this.mesh.rotation.x = 0;
         this.mesh.rotation.z = 0;
-      } else if (this.dashRollDirection !== 0) {
+      } else {
         const dashPose = Math.sin(progress * Math.PI);
-        this.mesh.rotation.z = dashPose * 0.42 * -this.dashRollDirection;
-        this.mesh.rotation.x = dashPose * -0.14;
-      } else if (this.dashPitchDirection !== 0) {
-        // Forward/back dashes use a readable weight shift, never a full flip.
-        this.mesh.rotation.x = Math.sin(progress * Math.PI) * 0.25 * this.dashPitchDirection;
-        this.mesh.rotation.z = 0;
+        this.mesh.rotation.z = dashPose * 0.38 * -this.dashRollDirection;
+        this.mesh.rotation.x = dashPose * 0.24 * this.dashPitchDirection;
       }
 
       copyPhysicsPos(this.mesh, this.body.position);
@@ -1105,6 +1128,7 @@ export class Helicopter extends Entity {
     const moveZ = move?.z ?? 0;
     const moveY = move?.y ?? 0;
     const cargoMultiplier = move?.cargoMultiplier ?? 1;
+    const isAfterburner = (move?.afterburner ?? 1) > 1;
     const speedMult =
       (move?.afterburner ?? 1) *
       (speedBoostActive ? cfg.speedBoostMultiplier : 1) *
@@ -1127,24 +1151,44 @@ export class Helicopter extends Entity {
 
     const vx = this.body.velocity.x;
     const vz = this.body.velocity.z;
-    const speedBefore = Math.sqrt(vx * vx + vz * vz);
-    const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
-    const reversing = desiredSpeed > 0.001 && vx * desiredVx + vz * desiredVz < 0;
-    const slowing = desiredSpeed < speedBefore - 0.01;
+    const speedBefore = Math.hypot(vx, vz);
+    const desiredSpeed = Math.hypot(desiredVx, desiredVz);
+
+    // Compute dot product of current velocity and desired velocity to pick acceleration mode
+    const dotProduct = vx * desiredVx + vz * desiredVz;
+    const reversing = speedBefore > 2.0 && desiredSpeed > 2.0 && dotProduct < -0.3 * speedBefore * desiredSpeed;
+    const stopping = desiredSpeed < 0.01;
+    const isTurn = speedBefore > 4.0 && desiredSpeed > 4.0 && !reversing;
+
+    // Pick situation-aware acceleration mode (normal, braking, reversal, turn)
+    let baseAcceleration: number = cfg.horizontalAcceleration;
+    if (reversing) {
+      baseAcceleration = cfg.reverseAcceleration;
+    } else if (stopping || desiredSpeed < speedBefore - 4.0) {
+      baseAcceleration = cfg.horizontalBraking;
+    } else if (isTurn) {
+      baseAcceleration = cfg.steeringAcceleration;
+    }
+
+    if (isAfterburner) baseAcceleration *= cfg.afterburnerAccelerationMultiplier;
+
+    // Speed-dependent steering responsiveness (high agility at low speed, physical arcs at high speed)
     const speedRatio = THREE.MathUtils.clamp(speedBefore / Math.max(maxSpeed, 1), 0, 1);
-    const authority = THREE.MathUtils.lerp(cfg.lateralResponse, cfg.highSpeedResponse, speedRatio);
-    let acceleration = reversing
-      ? cfg.reverseAcceleration
-      : desiredSpeed < 0.001 || slowing
-        ? cfg.horizontalBraking
-        : cfg.horizontalAcceleration;
-    if ((move?.afterburner ?? 1) > 1) acceleration *= cfg.afterburnerAccelerationMultiplier;
-    acceleration *= authority * rotorEff * cargoMultiplier * profile.accel;
+    let steeringResponsiveness = THREE.MathUtils.lerp(
+      cfg.lowSpeedSteeringMultiplier,
+      cfg.highSpeedSteeringMultiplier,
+      speedRatio,
+    );
+    if (isAfterburner) steeringResponsiveness *= cfg.afterburnerSteeringMultiplier;
+
+    const totalAcceleration =
+      baseAcceleration * steeringResponsiveness * rotorEff * cargoMultiplier * profile.accel;
 
     const deltaVx = desiredVx - vx;
     const deltaVz = desiredVz - vz;
-    const deltaSpeed = Math.sqrt(deltaVx * deltaVx + deltaVz * deltaVz);
-    const maxVelocityChange = acceleration * delta;
+    const deltaSpeed = Math.hypot(deltaVx, deltaVz);
+    const maxVelocityChange = totalAcceleration * delta;
+
     if (deltaSpeed <= maxVelocityChange || deltaSpeed < 0.0001) {
       this.body.velocity.x = desiredVx;
       this.body.velocity.z = desiredVz;
@@ -1153,6 +1197,7 @@ export class Helicopter extends Entity {
       this.body.velocity.x += deltaVx * step;
       this.body.velocity.z += deltaVz * step;
     }
+
     if (desiredSpeed === 0 && Math.abs(this.body.velocity.x) < 0.02) this.body.velocity.x = 0;
     if (desiredSpeed === 0 && Math.abs(this.body.velocity.z) < 0.02) this.body.velocity.z = 0;
 
@@ -1165,9 +1210,6 @@ export class Helicopter extends Entity {
       }
     }
 
-    // Wind drift was folded into desiredVx/desiredVz above — the velocity
-    // controller below brakes back to pure input as the gust fades.
-
     // Step 8/9: vertical is separate from horizontal — climb/descend with its
     // own accel/brake/cap, plus a terrain-safety floor and altitude cap.
     this.applyVerticalControl(time, delta, moveY, engineEff, rotorEff, cargoMultiplier);
@@ -1176,11 +1218,11 @@ export class Helicopter extends Entity {
     const newVx = this.body.velocity.x;
     const newVz = this.body.velocity.z;
     const newVy = this.body.velocity.y;
-    const speed = Math.sqrt(newVx * newVx + newVz * newVz);
+    const speed = Math.hypot(newVx, newVz);
 
     // Step 19 movement safety: abnormal speed ⇒ corrupted body — clamp and log
     // instead of letting it fly off the map and corrupt the whole sim.
-    const totalSpeed = Math.sqrt(speed * speed + newVy * newVy);
+    const totalSpeed = Math.hypot(speed, newVy);
     if (totalSpeed > cfg.safetyMaxSpeed) {
       if (import.meta.env.DEV) {
         console.warn(
@@ -1199,30 +1241,81 @@ export class Helicopter extends Entity {
     // "hangs" in its own rotor wash instead of freezing mid-air.
     const idleTarget = isIdle ? 1 : 0;
     this.idleBlend += (idleTarget - this.idleBlend) * (1 - Math.exp(-2.2 * delta));
-    const inputAgility = Math.min(speed / 80.0, 1.0);
 
-    // Body heading is movement-only. The nose NEVER turns toward the aim
-    // point, the mouse, or enemies — the chin gun turret does all aiming
-    // (see the gun update below), so the aircraft flies on course while the
-    // weapon tracks independently. When hovering (speed <= 4) the body holds
-    // its last heading instead of drifting toward anything.
+    // Body heading: physical heading blend based on speed & actual movement
+    // - Low speed / stationary: follow input direction
+    // - High speed: follow actual velocity vector with subtle anticipation blend
+    // - Zero speed & no input: hold current heading
+    const inputMag = Math.hypot(moveX, moveZ);
     let targetAngle = this.mesh.rotation.y;
-    if (speed > 4) {
-      targetAngle = Math.atan2(newVx, newVz);
+    if (speed > 1.5 || inputMag > 0.05) {
+      if (speed < 4.0 && inputMag > 0.05) {
+        // Low speed start-up: follow input direction
+        targetAngle = Math.atan2(moveX, moveZ);
+      } else if (speed >= 4.0) {
+        const velHeading = Math.atan2(newVx, newVz);
+        if (inputMag > 0.05) {
+          const inputHeading = Math.atan2(moveX, moveZ);
+          let hDiff = inputHeading - velHeading;
+          while (hDiff < -Math.PI) hDiff += Math.PI * 2;
+          while (hDiff > Math.PI) hDiff -= Math.PI * 2;
+          // Velocity dominates heading at speed, with subtle anticipation from stick
+          const inputWeight = THREE.MathUtils.lerp(
+            0.30,
+            0.12,
+            THREE.MathUtils.clamp((speed - 4.0) / 30.0, 0, 1),
+          );
+          targetAngle = velHeading + hDiff * inputWeight;
+        } else {
+          targetAngle = velHeading;
+        }
+      } else if (speed > 1.5) {
+        targetAngle = Math.atan2(newVx, newVz);
+      }
     }
 
-    let currentAngle = this.mesh.rotation.y;
-    let diff = targetAngle - currentAngle;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    while (diff > Math.PI) diff -= Math.PI * 2;
+    // Wrap target angle to [-PI, PI]
+    while (targetAngle < -Math.PI) targetAngle += Math.PI * 2;
+    while (targetAngle > Math.PI) targetAngle -= Math.PI * 2;
 
-    // Turn the nose toward travel with a yaw-RATE limit: at speed the aircraft
-    // swings wide (helicopter inertia), at hover it pivots tight. The limit
-    // replaces the old exponential snap so high-speed turns read as weighty.
-    const speedRatioTurn = THREE.MathUtils.clamp(speed / Math.max(maxSpeed, 1), 0, 1);
-    const maxYawRate = THREE.MathUtils.lerp(7.0, 3.0, speedRatioTurn) * rotorEff * profile.turn * (1 + inputAgility * 0.25);
-    const maxStep = maxYawRate * delta;
-    this.mesh.rotation.y += THREE.MathUtils.clamp(diff, -maxStep, maxStep);
+    // Shortest-angle error
+    let yawError = targetAngle - this.mesh.rotation.y;
+    while (yawError < -Math.PI) yawError += Math.PI * 2;
+    while (yawError > Math.PI) yawError -= Math.PI * 2;
+
+    // Critically damped second-order angular dynamics with acceleration limits
+    const springK = cfg.bodyYawSpring * profile.turn * rotorEff;
+    const dampingC = cfg.bodyYawDamping * Math.sqrt(profile.turn * rotorEff);
+    let angularAcceleration = yawError * springK - this.bodyYawVelocity * dampingC;
+
+    // Clamp angular acceleration
+    const maxAngularAccel = cfg.maxYawAcceleration * profile.turn;
+    angularAcceleration = THREE.MathUtils.clamp(
+      angularAcceleration,
+      -maxAngularAccel,
+      maxAngularAccel,
+    );
+
+    this.bodyYawVelocity += angularAcceleration * delta;
+
+    // Clamp max angular velocity
+    const maxYawSpeed = cfg.maxYawSpeed * profile.turn;
+    this.bodyYawVelocity = THREE.MathUtils.clamp(
+      this.bodyYawVelocity,
+      -maxYawSpeed,
+      maxYawSpeed,
+    );
+
+    // If near target and low angular speed, settle cleanly
+    if (Math.abs(yawError) < 0.001 && Math.abs(this.bodyYawVelocity) < 0.01) {
+      this.bodyYawVelocity = 0;
+      this.mesh.rotation.y = targetAngle;
+    } else {
+      this.mesh.rotation.y += this.bodyYawVelocity * delta;
+    }
+
+    while (this.mesh.rotation.y < -Math.PI) this.mesh.rotation.y += Math.PI * 2;
+    while (this.mesh.rotation.y > Math.PI) this.mesh.rotation.y -= Math.PI * 2;
 
     // Synchronize the visual root before converting world aim into turret-local space.
     copyPhysicsPos(this.mesh, this.body.position);
@@ -1289,61 +1382,35 @@ export class Helicopter extends Entity {
 
     const cy = Math.cos(this.mesh.rotation.y);
     const sy = Math.sin(this.mesh.rotation.y);
-    // Transform velocity to local space (Z forward, X right)
-    const localVx = newVx * cy - newVz * sy;
-    const localVz = newVx * sy + newVz * cy;
 
-    // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
-    const tiltMultiplier = isIdle ? 0.22 : 1.25;
-
-    // Phase 2: lean-in from acceleration (difference between desired and actual velocity)
-    // — replaces the old force-based term (fx/fz no longer exist).
+    // Transform filtered acceleration into helicopter local space (Z forward, X right)
     const accelX = this.filteredAcceleration.x;
     const accelZ = this.filteredAcceleration.z;
     const localAx = accelX * cy - accelZ * sy;
     const localAz = accelX * sy + accelZ * cy;
 
-    // Phase 2 physics banking: velocity-driven bank + acceleration lean-in,
-    // with explicit arcade limits — roll ±17°, pitch ±9° (never 45°+ rails).
-    // The acceleration term (localAx/localAz = desired−actual) makes the ship
-    // visibly lean INTO a direction change, then settle as velocity catches up.
-    // One authoritative calculation; critically-damped exp smoothing: quick
-    // lean-in, slightly slower return to neutral (no oscillation, no jitter).
-    const ROLL_LIMIT = 0.30; // ~17°
-    const PITCH_LIMIT = 0.16; // ~9°
-    const BANK_IN_RESPONSE = 7.5;
-    const BANK_OUT_RESPONSE = 4.5;
-    const targetTiltX =
-      THREE.MathUtils.clamp(
-        (localVz * 0.0022 +
-          THREE.MathUtils.clamp(localAz * 0.00075, -0.14, 0.14)) *
-          tiltMultiplier,
-        -PITCH_LIMIT,
-        PITCH_LIMIT,
-      );
-    // Climb pitches the nose up, descent pitches it down — vertical motion now
-    // has a visible attitude, so the hull reads as flying a 3D vector instead
-    // of a hovering turret on a flat plane.
-    const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0011, -0.06, 0.06);
-    let targetTiltZ =
-      -THREE.MathUtils.clamp(
-        (localVx * 0.0046 +
-          THREE.MathUtils.clamp(localAx * 0.00085, -0.16, 0.16)) *
-          tiltMultiplier,
-        -ROLL_LIMIT,
-        ROLL_LIMIT,
-      );
+    const ROLL_LIMIT = cfg.maxRoll;
+    const PITCH_LIMIT = cfg.maxPitch;
 
-    // Anticipation roll: the moment the pilot commits a strafe input, the hull
-    // tips into the turn BEFORE velocity catches up (blends back as the lean-in
-    // from acceleration takes over). Reads as decisive, responsive control
-    // instead of lagging visually behind the physics.
-    const strafeInput = move?.x ?? 0;
-    if (Math.abs(strafeInput) > 0.01) {
-      const grip = THREE.MathUtils.clamp(0.55 + inputAgility * 0.45, 0.55, 1);
-      const anticipation = THREE.MathUtils.clamp(-strafeInput * 0.055 * grip, -0.09, 0.09);
-      targetTiltZ = THREE.MathUtils.clamp(targetTiltZ + anticipation, -ROLL_LIMIT, ROLL_LIMIT);
-    }
+    // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
+    const tiltMultiplier = isIdle ? 0.22 : 1.0;
+
+    // Lateral acceleration creates roll (banking into turn)
+    let targetTiltZ = -THREE.MathUtils.clamp(
+      localAx * 0.00155 * tiltMultiplier,
+      -ROLL_LIMIT,
+      ROLL_LIMIT,
+    );
+
+    // Longitudinal acceleration creates pitch (nose-down on accel, nose-up on brake)
+    const targetTiltX = THREE.MathUtils.clamp(
+      localAz * 0.00115 * tiltMultiplier,
+      -PITCH_LIMIT,
+      PITCH_LIMIT,
+    );
+
+    const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0011, -0.06, 0.06);
+
     // Gentle figure-eight sway while hovering idle — the hull drifts a few
     // degrees in roll/pitch like a real helicopter holding station.
     if (this.idleBlend > 0.001) {
@@ -1353,20 +1420,24 @@ export class Helicopter extends Entity {
         ROLL_LIMIT,
       );
     }
+
     const targetPitch = THREE.MathUtils.clamp(
       targetTiltX + climbPitch + this.firePitchImpulse +
         Math.sin(time * 0.7 + this.idlePhase) * 0.012 * this.idleBlend,
       -PITCH_LIMIT,
       PITCH_LIMIT,
     );
+
+    // Asymmetric bank response: faster lean-in (~0.12s), smoother return to neutral (~0.20s)
     const bankRespX =
       Math.abs(targetPitch) >= Math.abs(this.mesh.rotation.x)
-        ? BANK_IN_RESPONSE
-        : BANK_OUT_RESPONSE;
+        ? cfg.bankResponse
+        : cfg.bankReturnResponse;
     const bankRespZ =
       Math.abs(targetTiltZ) >= Math.abs(this.mesh.rotation.z)
-        ? BANK_IN_RESPONSE
-        : BANK_OUT_RESPONSE;
+        ? cfg.bankResponse
+        : cfg.bankReturnResponse;
+
     this.mesh.rotation.x +=
       (targetPitch - this.mesh.rotation.x) * (1 - Math.exp(-bankRespX * profile.bank * delta));
     this.mesh.rotation.z +=
@@ -1429,7 +1500,7 @@ export class Helicopter extends Entity {
       450,
     );
     this.currentAcceleration.set(rawX, rawY, rawZ);
-    const alpha = 1 - Math.exp(-12 * delta);
+    const alpha = 1 - Math.exp(-MOVEMENT_CONFIG.visualAccelerationSmoothing * delta);
     this.filteredAcceleration.x += (rawX - this.filteredAcceleration.x) * alpha;
     this.filteredAcceleration.y += (rawY - this.filteredAcceleration.y) * alpha;
     this.filteredAcceleration.z += (rawZ - this.filteredAcceleration.z) * alpha;
@@ -1489,6 +1560,8 @@ export class Helicopter extends Entity {
 
 
 export class Enemy extends Entity {
+  private static _nextEnemyId = 1;
+  readonly id: number = Enemy._nextEnemyId++;
   ring: THREE.Object3D;
   hp: number;
   maxHp: number;
@@ -1498,6 +1571,7 @@ export class Enemy extends Entity {
   pattern: AttackPattern = AttackPattern.CHASE;
   isElite: boolean = false;
   missionTargetId?: string;
+  flankDir: number = 1;
 
   // Variant system: role-driven behavior + telegraphs + support effects.
   /** Multiplied into incoming damage; shield drones set this on their allies. */
@@ -1580,11 +1654,25 @@ export class Enemy extends Entity {
   personalityOffset: number;
   evadeTimer: number = 0;
   lastDecisionTime: number = 0;
-  flankDir: number = 1;
-  /** Smoothed movement velocity — eases toward the desired vector each frame so
-   *  enemies don't snap direction (same polish as the player's PD controller). */
+  movementClass: EnemyMovementClass = EnemyMovementClass.GROUND;
+  turretYawPivot: THREE.Group | null = null;
+  cannonPitchPivot: THREE.Group | null = null;
+  muzzlePoint: THREE.Object3D | null = null;
+  tankTelegraphMesh: THREE.Mesh | null = null;
+  tankAimTimer: number = 0;
+  tankState: 'MOVE' | 'STOP' | 'AIM' | 'REPOSITION' = 'MOVE';
+  tankStateTimer: number = 0;
+  infantryBurstRemaining: number = 0;
+  infantryBurstTimer: number = 0;
   smoothVelX: number = 0;
+  smoothVelY: number = 0;
   smoothVelZ: number = 0;
+  altitudeOffset: number = 0;
+  airBankAngle: number = 0;
+  droneCosmeticVariant: 0 | 1 = 0;
+  lastObstacleCheckTime: number = 0;
+  cachedSafeAltitude: number = 18;
+  bossReinforcementTriggeredPhases = new Set<number>();
   enemyRotor: THREE.Group | null = null;
   enemyTailRotor: THREE.Group | null = null;
 
@@ -1610,6 +1698,8 @@ export class Enemy extends Entity {
     this.variant = options.variant ?? EnemyVariant.STANDARD;
     this.personalityOffset = Math.random() * Math.PI * 2;
     this.flankDir = Math.random() > 0.5 ? 1 : -1;
+    this.altitudeOffset = (Math.random() - 0.5) * 6; // +/- 3m role offset
+    this.droneCosmeticVariant = Math.random() > 0.5 ? 1 : 0;
 
     const baseGroup = new THREE.Group();
 
@@ -1623,26 +1713,31 @@ export class Enemy extends Entity {
       accentHex = 0xff2a1d;
       this.maxHp = 100;
       this.basePoints = 200;
+      this.movementClass = EnemyMovementClass.GROUND;
     } else if (type === EnemyType.SHOOTER) {
       radius = 2.0;
       coreHex = 0xffe85b;
       accentHex = 0xff3b22;
       this.maxHp = 30;
       this.basePoints = 100;
+      this.movementClass = EnemyMovementClass.FLYING;
     } else if (type === EnemyType.DRONE) {
       radius = 1.8;
-      coreHex = 0x44ddff;
-      accentHex = 0x2299cc;
-      this.maxHp = 15;
+      coreHex = 0x2e3440;
+      accentHex = 0xff3344;
+      this.maxHp = 22;
       this.basePoints = 150;
+      this.movementClass = EnemyMovementClass.FLYING;
     } else if (type === EnemyType.BOSS) {
       radius = 4.1;
       coreHex = 0xd84cff;
       accentHex = 0x6b1fc2;
-      this.maxHp = 220;
+      this.maxHp = 260;
       this.basePoints = 500;
+      this.movementClass = EnemyMovementClass.FLYING;
     } else {
-      this.maxHp = 20; // Basic
+      this.maxHp = 25; // Basic Infantry Cluster
+      this.movementClass = EnemyMovementClass.GROUND;
     }
 
     // Elite miniboss scaling (minibosses every 5th wave)
@@ -1690,11 +1785,13 @@ export class Enemy extends Entity {
     if (type === EnemyType.BOSS) {
       // "Archon" heavy gunship — layered hull, twin nacelles, broad wings, glow core
       this.ring = new THREE.Group();
+      this.ring.name = "BossRoot";
       this.ring.position.y = 0.2;
       const r = radius;
 
-      // Layered main hull (chunky silhouette)
+      // Heavy Fuselage
       const hull = createBox(r * 1.25, r * 0.55, r * 1.9, coreHex);
+      hull.name = "HeavyFuselage";
       this.ring.add(hull);
       const hullTop = createBox(r * 0.9, r * 0.35, r * 1.5, coreHex);
       hullTop.position.set(0, r * 0.42, -r * 0.1);
@@ -1705,6 +1802,7 @@ export class Enemy extends Entity {
 
       // Cockpit + nose sensor + glowing core
       const glass = createBox(r * 0.55, r * 0.38, r * 0.65, 0x172f3d);
+      glass.name = "Cockpit";
       glass.position.set(0, r * 0.25, r * 1.1);
       this.ring.add(glass);
       const noseSensor = createGlowBox(r * 0.3, r * 0.18, r * 0.3, 0xff3366, 0.9);
@@ -1714,27 +1812,66 @@ export class Enemy extends Entity {
       core.position.set(0, 0, r * 0.85);
       this.ring.add(core);
 
-      // Twin engine nacelles with glowing intakes
-      [-1, 1].forEach((s) => {
-        const nacelle = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
-        nacelle.position.set(s * r * 1.0, r * 0.15, r * 0.35);
-        this.ring.add(nacelle);
-        const intake = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
-        intake.position.set(s * r * 1.0, r * 0.15, r * 0.92);
-        this.ring.add(intake);
-      });
+      // Twin engine nacelles
+      const engine01 = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
+      engine01.name = "Engine01";
+      engine01.position.set(-r * 1.0, r * 0.15, r * 0.35);
+      this.ring.add(engine01);
+      const intake01 = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
+      intake01.position.set(-r * 1.0, r * 0.15, r * 0.92);
+      this.ring.add(intake01);
 
-      // Broad wing + missile pylons + wingtip lights
-      const wing = createBox(r * 3.0, r * 0.18, r * 0.8, coreHex);
-      wing.position.set(0, 0, r * 0.2);
-      this.ring.add(wing);
+      const engine02 = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
+      engine02.name = "Engine02";
+      engine02.position.set(r * 1.0, r * 0.15, r * 0.35);
+      this.ring.add(engine02);
+      const intake02 = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
+      intake02.position.set(r * 1.0, r * 0.15, r * 0.92);
+      this.ring.add(intake02);
+
+      // Left & Right Wings
+      const leftWing = createBox(r * 1.5, r * 0.18, r * 0.8, coreHex);
+      leftWing.name = "LeftWing";
+      leftWing.position.set(-r * 0.75, 0, r * 0.2);
+      this.ring.add(leftWing);
+
+      const rightWing = createBox(r * 1.5, r * 0.18, r * 0.8, coreHex);
+      rightWing.name = "RightWing";
+      rightWing.position.set(r * 0.75, 0, r * 0.2);
+      this.ring.add(rightWing);
+
+      // Heavy Cannon Mount
+      const cannonMount = createBox(r * 0.35, r * 0.28, r * 0.95, 0x111111);
+      cannonMount.name = "CannonMount";
+      cannonMount.position.set(0, -r * 0.52, r * 0.85);
+      this.ring.add(cannonMount);
+
+      // Rocket Pods Left & Right
+      const rocketPodLeft = createBox(r * 0.32, r * 0.32, r * 0.75, 0x222222);
+      rocketPodLeft.name = "RocketPodLeft";
+      rocketPodLeft.position.set(-r * 1.38, -r * 0.18, r * 0.2);
+      this.ring.add(rocketPodLeft);
+
+      const rocketPodRight = createBox(r * 0.32, r * 0.32, r * 0.75, 0x222222);
+      rocketPodRight.name = "RocketPodRight";
+      rocketPodRight.position.set(r * 1.38, -r * 0.18, r * 0.2);
+      this.ring.add(rocketPodRight);
+
+      // Damage Details
+      const damageDetails = new THREE.Group();
+      damageDetails.name = "DamageDetails";
+      const ventPlate = createBox(r * 0.6, r * 0.08, r * 0.5, 0x332233);
+      ventPlate.position.set(0, r * 0.52, -r * 0.2);
+      damageDetails.add(ventPlate);
+      this.ring.add(damageDetails);
+
+      // Target Point
+      const targetPoint = new THREE.Object3D();
+      targetPoint.name = "TargetPoint";
+      targetPoint.position.set(0, 0, 0);
+      this.ring.add(targetPoint);
+
       [-1, 1].forEach((s) => {
-        const pylon = createBox(r * 0.14, r * 0.3, r * 0.5, 0x222222);
-        pylon.position.set(s * r * 1.35, -r * 0.25, r * 0.2);
-        this.ring.add(pylon);
-        const missile = createBox(r * 0.12, r * 0.12, r * 0.7, 0x444444);
-        missile.position.set(s * r * 1.35, -r * 0.42, r * 0.2);
-        this.ring.add(missile);
         const tipLight = createGlowBox(r * 0.16, r * 0.16, r * 0.16, s < 0 ? 0x33ff66 : 0xff4433, 0.9);
         tipLight.position.set(s * r * 1.55, 0, r * 0.2);
         this.ring.add(tipLight);
@@ -1787,133 +1924,269 @@ export class Enemy extends Entity {
       baseGroup.add(this.ring);
 
     } else if (type === EnemyType.TANK) {
-      // "Flakpanzer" — sloped hull, tracked chassis, quad AA turret + radar
+      // Tank — tracked chassis + independent TurretYawPivot + CannonPitchPivot
+      this.movementClass = EnemyMovementClass.GROUND;
       this.ring = new THREE.Group();
+
+      // Chassis group (tracks, road wheels, belly, sloped hull, skirts, exhausts)
+      const chassis = new THREE.Group();
+      chassis.name = "TankChassis";
 
       // Tracked chassis with road wheels
       [-1.5, 1.5].forEach((tx) => {
-        const track = createBox(1.1, 0.8, 3.9, 0x111111);
-        track.position.set(tx, -0.25, 0);
-        this.ring.add(track);
+        const track = createBox(1.1, 0.8, 4.2, 0x151515);
+        track.position.set(tx, 0.35, 0);
+        chassis.add(track);
         for (let i = 0; i < 5; i++) {
           const wheel = createBox(0.5, 0.5, 0.22, 0x2a2a2a);
-          wheel.position.set(tx, -0.25, -1.5 + i * 0.75);
-          this.ring.add(wheel);
+          wheel.position.set(tx, 0.35, -1.5 + i * 0.75);
+          chassis.add(wheel);
         }
       });
-      const belly = createBox(2.1, 0.25, 3.2, 0x111111);
-      belly.position.set(0, -0.1, 0);
-      this.ring.add(belly);
+      const belly = createBox(2.1, 0.25, 3.4, 0x111111);
+      belly.position.set(0, 0.4, 0);
+      chassis.add(belly);
 
       // Sloped hull + glacis plate + side skirts
-      const hull = createBox(2.3, 0.9, 3.4, coreHex);
-      hull.position.set(0, 0.35, 0);
-      this.ring.add(hull);
-      const glacis = createBox(2.1, 0.7, 0.9, coreHex);
-      glacis.position.set(0, 0.75, 1.5);
-      glacis.rotation.x = -0.5;
-      this.ring.add(glacis);
-      [-1.35, 1.35].forEach((sx) => {
-        const skirt = createBox(0.12, 0.6, 3.6, 0x1a1a1a);
-        skirt.position.set(sx, 0.1, 0);
-        this.ring.add(skirt);
+      const hull = createBox(2.4, 0.85, 3.6, coreHex);
+      hull.position.set(0, 0.85, 0);
+      chassis.add(hull);
+      const glacis = createBox(2.2, 0.65, 0.95, coreHex);
+      glacis.position.set(0, 1.15, 1.6);
+      glacis.rotation.x = -0.52;
+      chassis.add(glacis);
+      [-1.4, 1.4].forEach((sx) => {
+        const skirt = createBox(0.12, 0.65, 3.8, 0x222222);
+        skirt.position.set(sx, 0.6, 0);
+        chassis.add(skirt);
       });
 
-      // Turret with quad AA barrels + glowing muzzle
-      const turret = createBox(1.9, 0.7, 2.1, accentHex);
-      turret.position.set(0, 1.15, -0.3);
-      this.ring.add(turret);
-      const turretTop = createBox(1.3, 0.3, 1.5, accentHex);
-      turretTop.position.set(0, 1.55, -0.3);
-      this.ring.add(turretTop);
-      for (let i = 0; i < 4; i++) {
-        const barrel = createBox(0.12, 0.12, 2.4, 0x333333);
-        barrel.position.set(-0.45 + i * 0.3, 1.2, 1.6);
-        this.ring.add(barrel);
-      }
-      const muzzle = createGlowBox(0.6, 0.24, 0.2, 0xffaa33, 0.85);
-      muzzle.position.set(-0.15, 1.2, 2.95);
-      this.ring.add(muzzle);
+      // Rear engine exhaust + fuel tanks
+      [-0.7, 0.7].forEach((fx) => {
+        const fuelDrum = createBox(0.55, 0.55, 0.8, 0x4a4538);
+        fuelDrum.position.set(fx, 0.95, -1.9);
+        chassis.add(fuelDrum);
+      });
 
-      // Radar dish + blinking beacon behind the turret
+      this.ring.add(chassis);
+
+      // Decoupled Turret Yaw Pivot (mounted on top of chassis)
+      this.turretYawPivot = new THREE.Group();
+      this.turretYawPivot.name = "TurretYawPivot";
+      this.turretYawPivot.position.set(0, 1.45, -0.2);
+
+      // Turret main armor box + commander cupola
+      const turretBody = createBox(2.1, 0.72, 2.3, accentHex);
+      turretBody.position.set(0, 0.36, 0);
+      this.turretYawPivot.add(turretBody);
+
+      const cupola = createBox(0.65, 0.35, 0.65, 0x222222);
+      cupola.position.set(0.55, 0.85, -0.3);
+      this.turretYawPivot.add(cupola);
+
+      // Radar dish on turret rear
       const radarPole = createBox(0.12, 0.7, 0.12, 0x333333);
-      radarPole.position.set(0.7, 1.6, -0.9);
-      this.ring.add(radarPole);
-      const radarDish = createBox(0.5, 0.08, 0.7, 0x99ccdd);
-      radarDish.position.set(0.7, 1.9, -0.9);
-      radarDish.rotation.x = 0.5;
-      this.ring.add(radarDish);
-      const radarBlink = createGlowBox(0.16, 0.16, 0.16, 0x44ddff, 0.9);
-      radarBlink.position.set(0.7, 2.05, -1.0);
-      this.ring.add(radarBlink);
+      radarPole.position.set(-0.65, 0.9, -0.85);
+      this.turretYawPivot.add(radarPole);
+      const radarDish = createBox(0.55, 0.08, 0.7, 0x99ccdd);
+      radarDish.position.set(-0.65, 1.25, -0.85);
+      radarDish.rotation.x = 0.45;
+      this.turretYawPivot.add(radarDish);
 
-      // Antenna with warning light
-      const antenna = createBox(0.06, 0.9, 0.06, 0x333333);
-      antenna.position.set(-0.6, 1.9, -0.2);
-      this.ring.add(antenna);
-      const antennaTip = createGlowBox(0.14, 0.14, 0.14, 0xff3344, 0.9);
-      antennaTip.position.set(-0.6, 2.35, -0.2);
-      this.ring.add(antennaTip);
+      // Cannon Pitch Pivot (elevates to aim up at helicopter)
+      this.cannonPitchPivot = new THREE.Group();
+      this.cannonPitchPivot.name = "CannonPitchPivot";
+      this.cannonPitchPivot.position.set(0, 0.36, 1.15);
+
+      // Mantlet
+      const mantlet = createBox(0.95, 0.6, 0.5, 0x333333);
+      this.cannonPitchPivot.add(mantlet);
+
+      // Heavy Cannon Barrel
+      const barrel = createBox(0.24, 0.24, 3.2, 0x222222);
+      barrel.position.set(0, 0, 1.6);
+      this.cannonPitchPivot.add(barrel);
+
+      // Muzzle brake & flash glow
+      const muzzleBrake = createBox(0.42, 0.38, 0.45, 0x111111);
+      muzzleBrake.position.set(0, 0, 3.2);
+      this.cannonPitchPivot.add(muzzleBrake);
+
+      const muzzlePoint = new THREE.Object3D();
+      muzzlePoint.position.set(0, 0, 3.5);
+      this.cannonPitchPivot.add(muzzlePoint);
+      this.muzzlePoint = muzzlePoint;
+
+      // Telegraph aiming laser / glow box
+      const muzzleGlow = createGlowBox(0.5, 0.5, 0.5, 0xff5522, 0.0);
+      muzzleGlow.position.set(0, 0, 3.4);
+      this.cannonPitchPivot.add(muzzleGlow);
+      this.tankTelegraphMesh = muzzleGlow;
+
+      this.turretYawPivot.add(this.cannonPitchPivot);
+      this.ring.add(this.turretYawPivot);
 
       baseGroup.add(this.ring);
 
     } else if (type === EnemyType.DRONE) {
-      // Recon quadcopter — camera dome, sensor pod, rotor arms, nav light
+      this.movementClass = EnemyMovementClass.FLYING;
+      // Combat Drone (Mobile Aerial Harasser) — aggressive stealth silhouette with hostile red accents
       this.ring = new THREE.Group();
+      this.ring.name = "CombatDroneRoot";
 
-      const core = createBox(1.3, 0.55, 1.3, coreHex);
-      this.ring.add(core);
-      const coreTop = createBox(0.9, 0.3, 0.9, coreHex);
-      coreTop.position.set(0, 0.4, 0);
-      this.ring.add(coreTop);
-      const cameraDome = createGlowBox(0.4, 0.22, 0.4, 0x44ddff, 0.7);
-      cameraDome.position.set(0, 0.62, 0.1);
-      this.ring.add(cameraDome);
-      const sensor = createBox(0.55, 0.35, 0.7, accentHex);
-      sensor.position.set(0, -0.4, 0.45);
-      this.ring.add(sensor);
-      const sensorEye = createGlowBox(0.2, 0.12, 0.16, 0xff3344, 0.9);
-      sensorEye.position.set(0, -0.4, 0.82);
-      this.ring.add(sensorEye);
-      // Landing struts
-      [-0.5, 0.5].forEach((s) => {
-        const strut = createBox(0.08, 0.35, 0.08, 0x222222);
-        strut.position.set(s * 0.6, -0.6, -0.2);
-        this.ring.add(strut);
-      });
-      // Blinking nav light
-      const navLight = createGlowBox(0.2, 0.2, 0.2, 0xffaa33, 0.9);
-      navLight.position.set(0, -0.3, -0.7);
+      // Central Body (Chiseled composite fuselage)
+      const centralBody = createBox(1.4, 0.45, 1.6, coreHex);
+      centralBody.name = "CentralBody";
+      this.ring.add(centralBody);
+
+      const noseCone = createBox(0.75, 0.26, 0.85, accentHex);
+      noseCone.position.set(0, -0.04, 0.95);
+      this.ring.add(noseCone);
+
+      const dorsalSpine = createBox(0.3, 0.2, 1.1, 0x1a1e24);
+      dorsalSpine.position.set(0, 0.28, -0.1);
+      this.ring.add(dorsalSpine);
+
+      // Wings (Cosmetic variation: delta swept vs forward-swept)
+      const leftWing = new THREE.Group();
+      leftWing.name = "LeftWing";
+      const rightWing = new THREE.Group();
+      rightWing.name = "RightWing";
+
+      if (this.droneCosmeticVariant === 1) {
+        // Forward-swept assault wings
+        const lWingMesh = createBox(1.5, 0.08, 0.7, coreHex);
+        lWingMesh.position.set(-1.0, 0, 0.1);
+        lWingMesh.rotation.y = -0.25;
+        leftWing.add(lWingMesh);
+
+        const rWingMesh = createBox(1.5, 0.08, 0.7, coreHex);
+        rWingMesh.position.set(1.0, 0, 0.1);
+        rWingMesh.rotation.y = 0.25;
+        rightWing.add(rWingMesh);
+      } else {
+        // Delta swept wings
+        const lWingMesh = createBox(1.6, 0.08, 0.9, coreHex);
+        lWingMesh.position.set(-1.1, 0, -0.15);
+        lWingMesh.rotation.y = 0.22;
+        leftWing.add(lWingMesh);
+
+        const rWingMesh = createBox(1.6, 0.08, 0.9, coreHex);
+        rWingMesh.position.set(1.1, 0, -0.15);
+        rWingMesh.rotation.y = -0.22;
+        rightWing.add(rWingMesh);
+      }
+      this.ring.add(leftWing);
+      this.ring.add(rightWing);
+
+      // Twin Engine Nacelles with glow exhausts
+      const engine01 = createBox(0.4, 0.4, 1.1, 0x1f2429);
+      engine01.name = "Engine01";
+      engine01.position.set(-0.55, 0.05, -0.5);
+      const exhaust01 = createGlowBox(0.3, 0.3, 0.15, 0xff4422, 0.9);
+      exhaust01.position.set(0, 0, -0.58);
+      engine01.add(exhaust01);
+      this.ring.add(engine01);
+
+      const engine02 = createBox(0.4, 0.4, 1.1, 0x1f2429);
+      engine02.name = "Engine02";
+      engine02.position.set(0.55, 0.05, -0.5);
+      const exhaust02 = createGlowBox(0.3, 0.3, 0.15, 0xff4422, 0.9);
+      exhaust02.position.set(0, 0, -0.58);
+      engine02.add(exhaust02);
+      this.ring.add(engine02);
+
+      // Gun Mount (underbelly autocannon)
+      const gunMount = new THREE.Group();
+      gunMount.name = "GunMount";
+      const gunBody = createBox(0.24, 0.18, 0.7, 0x111111);
+      gunBody.position.set(0, -0.28, 0.3);
+      gunMount.add(gunBody);
+      const barrel = createBox(0.08, 0.08, 0.35, 0x333333);
+      barrel.position.set(0, -0.28, 0.72);
+      gunMount.add(barrel);
+      this.ring.add(gunMount);
+
+      // Navigation Light (Hostile red strobe)
+      const navLight = createGlowBox(0.18, 0.18, 0.18, 0xff2233, 0.95);
+      navLight.name = "NavigationLight";
+      navLight.position.set(0, 0.28, -0.6);
       this.ring.add(navLight);
 
-      this.enemyRotor = new THREE.Group();
-      const armOffsets = [
-        [-1.3, -1.3], [1.3, -1.3], [-1.3, 1.3], [1.3, 1.3]
+      // Target Point
+      const targetPoint = new THREE.Object3D();
+      targetPoint.name = "TargetPoint";
+      targetPoint.position.set(0, 0, 0);
+      this.ring.add(targetPoint);
+
+      baseGroup.add(this.ring);
+
+    } else if (type === EnemyType.BASIC) {
+      // INFANTRY CLUSTER — 4 visible low-poly soldiers in tactical formation
+      this.movementClass = EnemyMovementClass.GROUND;
+      this.ring = new THREE.Group();
+
+      const soldierOffsets = [
+        { x: 0.0, z: 0.8, variant: 0 },   // Squad leader (front)
+        { x: -1.3, z: -0.5, variant: 1 },  // Rifleman left
+        { x: 1.2, z: -0.4, variant: 2 },   // Support right (backpack)
+        { x: 0.1, z: -1.3, variant: 1 },   // Rear guard
       ];
-      armOffsets.forEach(([px, pz]) => {
-        const arm = createBox(1.6, 0.14, 0.14, 0x333333);
-        arm.position.set(px / 2, 0.05, pz / 2);
-        arm.rotation.y = Math.atan2(pz, px);
-        this.ring.add(arm);
-        const motor = createBox(0.42, 0.6, 0.42, accentHex);
-        motor.position.set(px, 0.12, pz);
-        this.ring.add(motor);
-        const bladeGroup = new THREE.Group();
-        bladeGroup.position.set(px, 0.5, pz);
-        const blade = createBox(1.5, 0.05, 0.2, 0x111111);
-        bladeGroup.add(blade);
-        this.enemyRotor!.add(bladeGroup);
+
+      soldierOffsets.forEach((s) => {
+        const soldier = new THREE.Group();
+        soldier.position.set(s.x, 0, s.z);
+
+        // Boots/Legs
+        const legs = createBox(0.42, 0.45, 0.35, 0x2e2924);
+        legs.position.set(0, 0.22, 0);
+        soldier.add(legs);
+
+        // Torso / tactical vest
+        const torso = createBox(0.55, 0.52, 0.38, s.variant === 2 ? 0x6e7855 : 0x8a7f66);
+        torso.position.set(0, 0.65, 0);
+        soldier.add(torso);
+
+        // Head / Helmet
+        const head = createBox(0.38, 0.35, 0.38, 0x585340);
+        head.position.set(0, 1.05, 0);
+        soldier.add(head);
+
+        // Helmet brim
+        const brim = createBox(0.44, 0.08, 0.44, 0x484332);
+        brim.position.set(0, 1.14, 0.02);
+        soldier.add(brim);
+
+        // Rifle / weapon
+        const rifle = createBox(0.12, 0.12, 0.85, 0x1a1a1a);
+        rifle.position.set(0.24, 0.68, 0.35);
+        soldier.add(rifle);
+
+        // Cosmetic variant accents
+        if (s.variant === 2) {
+          // Backpack
+          const backpack = createBox(0.38, 0.42, 0.22, 0x3d4230);
+          backpack.position.set(0, 0.66, -0.26);
+          soldier.add(backpack);
+        } else if (s.variant === 0) {
+          // Leader radio antenna
+          const radio = createBox(0.12, 0.32, 0.12, 0x222222);
+          radio.position.set(-0.24, 0.78, -0.15);
+          soldier.add(radio);
+        }
+
+        this.ring.add(soldier);
       });
-      this.ring.add(this.enemyRotor);
+
       baseGroup.add(this.ring);
 
     } else {
-      // BASIC interceptor (sleek) vs SHOOTER gunship (heavy) — distinct silhouettes
-      const isShooter = type === EnemyType.SHOOTER;
+      // SHOOTER gunship
+      this.movementClass = EnemyMovementClass.FLYING;
       this.ring = new THREE.Group();
       const r = radius;
 
-      // Shared fuselage + nose
+      // Fuselage + nose
       const fuselage = createBox(r * 0.75, r * 0.6, r * 2.4, coreHex);
       this.ring.add(fuselage);
       const nose = createBox(r * 0.45, r * 0.45, r * 0.9, coreHex);
@@ -1926,53 +2199,34 @@ export class Enemy extends Entity {
       cockpit.position.set(0, r * 0.35, r * 0.5);
       this.ring.add(cockpit);
 
-      if (isShooter) {
-        // Gunship: twin engine pods, chin cannon, wing hardpoints
-        [-1, 1].forEach((s) => {
-          const enginePod = createBox(r * 0.4, r * 0.45, r * 1.0, accentHex);
-          enginePod.position.set(s * r * 0.85, 0, -r * 0.4);
-          this.ring.add(enginePod);
-          const intake = createGlowBox(r * 0.3, r * 0.3, r * 0.16, 0xff8833, 0.85);
-          intake.position.set(s * r * 0.85, 0, -r * 0.95);
-          this.ring.add(intake);
-        });
-        const wing = createBox(r * 2.6, r * 0.14, r * 0.7, coreHex);
-        wing.position.set(0, 0, -r * 0.3);
-        this.ring.add(wing);
-        [-1, 1].forEach((s) => {
-          const missile = createBox(r * 0.14, r * 0.14, r * 0.7, 0x444444);
-          missile.position.set(s * r * 1.15, -r * 0.2, -r * 0.3);
-          this.ring.add(missile);
-        });
-        const cannon = createBox(r * 0.14, r * 0.14, r * 1.2, 0x333333);
-        cannon.position.set(0, -r * 0.35, r * 1.4);
-        this.ring.add(cannon);
-        const cannonMuzzle = createGlowBox(r * 0.22, r * 0.22, r * 0.2, 0xff3344, 0.9);
-        cannonMuzzle.position.set(0, -r * 0.35, r * 2.05);
-        this.ring.add(cannonMuzzle);
-        [-1, 1].forEach((s) => {
-          const fin = createBox(r * 0.08, r * 0.6, r * 0.4, accentHex);
-          fin.position.set(s * r * 0.45, r * 0.4, -r * 1.2);
-          this.ring.add(fin);
-        });
-      } else {
-        // Interceptor: swept delta wing, twin fins, wingtip lights
-        const wing = createBox(r * 2.9, r * 0.12, r * 0.9, coreHex);
-        wing.position.set(0, -r * 0.05, -r * 0.2);
-        wing.rotation.z = 0.05;
-        this.ring.add(wing);
-        [-1, 1].forEach((s) => {
-          const tip = createGlowBox(r * 0.16, r * 0.16, r * 0.16, s < 0 ? 0x33ff66 : 0xff4433, 0.9);
-          tip.position.set(s * r * 1.55, -r * 0.05, -r * 0.2);
-          this.ring.add(tip);
-        });
-        const tailFin = createBox(r * 0.1, r * 0.55, r * 0.35, accentHex);
-        tailFin.position.set(0, r * 0.35, -r * 1.25);
-        this.ring.add(tailFin);
-        const stab = createBox(r * 0.9, r * 0.08, r * 0.5, coreHex);
-        stab.position.set(0, -r * 0.1, -r * 1.15);
-        this.ring.add(stab);
-      }
+      // Gunship: twin engine pods, chin cannon, wing hardpoints
+      [-1, 1].forEach((s) => {
+        const enginePod = createBox(r * 0.4, r * 0.45, r * 1.0, accentHex);
+        enginePod.position.set(s * r * 0.85, 0, -r * 0.4);
+        this.ring.add(enginePod);
+        const intake = createGlowBox(r * 0.3, r * 0.3, r * 0.16, 0xff8833, 0.85);
+        intake.position.set(s * r * 0.85, 0, -r * 0.95);
+        this.ring.add(intake);
+      });
+      const wing = createBox(r * 2.6, r * 0.14, r * 0.7, coreHex);
+      wing.position.set(0, 0, -r * 0.3);
+      this.ring.add(wing);
+      [-1, 1].forEach((s) => {
+        const missile = createBox(r * 0.14, r * 0.14, r * 0.7, 0x444444);
+        missile.position.set(s * r * 1.15, -r * 0.2, -r * 0.3);
+        this.ring.add(missile);
+      });
+      const cannon = createBox(r * 0.14, r * 0.14, r * 1.2, 0x333333);
+      cannon.position.set(0, -r * 0.35, r * 1.4);
+      this.ring.add(cannon);
+      const cannonMuzzle = createGlowBox(r * 0.22, r * 0.22, r * 0.2, 0xff3344, 0.9);
+      cannonMuzzle.position.set(0, -r * 0.35, r * 2.05);
+      this.ring.add(cannonMuzzle);
+      [-1, 1].forEach((s) => {
+        const fin = createBox(r * 0.08, r * 0.6, r * 0.4, accentHex);
+        fin.position.set(s * r * 0.45, r * 0.4, -r * 1.2);
+        this.ring.add(fin);
+      });
 
       baseGroup.add(this.ring);
     }
@@ -2056,7 +2310,7 @@ export class Enemy extends Entity {
    * signature accent; standard units use the base-hull accent.
    */
   private buildThreatSignature(r: number, accent: number, type: EnemyType) {
-    if (type === EnemyType.BOSS) return; // Boss already carries heavy glowwork
+    if (type === EnemyType.BOSS || type === EnemyType.BASIC || type === EnemyType.TANK) return;
     const ring = this.ring;
     for (const s of [-1, 1]) {
       const strip = createGlowBox(r * 0.1, r * 0.14, r * 1.4, accent, 0.7);
@@ -3070,7 +3324,7 @@ export class Enemy extends Entity {
     targetPos: CANNON.Vec3,
     targetVel: CANNON.Vec3 | null,
     projectileSpeed: number,
-  ): { x: number; z: number } {
+  ): { x: number; y: number; z: number } {
     let t = Math.hypot(targetPos.x - this.body.position.x, targetPos.z - this.body.position.z) / Math.max(1, projectileSpeed);
     t = Math.min(t, 3.0);
     if (targetVel) {
@@ -3082,9 +3336,11 @@ export class Enemy extends Entity {
       }
     }
     const ax = targetPos.x + (targetVel ? targetVel.x * t : 0) - this.body.position.x;
+    const ay = targetPos.y + (targetVel ? targetVel.y * t : 0) - this.body.position.y;
     const az = targetPos.z + (targetVel ? targetVel.z * t : 0) - this.body.position.z;
     const len = Math.hypot(ax, az) + 0.001;
-    return { x: ax / len, z: az / len };
+    const len3d = Math.hypot(ax, ay, az) + 0.001;
+    return { x: ax / len, y: ay / len3d, z: az / len };
   }
 
   /**
@@ -3094,7 +3350,7 @@ export class Enemy extends Entity {
    * readable spread so it isn't an aimbot. Shots also spread a little more at
    * range (harder to hold a read on a distant target).
    */
-  private applyAimError(aim: { x: number; z: number }, dist: number): { x: number; z: number } {
+  private applyAimError(aim: { x: number; y?: number; z: number }, dist: number): { x: number; y: number; z: number } {
     const skill = THREE.MathUtils.clamp(Number.isFinite(this.aimAccuracy) ? this.aimAccuracy : 1, 0, 1);
     // ~0.09 rad (~5.2°) of sway at skill 0.6 → ~0.03 rad (~1.7°) at skill 1.
     const baseRad = THREE.MathUtils.lerp(0.09, 0.03, skill);
@@ -3104,7 +3360,7 @@ export class Enemy extends Entity {
     err *= 0.88;
     const c = Math.cos(err);
     const s = Math.sin(err);
-    return { x: aim.x * c - aim.z * s, z: aim.x * s + aim.z * c };
+    return { x: aim.x * c - aim.z * s, y: aim.y ?? 0, z: aim.x * s + aim.z * c };
   }
 
   /**
@@ -3387,35 +3643,96 @@ export class Enemy extends Entity {
     }
 
     // =====================================================================
-    // DRONE — chase with swooping movement
+    // DRONE — COMBAT DRONE: Real 3D Flight Physics, Altitude & Banking
     // =====================================================================
     if (this.type === EnemyType.DRONE) {
-      const speed = 35;
-      // Gentler weave, routed through the smoother so it reads as an organic bob
-      const swoopX = Math.cos(time * 2 + this.personalityOffset) * 12;
-      const swoopZ = Math.sin(time * 2 + this.personalityOffset) * 12;
-      this.applySmoothMovement(
-        dirX * speed + swoopX + repelForceX + avoidForceX,
-        dirZ * speed + swoopZ + repelForceZ + avoidForceZ,
-        delta,
-        8,
-      );
+      // 1. Altitude calculation & safe height / building avoidance (Step 3 & 4)
+      const roleAltitudeOffset = this.altitudeOffset || 0;
+      let desiredAltitude = targetPos.y + roleAltitudeOffset;
 
-      // Drones fire rapidly at close range
-      if (dist < 60 && time - this.lastShotTime > 0.8 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
+      // Periodic building / obstacle height check (every 0.2s - Step 35)
+      if (time - this.lastObstacleCheckTime > 0.2) {
+        this.lastObstacleCheckTime = time;
+        const aheadX = this.body.position.x + (this.smoothVelX || dirX * 10) * 0.5;
+        const aheadZ = this.body.position.z + (this.smoothVelZ || dirZ * 10) * 0.5;
+        const groundHere = city.getHeightAt(this.body.position.x, this.body.position.z, 2.0);
+        const groundAhead = city.getHeightAt(aheadX, aheadZ, 2.0);
+        this.cachedSafeAltitude = Math.max(groundHere, groundAhead) + 6.0;
+      }
+      if (desiredAltitude < this.cachedSafeAltitude) {
+        desiredAltitude = this.cachedSafeAltitude;
+      }
+
+      // Vertical acceleration & physics (Step 2)
+      const altitudeDiff = desiredAltitude - this.body.position.y;
+      const desiredVerticalVel = THREE.MathUtils.clamp(altitudeDiff * 3.2, -14, 16);
+      this.smoothVelY = THREE.MathUtils.lerp(this.smoothVelY, desiredVerticalVel, Math.min(1, delta * 4.5));
+      this.body.position.y += this.smoothVelY * delta;
+
+      // 2. Horizontal tactical state & preferred combat radius 35-55m (Step 7 & 8)
+      const cruiseSpeed = 32;
+      const tangentX = -dirZ * this.flankDir;
+      const tangentZ = dirX * this.flankDir;
+      let desiredHorizontalX = 0;
+      let desiredHorizontalZ = 0;
+
+      if (dist > 55) {
+        // APPROACH
+        desiredHorizontalX = dirX * cruiseSpeed + repelForceX * 0.8 + avoidForceX;
+        desiredHorizontalZ = dirZ * cruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+      } else if (dist < 28) {
+        // REPOSITION / BACK OFF
+        desiredHorizontalX = (-dirX * 0.8 + tangentX * 0.6) * cruiseSpeed + repelForceX * 1.2 + avoidForceX;
+        desiredHorizontalZ = (-dirZ * 0.8 + tangentZ * 0.6) * cruiseSpeed + repelForceZ * 1.2 + avoidForceZ;
+      } else {
+        // CIRCLE / STRAFE
+        const weave = Math.sin(time * 2.5 + this.personalityOffset) * 4;
+        desiredHorizontalX = (tangentX * 0.95 + dirX * 0.15) * cruiseSpeed + weave * dirZ + repelForceX + avoidForceX;
+        desiredHorizontalZ = (tangentZ * 0.95 + dirZ * 0.15) * cruiseSpeed - weave * dirX + repelForceZ + avoidForceZ;
+      }
+
+      // Air Separation (Step 9) - apply smoothed horizontal velocity
+      this.applySmoothMovement(desiredHorizontalX, desiredHorizontalZ, delta, 7.5);
+
+      // 3. Body orientation & Aerial Banking (Step 5 & 10)
+      const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+      if (horizSpeed > 0.5) {
+        const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+        // Smooth yaw facing movement velocity
+        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
+        this.ring.rotation.y = this.mesh.rotation.y;
+
+        // Turn rate / lateral banking: bank 8-18 deg (0.14 - 0.31 rad)
+        const currentHeading = this.mesh.rotation.y;
+        const targetHeading = Math.atan2(desiredHorizontalX, desiredHorizontalZ);
+        const headingDiff = shortestAngleDelta(currentHeading, targetHeading);
+        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.85, -0.31, 0.31);
+        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 8.0));
+        this.ring.rotation.z = this.airBankAngle;
+
+        // Slight forward pitch on acceleration
+        const targetPitch = THREE.MathUtils.clamp((horizSpeed / cruiseSpeed) * 0.12, -0.15, 0.15);
+        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 5.0));
+      } else {
+        this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
+        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
+      }
+
+      // 4. Attack: pulse bursts in medium combat range (Step 7)
+      if (dist < 65 && dist > 15 && time - this.lastShotTime > 1.1 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
         this.lastShotTime = time;
         const aim = this.leadAim(targetPos, targetVel, 160);
         enemyProjectilePool.spawn(
-          this.body.position.x,
-          this.body.position.y + 0.35,
-          this.body.position.z,
+          this.body.position.x - 0.4 * Math.cos(this.mesh.rotation.y),
+          this.body.position.y - 0.2,
+          this.body.position.z + 0.4 * Math.sin(this.mesh.rotation.y),
           aim.x,
           aim.z,
           time,
-          160 * this.projSpeedMult,
-          5,
+          155 * this.projSpeedMult,
+          4,
           0,
-          0xffd92e,
+          0xff4433,
           null,
           0,
           0,
@@ -3426,20 +3743,13 @@ export class Enemy extends Entity {
       }
 
       copyPhysicsPos(this.mesh, this.body.position);
-      this.mesh.rotation.y = Math.atan2(dirX, dirZ);
-      this.ring.rotation.y = Math.atan2(dirX, dirZ);
-      this.ring.rotation.x = Math.sin(time * 5) * 0.1;
-
-      // Bob up and down
-      this.mesh.position.y += Math.sin(time * 3 + this.personalityOffset) * 0.5;
-
       return fired;
     }
 
     let speed = 0;
-    if (this.type === EnemyType.TANK) speed = 15;
+    if (this.type === EnemyType.TANK) speed = 12;
     else if (this.type === EnemyType.SHOOTER) speed = 20;
-    else if (this.type === EnemyType.BASIC) speed = 18;
+    else if (this.type === EnemyType.BASIC) speed = 14;
 
     // AI Evasive and Flanking logic
     if (time - this.lastDecisionTime > 2.0 + Math.random() * 2.0) {
@@ -3485,65 +3795,155 @@ export class Enemy extends Entity {
     }
     this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
 
-    // Firing Logic
-    const fireRange =
-      this.type === EnemyType.TANK ? 95 : 75;
-    const fireRate =
-      this.type === EnemyType.SHOOTER
-        ? 1.5
-        : this.type === EnemyType.TANK
-          ? 3.5
-          : 2.4;
-    if (dist < fireRange && time - this.lastShotTime > fireRate * fireRateMult) {
-      const projectileSpeed = (this.type === EnemyType.TANK ? 95 : 130) * this.projSpeedMult;
-      if (this.pattern === AttackPattern.ARTILLERY) {
-        // Arcing artillery shell: high lob that reaches player altitude,
-        // then lands with a visible splash. Lobs over buildings — no LOS.
-        this.lastShotTime = time + Math.random() * 0.35;
-        enemyProjectilePool.spawn(
-          this.body.position.x,
-          this.body.position.y + 4.0,
-          this.body.position.z,
-          dirX,
-          dirZ,
-          time,
-          150 * this.projSpeedMult,
-          16,
-          0,
-          0xffaa44,
-          null,
-          0,
-          46, // vy: high arc
-          95, // gravity
-          this.waveDamageMult,
-        );
-      } else if (this.hasLineOfSight(city, targetPos)) {
-        this.lastShotTime = time + Math.random() * 0.35;
-        const aim = this.applyAimError(this.leadAim(targetPos, targetVel, projectileSpeed), dist);
-        enemyProjectilePool.spawn(
-          this.body.position.x,
-          this.body.position.y + 0.35,
-          this.body.position.z,
-          aim.x,
-          aim.z,
-          time,
-          projectileSpeed,
-          5,
-          0,
-          0xffd92e,
-          null,
-          0,
-          0,
-          0,
-          this.waveDamageMult,
-        );
+    // --- Ground Unit Terrain Clamping ---
+    if (this.movementClass === EnemyMovementClass.GROUND) {
+      const clearance = this.type === EnemyType.TANK ? 2.5 : 1.0;
+      const groundY = city ? city.getHeightAt(this.body.position.x, this.body.position.z, clearance) : 0;
+      this.body.position.y = Math.max(clearance === 2.5 ? 1.2 : 0.6, groundY + (clearance === 2.5 ? 1.2 : 0.6));
+      this.body.velocity.y = 0;
+    }
+
+    // --- Ground Attack & Turret Alignment ---
+    if (this.type === EnemyType.TANK) {
+      const dx = targetPos.x - this.body.position.x;
+      const dy = targetPos.y - this.body.position.y;
+      const dz = targetPos.z - this.body.position.z;
+      const horizDist = Math.max(1, Math.hypot(dx, dz));
+
+      // 1. Chassis rotation faces movement velocity (or holds)
+      if (Math.hypot(this.smoothVelX, this.smoothVelZ) > 0.4) {
+        this.mesh.rotation.y = Math.atan2(this.smoothVelX, this.smoothVelZ);
       }
-      fired = true;
+
+      // 2. Turret yaw pivot smoothly tracks player
+      if (this.turretYawPivot) {
+        const playerYaw = Math.atan2(dx, dz);
+        const chassisYaw = this.mesh.rotation.y;
+        let relYaw = playerYaw - chassisYaw;
+        while (relYaw < -Math.PI) relYaw += Math.PI * 2;
+        while (relYaw > Math.PI) relYaw -= Math.PI * 2;
+        this.turretYawPivot.rotation.y = stepAngle(this.turretYawPivot.rotation.y, relYaw, 3.2, delta);
+      }
+
+      // 3. Cannon pitch pivot elevates to point at helicopter
+      if (this.cannonPitchPivot) {
+        const targetPitch = THREE.MathUtils.clamp(-Math.atan2(dy, horizDist), -0.75, 0.15);
+        this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, targetPitch, 2.4, delta);
+      }
+
+      // 4. Telegraphed Heavy Cannon Shot
+      if (this.tankAimTimer > 0) {
+        this.tankAimTimer -= delta;
+        if (this.tankTelegraphMesh) {
+          (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
+        }
+        if (this.tankAimTimer <= 0) {
+          if (this.tankTelegraphMesh) {
+            (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.0;
+          }
+          let muzzleX = this.body.position.x;
+          let muzzleY = this.body.position.y + 1.8;
+          let muzzleZ = this.body.position.z;
+          if (this.muzzlePoint) {
+            this.muzzlePoint.getWorldPosition(_projPos);
+            muzzleX = _projPos.x;
+            muzzleY = _projPos.y;
+            muzzleZ = _projPos.z;
+          }
+          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 110), dist);
+          enemyProjectilePool.spawn(
+            muzzleX,
+            muzzleY,
+            muzzleZ,
+            aim.x,
+            aim.z,
+            time,
+            110 * this.projSpeedMult,
+            18,
+            0,
+            0xff8833,
+            null,
+            0,
+            (aim.y ?? 0) * 110,
+            0,
+            this.waveDamageMult,
+          );
+          this.lastShotTime = time;
+          fired = true;
+        }
+      } else if (dist < 90 && time - this.lastShotTime > 3.4 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
+        this.tankAimTimer = 0.35; // Telegraph muzzle glow before blast
+      }
+    } else if (this.type === EnemyType.BASIC) {
+      // INFANTRY CLUSTER: Face movement, fire 3-round rapid light bursts
+      if (Math.hypot(this.smoothVelX, this.smoothVelZ) > 0.3) {
+        this.mesh.rotation.y = Math.atan2(this.smoothVelX, this.smoothVelZ);
+      }
+
+      if (this.infantryBurstRemaining > 0) {
+        this.infantryBurstTimer -= delta;
+        if (this.infantryBurstTimer <= 0) {
+          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 140), dist);
+          enemyProjectilePool.spawn(
+            this.body.position.x + (Math.random() - 0.5) * 1.2,
+            this.body.position.y + 0.8,
+            this.body.position.z + (Math.random() - 0.5) * 1.2,
+            aim.x,
+            aim.z,
+            time,
+            140 * this.projSpeedMult,
+            3,
+            0,
+            0xffd92e,
+            null,
+            0,
+            (aim.y ?? 0) * 140,
+            0,
+            this.waveDamageMult,
+          );
+          this.infantryBurstRemaining--;
+          this.infantryBurstTimer = 0.12;
+          fired = true;
+        }
+      } else if (dist < 65 && time - this.lastShotTime > 2.5 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
+        this.lastShotTime = time;
+        this.infantryBurstRemaining = 3;
+        this.infantryBurstTimer = 0;
+      }
+    } else {
+      // Flying Gunships / Shooters
+      const fireRange = 75;
+      const fireRate = 2.0;
+      if (dist < fireRange && time - this.lastShotTime > fireRate * fireRateMult) {
+        const projectileSpeed = 130 * this.projSpeedMult;
+        if (this.hasLineOfSight(city, targetPos)) {
+          this.lastShotTime = time + Math.random() * 0.35;
+          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, projectileSpeed), dist);
+          enemyProjectilePool.spawn(
+            this.body.position.x,
+            this.body.position.y + 0.35,
+            this.body.position.z,
+            aim.x,
+            aim.z,
+            time,
+            projectileSpeed,
+            5,
+            0,
+            0xffd92e,
+            null,
+            0,
+            0,
+            0,
+            this.waveDamageMult,
+          );
+          fired = true;
+        }
+      }
+
+      this.mesh.rotation.y = Math.atan2(dirX, dirZ);
     }
 
     copyPhysicsPos(this.mesh, this.body.position);
-    this.mesh.rotation.y = Math.atan2(dirX, dirZ);
-    this.ring.rotation.y = Math.atan2(dirX, dirZ);
     this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.04;
 
     if (this.enemyRotor) {
@@ -4191,6 +4591,7 @@ export class PowerUp {
 
 export class ProjectilePool {
   pool: Projectile[] = [];
+  private nextIndex = 0;
   private coreMesh: THREE.InstancedMesh;
   private glowMesh: THREE.InstancedMesh;
   private finsMesh: THREE.InstancedMesh;
@@ -4222,9 +4623,7 @@ export class ProjectilePool {
 
     for (let i = 0; i < count; i++) {
       this.pool.push(new Projectile(this, i, colorHex));
-      this.coreMesh.setMatrixAt(i, _projHiddenMatrix);
-      this.glowMesh.setMatrixAt(i, _projHiddenMatrix);
-      this.finsMesh.setMatrixAt(i, _projHiddenMatrix);
+      this.hideInstance(i);
       _projColor.setHex(colorHex);
       this.coreMesh.setColorAt(i, _projColor);
       this.glowMesh.setColorAt(i, _projColor);
@@ -4246,9 +4645,6 @@ export class ProjectilePool {
     this.coreMesh.setMatrixAt(index, _projHiddenMatrix);
     this.glowMesh.setMatrixAt(index, _projHiddenMatrix);
     this.finsMesh.setMatrixAt(index, _projHiddenMatrix);
-    this.coreMesh.instanceMatrix.needsUpdate = true;
-    this.glowMesh.instanceMatrix.needsUpdate = true;
-    this.finsMesh.instanceMatrix.needsUpdate = true;
   }
 
   spawn(
@@ -4268,7 +4664,16 @@ export class ProjectilePool {
     gravity: number = 0,
     waveDamageMult: number = 1,
   ): Projectile | null {
-    const p = this.pool.find((b) => !b.active);
+    const len = this.pool.length;
+    let p = null;
+    for (let i = 0; i < len; i++) {
+      const idx = (this.nextIndex + i) % len;
+      if (!this.pool[idx].active) {
+        p = this.pool[idx];
+        this.nextIndex = (idx + 1) % len;
+        break;
+      }
+    }
     if (p) {
       p.spawn(x, y, z, dx, dz, now, speed, damage, blastRadius, color, target, homingStrength, vy, gravity, waveDamageMult);
       return p;
@@ -4329,10 +4734,18 @@ export class ProjectilePool {
   ) {
     for (const p of this.pool) {
       if (!p.active) continue;
+      const pMinX = (p.pos.x < p.prevPos.x ? p.pos.x : p.prevPos.x) - 14;
+      const pMaxX = (p.pos.x > p.prevPos.x ? p.pos.x : p.prevPos.x) + 14;
+      const pMinZ = (p.pos.z < p.prevPos.z ? p.pos.z : p.prevPos.z) - 14;
+      const pMaxZ = (p.pos.z > p.prevPos.z ? p.pos.z : p.prevPos.z) + 14;
+
       for (const o of objectives) {
         if (!o.active || o.hp <= 0) continue;
+        const tp = o.targetPoint;
+        if (tp.x < pMinX || tp.x > pMaxX || tp.z < pMinZ || tp.z > pMaxZ) continue;
+
         const distSq = distancePointToProjectileSegmentSq(
-          o.targetPoint,
+          tp,
           p.prevPos,
           p.pos,
         );
@@ -4352,10 +4765,18 @@ export class ProjectilePool {
   checkTurretHits(turrets: Turret[], onHit: (p: Projectile, t: Turret) => void) {
     for (const p of this.pool) {
       if (!p.active) continue;
+      const pMinX = (p.pos.x < p.prevPos.x ? p.pos.x : p.prevPos.x) - 8;
+      const pMaxX = (p.pos.x > p.prevPos.x ? p.pos.x : p.prevPos.x) + 8;
+      const pMinZ = (p.pos.z < p.prevPos.z ? p.pos.z : p.prevPos.z) - 8;
+      const pMaxZ = (p.pos.z > p.prevPos.z ? p.pos.z : p.prevPos.z) + 8;
+
       for (const t of turrets) {
         if (t.isGone() || t.hp <= 0) continue;
+        const tp = t.position;
+        if (tp.x < pMinX || tp.x > pMaxX || tp.z < pMinZ || tp.z > pMaxZ) continue;
+
         const distSq = distancePointToProjectileSegmentSq(
-          t.position,
+          tp,
           p.prevPos,
           p.pos,
         );
@@ -4372,8 +4793,21 @@ export class ProjectilePool {
   checkEnemyHits(enemies: Enemy[], onHit: (p: Projectile, e: Enemy) => void) {
     for (const p of this.pool) {
       if (!p.active) continue;
+      const pMinX = (p.pos.x < p.prevPos.x ? p.pos.x : p.prevPos.x) - 9;
+      const pMaxX = (p.pos.x > p.prevPos.x ? p.pos.x : p.prevPos.x) + 9;
+      const pMinZ = (p.pos.z < p.prevPos.z ? p.pos.z : p.prevPos.z) - 9;
+      const pMaxZ = (p.pos.z > p.prevPos.z ? p.pos.z : p.prevPos.z) + 9;
+      const pMinY = (p.pos.y < p.prevPos.y ? p.pos.y : p.prevPos.y) - 14;
+      const pMaxY = (p.pos.y > p.prevPos.y ? p.pos.y : p.prevPos.y) + 14;
+
       for (const e of enemies) {
         if (!e.active) continue;
+        const ep = e.body.position;
+        // Fast AABB pre-rejection (filters 90%+ pairs before segment math)
+        if (ep.x < pMinX || ep.x > pMaxX || ep.z < pMinZ || ep.z > pMaxZ || ep.y < pMinY || ep.y > pMaxY) {
+          continue;
+        }
+
         const hitRadius =
           e.type === EnemyType.BOSS
             ? 7.2
@@ -4383,7 +4817,7 @@ export class ProjectilePool {
                 ? 4.7
                 : 5.1;
         const distSq = distancePointToProjectileSegmentSq(
-          e.body.position,
+          ep,
           p.prevPos,
           p.pos,
         );
@@ -4397,8 +4831,15 @@ export class ProjectilePool {
   }
 
   checkPlayerHits(playerPos: CANNON.Vec3, onHit: (p: Projectile) => void) {
+    const px = playerPos.x;
+    const py = playerPos.y;
+    const pz = playerPos.z;
     for (const p of this.pool) {
       if (!p.active) continue;
+      // Fast broadphase distance rejection
+      if (Math.abs(p.pos.x - px) > 16 || Math.abs(p.pos.z - pz) > 16 || Math.abs(p.pos.y - py) > 16) {
+        continue;
+      }
       const distSq = distancePointToProjectileSegmentSq(playerPos, p.prevPos, p.pos);
       if (distSq < 16) {
         onHit(p);
@@ -4413,6 +4854,8 @@ export class ProjectilePool {
 // ---------------------------------------------------------------------------
 
 export class Objective {
+  private static _nextObjectiveId = 50000;
+  readonly id: number = Objective._nextObjectiveId++;
   missionTargetId?: string;
   type: ObjectiveType;
   active: boolean = true;
@@ -4438,6 +4881,7 @@ export class Objective {
   samStateMachine: SamStateMachine | null = null;
   samVariant: 0 | 1 | 2 = 0;
   radarYawPivot: THREE.Group | null = null;
+  radarDishMesh: THREE.Group | null = null;
   turretYawPivot: THREE.Group | null = null;
   launcherPitchPivot: THREE.Group | null = null;
   missileLaunchPoints: THREE.Object3D[] = [];
@@ -4464,7 +4908,7 @@ export class Objective {
     this.world = world;
     this.type = type;
     this.position = new CANNON.Vec3(x, y, z);
-    this.targetPoint = new CANNON.Vec3(x, y + (type === ObjectiveType.SAM_SITE ? 5.2 : 3.5), z);
+    this.targetPoint = new CANNON.Vec3(x, y + (type === ObjectiveType.SAM_SITE ? 5.2 : type === ObjectiveType.RADAR_TOWER ? 4.2 : 3.5), z);
     this.bobSeed = Math.random() * Math.PI * 2;
 
     const cfg = objectiveConfig(type);
@@ -4569,17 +5013,135 @@ export class Objective {
       this.samHitFlash.visible = false;
       this.mesh.add(this.samHitFlash);
     } else if (type === ObjectiveType.RADAR_TOWER) {
-      // Radar tower with rotating dish
-      const towerMat = createLowPolyMaterial(0x445055);
-      const dishMat = createLowPolyMaterial(0x88ffaa);
-      const tower = createBox(0.9, 7.5, 0.9, 0x445055);
-      tower.material = towerMat;
-      tower.position.y = 4;
-      this.mesh.add(tower);
-      const dish = createBox(3.4, 0.7, 2.2, 0x88ffaa);
-      dish.material = dishMat;
-      dish.position.y = 8.4;
-      this.mesh.add(dish);
+      // DESERT MILITARY RADAR STATION INSTALLATION
+      // 1. Concrete foundation & fortified bunker building (TechnicalBuilding)
+      const bunker = createBox(8.4, 2.8, 8.4, 0xbda77e); // Desert tan concrete
+      bunker.name = "TechnicalBuilding";
+      bunker.position.y = 1.4;
+      
+      const foundation = createBox(10.2, 0.6, 10.2, 0x4a4d52); // Dark reinforced base
+      foundation.position.y = 0.3;
+
+      const roofEquipment = createBox(4.2, 0.8, 4.2, 0x3d4448);
+      roofEquipment.position.set(0, 3.2, 0);
+
+      // Access door & intake vents
+      const door = createBox(1.2, 2.0, 0.2, 0x22262a);
+      door.position.set(0, 1.0, 4.25);
+      const vent1 = createBox(1.8, 0.6, 0.2, 0x1f2326);
+      vent1.position.set(-2.6, 1.8, 4.25);
+      const vent2 = createBox(1.8, 0.6, 0.2, 0x1f2326);
+      vent2.position.set(2.6, 1.8, 4.25);
+
+      this.mesh.add(foundation, bunker, roofEquipment, door, vent1, vent2);
+
+      // 2. Rotating Radar Mast & Large Curved Dish (RadarYawPivot -> LargeRadarDish)
+      this.radarYawPivot = new THREE.Group();
+      this.radarYawPivot.name = "RadarYawPivot";
+      this.radarYawPivot.position.set(0, 3.6, 0);
+
+      const mast = createBox(0.8, 4.5, 0.8, 0x2a3036);
+      mast.position.y = 2.25;
+      this.radarYawPivot.add(mast);
+
+      // Lattice support arm
+      const crossBeam = createBox(4.8, 0.4, 0.6, 0x3d4750);
+      crossBeam.position.set(0, 4.6, 0);
+      this.radarYawPivot.add(crossBeam);
+
+      // Large Radar Dish (Concave cylinder / parabolic curved reflector)
+      this.radarDishMesh = new THREE.Group();
+      this.radarDishMesh.name = "LargeRadarDish";
+      this.radarDishMesh.position.set(0, 4.8, 0);
+
+      const dishReflector = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.2, 4.2, 1.1, 14, 1, false, 0, Math.PI),
+        createLowPolyMaterial(0x526068),
+      );
+      dishReflector.rotation.x = Math.PI / 2;
+      dishReflector.rotation.z = -Math.PI / 2;
+      this.radarDishMesh.add(dishReflector);
+
+      // Feed horn receiver boom & focal point
+      const feedBoom = createBox(0.2, 0.2, 2.6, 0x22262a);
+      feedBoom.position.set(0, 0, 1.6);
+      const feedHorn = createGlowBox(0.6, 0.6, 0.6, 0xff3344, 0.8);
+      feedHorn.position.set(0, 0, 2.8);
+      this.radarDishMesh.add(feedBoom, feedHorn);
+
+      // Counterweight rear box
+      const counterWeight = createBox(1.8, 1.2, 1.0, 0x283038);
+      counterWeight.position.set(0, 0, -1.0);
+      this.radarDishMesh.add(counterWeight);
+
+      this.radarYawPivot.add(this.radarDishMesh);
+      this.mesh.add(this.radarYawPivot);
+
+      // 3. Secondary Communications & Telemetry Array (SecondaryAntenna)
+      const secTower = createBox(0.35, 7.2, 0.35, 0x242b30);
+      secTower.name = "SecondaryAntenna";
+      secTower.position.set(-3.2, 3.6, -3.2);
+      const secGrid = createBox(1.6, 1.6, 0.15, 0x485560);
+      secGrid.position.set(-3.2, 6.8, -3.2);
+      secGrid.rotation.y = 0.6;
+      this.mesh.add(secTower, secGrid);
+
+      // 4. Auxiliary Equipment Cabinets (EquipmentCabinet01 & 02)
+      const cabinet1 = createBox(1.6, 2.4, 1.4, 0x4e5843); // Olive green
+      cabinet1.name = "EquipmentCabinet01";
+      cabinet1.position.set(4.8, 1.2, -1.5);
+      const cabinet2 = createBox(1.4, 2.0, 1.8, 0x3b4432);
+      cabinet2.name = "EquipmentCabinet02";
+      cabinet2.position.set(4.8, 1.0, 1.5);
+      this.mesh.add(cabinet1, cabinet2);
+
+      // 5. Diesel Generator & Fuel Tank (Generator)
+      const generator = createBox(2.6, 1.6, 2.2, 0x3d4348);
+      generator.name = "Generator";
+      generator.position.set(-4.6, 0.8, 1.8);
+      const exhaustPipe = createBox(0.2, 2.2, 0.2, 0x1f2226);
+      exhaustPipe.position.set(-4.6, 2.2, 1.8);
+      this.mesh.add(generator, exhaustPipe);
+
+      // 6. Perimeter Sandbag Barriers (SandBarriers)
+      const sandBarriers = new THREE.Group();
+      sandBarriers.name = "SandBarriers";
+      [-1, 1].forEach((sx) => {
+        const sandbag = createBox(0.8, 0.9, 10.8, 0x9e8c67);
+        sandbag.position.set(sx * 5.6, 0.45, 0);
+        sandBarriers.add(sandbag);
+      });
+      [-1, 1].forEach((sz) => {
+        const sandbag = createBox(10.8, 0.9, 0.8, 0x9e8c67);
+        sandbag.position.set(0, 0.45, sz * 5.6);
+        sandBarriers.add(sandbag);
+      });
+      this.mesh.add(sandBarriers);
+
+      // 7. Hostile Warning Lights (WarningLights)
+      for (const [lx, lz] of [[-4.0, -4.0], [4.0, -4.0], [-4.0, 4.0], [4.0, 4.0]]) {
+        const light = createGlowBox(0.45, 0.45, 0.45, 0xff3344, 0.55);
+        light.material = (light.material as THREE.MeshBasicMaterial).clone();
+        light.position.set(lx, 2.9, lz);
+        this.warningLights.push(light);
+        this.mesh.add(light);
+      }
+
+      // 8. Health Bar & Hit Flash for Radar
+      this.samHealthBar = new THREE.Group();
+      this.samHealthBar.name = "RadarHealthBar";
+      this.samHealthBar.position.set(0, 10.8, 0);
+      const healthBack = createBox(7.6, 0.32, 0.45, 0x161a20);
+      this.samHealthFill = createBox(7.2, 0.42, 0.5, 0xff4f5e);
+      this.samHealthFill.position.z = -0.03;
+      this.samHealthBar.add(healthBack, this.samHealthFill);
+      this.samHealthBar.visible = false;
+      this.mesh.add(this.samHealthBar);
+
+      this.samHitFlash = createGlowBox(9.0, 6.0, 9.0, 0xffd36a, 0.28);
+      this.samHitFlash.position.y = 3.5;
+      this.samHitFlash.visible = false;
+      this.mesh.add(this.samHitFlash);
     } else {
       // AMMO_DEPOT: stacked crates
       const crateMat = createLowPolyMaterial(0xc9a35a);
@@ -4626,36 +5188,38 @@ export class Objective {
     this.mesh.add(this.beacon);
 
     // Canvas label sprite (billboarded, always faces camera)
-    const label = this.type === ObjectiveType.SAM_SITE ? 'SAM' : this.type === ObjectiveType.RADAR_TOWER ? 'RADAR' : 'DEPOT';
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = 'rgba(6, 16, 30, 0.85)';
-      ctx.roundRect ? ctx.roundRect(8, 8, 240, 112, 18) : ctx.fillRect(8, 8, 240, 112);
-      ctx.fill();
-      ctx.strokeStyle = '#' + beaconColor.toString(16).padStart(6, '0');
-      ctx.lineWidth = 6;
-      ctx.strokeRect(8, 8, 240, 112);
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '900 64px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(label, 128, 64);
+    if (typeof document !== 'undefined') {
+      const label = this.type === ObjectiveType.SAM_SITE ? 'SAM' : this.type === ObjectiveType.RADAR_TOWER ? 'RADAR' : 'DEPOT';
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = 'rgba(6, 16, 30, 0.85)';
+        ctx.roundRect ? ctx.roundRect(8, 8, 240, 112, 18) : ctx.fillRect(8, 8, 240, 112);
+        ctx.fill();
+        ctx.strokeStyle = '#' + beaconColor.toString(16).padStart(6, '0');
+        ctx.lineWidth = 6;
+        ctx.strokeRect(8, 8, 240, 112);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '900 64px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, 128, 64);
+      }
+      const labelTex = new THREE.CanvasTexture(canvas);
+      labelTex.colorSpace = THREE.SRGBColorSpace;
+      const labelMat = new THREE.SpriteMaterial({
+        map: labelTex,
+        transparent: true,
+        depthTest: false,
+      });
+      this.labelSprite = new THREE.Sprite(labelMat);
+      this.labelSprite.position.y = 34;
+      this.labelSprite.scale.set(22, 11, 1);
+      this.labelSprite.visible = true;
+      this.mesh.add(this.labelSprite);
     }
-    const labelTex = new THREE.CanvasTexture(canvas);
-    labelTex.colorSpace = THREE.SRGBColorSpace;
-    const labelMat = new THREE.SpriteMaterial({
-      map: labelTex,
-      transparent: true,
-      depthTest: false,
-    });
-    this.labelSprite = new THREE.Sprite(labelMat);
-    this.labelSprite.position.y = 34;
-    this.labelSprite.scale.set(22, 11, 1);
-    this.labelSprite.visible = true;
-    this.mesh.add(this.labelSprite);
 
     this.mesh.position.set(x, y, z);
     scene.add(this.mesh);
@@ -4704,6 +5268,27 @@ export class Objective {
         this.samHealthFill.position.x = -(1 - ratio) * 3.3;
       }
       this.targeted = false; // engine must refresh this every frame
+    } else if (this.type === ObjectiveType.RADAR_TOWER) {
+      // Radar Station: sits firmly on terrain ground, dish rotates continuously
+      this.mesh.position.y = this.position.y;
+      this.recentHitTimer = Math.max(0, this.recentHitTimer - delta);
+      this.damageFxTimer = Math.max(0, this.damageFxTimer - delta);
+      if (this.radarYawPivot) {
+        this.radarYawPivot.rotation.y += delta * 1.5;
+      }
+      if (this.samHitFlash) this.samHitFlash.visible = this.recentHitTimer > 0.12;
+      if (this.samHealthBar) this.samHealthBar.visible = this.targeted || this.recentHitTimer > 0;
+      if (this.samHealthFill) {
+        const ratio = THREE.MathUtils.clamp(this.hp / Math.max(1, this.maxHp), 0, 1);
+        this.samHealthFill.scale.x = ratio;
+        this.samHealthFill.position.x = -(1 - ratio) * 3.6;
+      }
+      // Pulsing clearance warning lights
+      for (const light of this.warningLights) {
+        const mat = light.material as THREE.MeshBasicMaterial;
+        mat.opacity = 0.45 + Math.sin(time * 5.0) * 0.35;
+      }
+      this.targeted = false;
     } else {
       this.mesh.position.y = this.position.y + Math.sin(time * 1.8 + this.bobSeed) * 0.35;
       this.mesh.rotation.y += 0.004;
@@ -4732,7 +5317,9 @@ export class Objective {
   }
 
   setTargeted(on: boolean) {
-    if (this.type === ObjectiveType.SAM_SITE) this.targeted = on;
+    if (this.type === ObjectiveType.SAM_SITE || this.type === ObjectiveType.RADAR_TOWER) {
+      this.targeted = on;
+    }
   }
 
   /** Track the player with radar/launcher pivots and advance the deterministic lock state. */
@@ -4784,7 +5371,7 @@ export class Objective {
       active: this.active,
       wave,
       detectionMultiplier: radarSupported ? 1.08 : 1,
-      lockSpeedMultiplier: (radarSupported ? 1.1 : 1) * lockSpeedMultiplier,
+      lockSpeedMultiplier: (radarSupported ? 1.2 : 1) * lockSpeedMultiplier,
     });
     const state = this.samStateMachine.state;
     const lockIntensity = state === SamState.LOCKING ? 0.55 + this.samStateMachine.lockProgress * 0.45 : 0.28;

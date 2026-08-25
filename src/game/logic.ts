@@ -673,6 +673,86 @@ export const SQUAD_TEMPLATES: SquadTemplate[] = [
   { members: [EnemyVariant.MINELAYER, EnemyVariant.FLAK_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 11, weight: 0.5 }, // Minefield escort
 ];
 
+export const GROUND_THREAT_COSTS = {
+  INFANTRY: 1.0,
+  TANK: 2.0,
+  SAM: 3.0,
+} as const;
+
+export const AIR_THREAT_COSTS = {
+  COMBAT_DRONE: 1.5,
+} as const;
+
+export interface GroundComposition {
+  name: string;
+  templateId: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H';
+  label: string;
+  infantry: number;
+  tanks: number;
+  sam: number;
+  radar: number;
+  weight: number;
+  minWave: number;
+}
+
+export const GROUND_COMPOSITIONS: GroundComposition[] = [
+  { name: 'A', templateId: 'A', label: 'LIGHT PATROL', infantry: 2, tanks: 0, sam: 0, radar: 0, weight: 1.2, minWave: 1 },
+  { name: 'B', templateId: 'B', label: 'ARMORED PATROL', infantry: 2, tanks: 1, sam: 0, radar: 0, weight: 1.0, minWave: 2 },
+  { name: 'C', templateId: 'C', label: 'TANK COLUMN', infantry: 0, tanks: 3, sam: 0, radar: 0, weight: 0.8, minWave: 3 },
+  { name: 'D', templateId: 'D', label: 'SAM DEFENSE', infantry: 1, tanks: 1, sam: 1, radar: 0, weight: 0.7, minWave: 4 },
+  { name: 'E', templateId: 'E', label: 'HEAVY AA DEFENSE', infantry: 0, tanks: 3, sam: 1, radar: 0, weight: 0.5, minWave: 5 },
+  { name: 'F', templateId: 'F', label: 'RADAR LIGHT DEFENSE', infantry: 2, tanks: 0, sam: 0, radar: 1, weight: 0.6, minWave: 3 },
+  { name: 'G', templateId: 'G', label: 'RADAR ARMORED DEFENSE', infantry: 2, tanks: 1, sam: 0, radar: 1, weight: 0.5, minWave: 4 },
+  { name: 'H', templateId: 'H', label: 'RADAR AA DEFENSE', infantry: 2, tanks: 1, sam: 1, radar: 1, weight: 0.4, minWave: 5 },
+];
+
+export function pickGroundComposition(wave: number, rng: () => number = Math.random): GroundComposition {
+  const eligible = GROUND_COMPOSITIONS.filter((c) => c.minWave <= wave);
+  const pool = eligible.length > 0 ? eligible : [GROUND_COMPOSITIONS[0]];
+  const totalWeight = pool.reduce((sum, c) => sum + c.weight, 0);
+  let roll = rng() * totalWeight;
+  for (const comp of pool) {
+    roll -= comp.weight;
+    if (roll <= 0) return comp;
+  }
+  return pool[0];
+}
+
+export interface MixedComposition {
+  name: string;
+  templateId: 'MIXED_A' | 'MIXED_B' | 'MIXED_C' | 'MIXED_D' | 'MIXED_E' | 'MIXED_F' | 'MIXED_G';
+  label: string;
+  air: number;
+  infantry: number;
+  tanks: number;
+  sam: number;
+  weight: number;
+  minWave: number;
+}
+
+export const MIXED_COMPOSITIONS: MixedComposition[] = [
+  { name: 'A', templateId: 'MIXED_A', label: 'AIR HARASSMENT PATROL', air: 1, infantry: 2, tanks: 0, sam: 0, weight: 1.2, minWave: 6 },
+  { name: 'B', templateId: 'MIXED_B', label: 'ARMORED AIR STRIKE', air: 1, infantry: 0, tanks: 1, sam: 0, weight: 1.0, minWave: 6 },
+  { name: 'C', templateId: 'MIXED_C', label: 'AIR TANK COLUMN', air: 1, infantry: 0, tanks: 2, sam: 0, weight: 0.9, minWave: 7 },
+  { name: 'D', templateId: 'MIXED_D', label: 'COMBINED ARMS SQUAD', air: 1, infantry: 2, tanks: 1, sam: 0, weight: 0.8, minWave: 7 },
+  { name: 'E', templateId: 'MIXED_E', label: 'AIR AA FLANK', air: 1, infantry: 0, tanks: 1, sam: 1, weight: 0.7, minWave: 8 },
+  { name: 'F', templateId: 'MIXED_F', label: 'DUAL AIR DIVISION', air: 2, infantry: 0, tanks: 2, sam: 0, weight: 0.6, minWave: 9 },
+  { name: 'G', templateId: 'MIXED_G', label: 'HEAVY COMBINED ASSAULT', air: 1, infantry: 0, tanks: 3, sam: 1, weight: 0.5, minWave: 9 },
+];
+
+export function pickMixedComposition(wave: number, rng: () => number = Math.random): MixedComposition | null {
+  if (wave < 6) return null;
+  const eligible = MIXED_COMPOSITIONS.filter((c) => c.minWave <= wave);
+  if (eligible.length === 0) return null;
+  const totalWeight = eligible.reduce((sum, c) => sum + c.weight, 0);
+  let roll = rng() * totalWeight;
+  for (const comp of eligible) {
+    roll -= comp.weight;
+    if (roll <= 0) return comp;
+  }
+  return eligible[0];
+}
+
 export function compositionThreatCost(members: readonly EnemyVariant[]): number {
   return members.reduce((sum, variant) => sum + (ENEMY_VARIANTS[variant]?.threat ?? 1), 0);
 }
@@ -701,16 +781,28 @@ export function pickSquadForWave(wave: number, rng: () => number = Math.random):
 
 export const MAX_WEAPON_LEVEL = 5;
 
+export function readLocalStorage<T>(key: string, fallback: T, storage: Pick<Storage, 'getItem'> = window.localStorage): T {
+  try {
+    const raw = storage.getItem(key);
+    if (raw === null) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeLocalStorage(key: string, value: unknown, storage: Pick<Storage, 'setItem'> = window.localStorage): void {
+  try {
+    storage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage full or unavailable — silently ignore
+  }
+}
+
 /** Highest weapon level ever reached, per WeaponType index. */
 export function readMastery(storage: Pick<Storage, 'getItem'> = window.localStorage): number[] {
-  try {
-    const raw = storage.getItem('helistrike:mastery');
-    if (!raw) return [0, 0, 0, 0];
-    const parsed = JSON.parse(raw) as number[];
-    return [0, 1, 2, 3].map((i) => clamp(Math.floor(parsed[i] ?? 0), 0, MAX_WEAPON_LEVEL));
-  } catch {
-    return [0, 0, 0, 0];
-  }
+  const parsed = readLocalStorage<number[]>('helistrike:mastery', [0, 0, 0, 0], storage);
+  return [0, 1, 2, 3].map((i) => clamp(Math.floor(parsed[i] ?? 0), 0, MAX_WEAPON_LEVEL));
 }
 
 /** Persist a weapon's mastered level (max across runs). */
@@ -721,11 +813,7 @@ export function writeMastery(
 ): number[] {
   const current = readMastery(storage);
   current[weaponIndex] = Math.max(current[weaponIndex], clamp(Math.floor(level), 0, MAX_WEAPON_LEVEL));
-  try {
-    storage.setItem('helistrike:mastery', JSON.stringify(current));
-  } catch {
-    // storage unavailable — ignore
-  }
+  writeLocalStorage('helistrike:mastery', current, storage);
   return current;
 }
 
@@ -919,24 +1007,24 @@ export function occlusionStrength(tEntry: number): number {
  * become rare outposts in the sand.
  */
 export const DISTRICT_SCHEDULE: DistrictName[] = [
-  'desert',
-  'base',
-  'desert',
+  'downtown',
+  'midtown',
   'industrial',
-  'desert',
-  'forest',
   'base',
-  'desert',
+  'ruins',
+  'residential',
+  'waterfront',
+  'downtown',
   'midtown',
   'desert',
-  'ruins',
-  'desert',
-  'waterfront',
+  'industrial',
   'base',
-  'desert',
-  'residential',
-  'desert',
+  'forest',
   'downtown',
+  'ruins',
+  'residential',
+  'waterfront',
+  'midtown',
 ];
 
 /** District for a chunk id — stable for a given id (the world never shifts). */
@@ -949,23 +1037,23 @@ export function districtForChunk(chunkId: number): DistrictName {
 export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
   downtown: {
     name: 'downtown',
-    palette: [0x48556f, 0x57657f, 0x3e4b63, 0x62718b, 0x39465e],
-    ground: 0x60646b,
-    shoulder: 0x4d5156,
-    sidewalk: 0x9ba0a5,
-    windowColor: 0xbcd6de,
-    trimColor: 0x8fb4c8,
-    density: 0.84,
+    palette: [0xc7bcab, 0xb8ac98, 0xd8cfc0, 0x586475, 0x76808e],
+    ground: 0x5e636b,
+    shoulder: 0x4a4e56,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0x89c4de,
+    trimColor: 0xde5932,
+    density: 0.88,
     footprintWeights: [0.42, 0.42, 0.16],
-    heightBand: [10, 20],
-    skyscraperChance: 0.5,
-    skyscraperHeight: [22, 46],
-    detailPalette: [0x5a6a80, 0x4c5a70, 0x68788e, 0x56667c],
+    heightBand: [24, 48],
+    skyscraperChance: 0.65,
+    skyscraperHeight: [55, 110],
+    detailPalette: [0xc7bcab, 0xb8ac98, 0x586475, 0x4e9138],
     landmark: 'centralTower',
     rooftopClutter: 0.72,
     rooftopProps: { helipad: 2, antenna: 3, acUnit: 1, mast: 2, waterTank: 0, smokeStack: 0, vent: 1, maintenanceHut: 1 },
-    accentColor: 0x8fb4c8,
-    signColors: [0x75b8ff, 0xffe66d, 0xff5f8f, 0x56e6ff],
+    accentColor: 0xde5932,
+    signColors: [0x75b8ff, 0xf5ba2c, 0xde5932, 0x56e6ff],
     billboardCount: 4,
     openSpaceChance: 0.08,
     landmarkChance: 1,
@@ -974,23 +1062,23 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
   },
   midtown: {
     name: 'midtown',
-    palette: [0x6b6f74, 0x7d8184, 0x585d62, 0x8a7d68, 0x6d7071],
-    ground: 0x676b6f,
-    shoulder: 0x52565a,
-    sidewalk: 0xa8a49a,
-    windowColor: 0xf2d48a,
-    trimColor: 0xc9a35f,
-    density: 0.8,
+    palette: [0xc7bcab, 0xd8cfc0, 0xb8ac98, 0x6e7682, 0x8a7f72],
+    ground: 0x5e636b,
+    shoulder: 0x4a4e56,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0xf5ba2c,
+    trimColor: 0xde5932,
+    density: 0.84,
     footprintWeights: [0.5, 0.38, 0.12],
-    heightBand: [8, 18],
-    skyscraperChance: 0.15,
-    skyscraperHeight: [20, 34],
-    detailPalette: [0x7a7f8c, 0x6b707e, 0x8a8577, 0x66707e],
+    heightBand: [20, 42],
+    skyscraperChance: 0.4,
+    skyscraperHeight: [45, 80],
+    detailPalette: [0xc7bcab, 0xb8ac98, 0x4e9138, 0x6e7682],
     landmark: 'observationTower',
     rooftopClutter: 0.6,
     rooftopProps: { helipad: 1, antenna: 1, acUnit: 3, mast: 1, waterTank: 1, smokeStack: 0, vent: 2, maintenanceHut: 2 },
-    accentColor: 0xc9a35f,
-    signColors: [0xc9a35f, 0xffd97a, 0x9fd0e8],
+    accentColor: 0xde5932,
+    signColors: [0xde5932, 0xf5ba2c, 0x75b8ff],
     billboardCount: 3,
     openSpaceChance: 0.1,
     landmarkChance: 0.9,
@@ -999,23 +1087,23 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
   },
   industrial: {
     name: 'industrial',
-    palette: [0x5c4a3a, 0x6d5c4a, 0x4a3f35, 0x7a6a55, 0x3f3a34],
-    ground: 0x4a4f57,
+    palette: [0x5c6570, 0x6e7682, 0x4a5058, 0x346fa6, 0x4d5f36],
+    ground: 0x4a4e56,
     shoulder: 0x3a4048,
-    sidewalk: 0x8f8a80,
+    sidewalk: 0xb5ad9e,
     windowColor: 0xff8f2a,
-    trimColor: 0xd97b4a,
-    density: 0.72,
+    trimColor: 0xde5932,
+    density: 0.76,
     footprintWeights: [0.48, 0.4, 0.12],
-    heightBand: [4, 11],
-    skyscraperChance: 0.08,
-    skyscraperHeight: [16, 24],
-    detailPalette: [0x5c5147, 0x6d5c4a, 0x4a443d, 0x7a6a55],
+    heightBand: [15, 28],
+    skyscraperChance: 0.2,
+    skyscraperHeight: [32, 55],
+    detailPalette: [0x5c6570, 0x346fa6, 0x4d5f36, 0x6e7682],
     landmark: 'coolingTowers',
     rooftopClutter: 0.55,
     rooftopProps: { helipad: 0, antenna: 0, acUnit: 1, mast: 0, waterTank: 2, smokeStack: 3, vent: 2, maintenanceHut: 1 },
-    accentColor: 0xd97b4a,
-    signColors: [0xd97b4a, 0xff8f2a, 0x9aa3b3],
+    accentColor: 0xde5932,
+    signColors: [0xde5932, 0xf5ba2c, 0x346fa6],
     billboardCount: 2,
     openSpaceChance: 0.22,
     landmarkChance: 1,
@@ -1024,23 +1112,23 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
   },
   residential: {
     name: 'residential',
-    palette: [0x9a6b4f, 0x8a5f42, 0xb07c57, 0x7d543d, 0xae8a63],
-    ground: 0x7d7a72,
-    shoulder: 0x6d6a60,
-    sidewalk: 0xc0b4a0,
-    windowColor: 0xffd9b0,
-    trimColor: 0xd9b08a,
-    density: 0.8,
-    footprintWeights: [0.62, 0.3, 0.08],
-    heightBand: [5, 11],
-    skyscraperChance: 0,
-    skyscraperHeight: [18, 24],
-    detailPalette: [0x8a7a6a, 0x9a8a72, 0x7d7466, 0xae9a80],
+    palette: [0xc7bcab, 0xd8cfc0, 0xb8ac98, 0xde5932, 0xa8937d],
+    ground: 0x6e737c,
+    shoulder: 0x5a6068,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0x89c4de,
+    trimColor: 0xde5932,
+    density: 0.82,
+    footprintWeights: [0.55, 0.35, 0.1],
+    heightBand: [16, 32],
+    skyscraperChance: 0.2,
+    skyscraperHeight: [34, 52],
+    detailPalette: [0xc7bcab, 0xb8ac98, 0x4e9138, 0xde5932],
     landmark: 'clockTower',
     rooftopClutter: 0.5,
     rooftopProps: { helipad: 0, antenna: 2, acUnit: 4, mast: 0, waterTank: 2, smokeStack: 0, vent: 2, maintenanceHut: 3 },
-    accentColor: 0xd9b08a,
-    signColors: [0xd9b08a, 0xffd9b0, 0x93a99a],
+    accentColor: 0xde5932,
+    signColors: [0xde5932, 0xf5ba2c, 0x4e9138],
     billboardCount: 2,
     openSpaceChance: 0.25,
     landmarkChance: 0.55,
@@ -1049,125 +1137,125 @@ export const DISTRICT_CONFIGS: Record<DistrictName, DistrictConfig> = {
   },
   waterfront: {
     name: 'waterfront',
-    palette: [0x45655f, 0x52726c, 0x3b5752, 0x62807a, 0x334d49],
-    ground: 0x556a66,
-    shoulder: 0x4a5f5b,
-    sidewalk: 0x9fb0ab,
-    windowColor: 0xaad4cc,
-    trimColor: 0x8fbdb5,
-    density: 0.38,
-    footprintWeights: [0.66, 0.28, 0.06],
-    heightBand: [5, 12],
-    skyscraperChance: 0.05,
-    skyscraperHeight: [16, 24],
-    detailPalette: [0x4a6a64, 0x58786f, 0x3e5d57, 0x6b837c],
+    palette: [0xc7bcab, 0xd8cfc0, 0x346fa6, 0xb8ac98, 0x4d5f36],
+    ground: 0xe5be82,
+    shoulder: 0xd4a86a,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0x89c4de,
+    trimColor: 0x346fa6,
+    density: 0.45,
+    footprintWeights: [0.58, 0.32, 0.1],
+    heightBand: [16, 34],
+    skyscraperChance: 0.25,
+    skyscraperHeight: [38, 68],
+    detailPalette: [0xe5be82, 0x4e9138, 0x346fa6, 0x4d5f36],
     landmark: 'marina',
     rooftopClutter: 0.42,
     rooftopProps: { helipad: 1, antenna: 0, acUnit: 1, mast: 1, waterTank: 1, smokeStack: 0, vent: 1, maintenanceHut: 2 },
-    accentColor: 0x8fbdb5,
-    signColors: [0x6fd6c9, 0x7ff7e0, 0xffd97a],
+    accentColor: 0x346fa6,
+    signColors: [0x22a0dc, 0xf5ba2c, 0xde5932],
     billboardCount: 2,
-    openSpaceChance: 0.7,
+    openSpaceChance: 0.5,
     landmarkChance: 0.7,
     crossStreetHalf: 12,
     propDensity: 0.55,
   },
   base: {
     name: 'base',
-    palette: [0x585d66, 0x6d727b, 0x41464d, 0x7a7f80, 0x50565e],
-    ground: 0x5b5f64,
-    shoulder: 0x4b4f54,
-    sidewalk: 0x99a0a6,
-    windowColor: 0xc4d6de,
-    trimColor: 0xa8c2cf,
-    density: 0.36,
-    footprintWeights: [0.6, 0.32, 0.08],
-    heightBand: [5, 10],
-    skyscraperChance: 0,
-    skyscraperHeight: [12, 18],
-    detailPalette: [0x5d656b, 0x474d53, 0x6f7470, 0x343940],
+    palette: [0x4d5f36, 0x3c4a2a, 0x585d66, 0xb59e75, 0x346fa6],
+    ground: 0xe5be82,
+    shoulder: 0xd4a86a,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0x89c4de,
+    trimColor: 0xde5932,
+    density: 0.42,
+    footprintWeights: [0.55, 0.35, 0.1],
+    heightBand: [14, 26],
+    skyscraperChance: 0.15,
+    skyscraperHeight: [28, 48],
+    detailPalette: [0x4d5f36, 0x3c4a2a, 0xe5be82, 0x346fa6],
     landmark: 'radarBase',
     rooftopClutter: 0.45,
     rooftopProps: { helipad: 3, antenna: 2, acUnit: 0, mast: 1, waterTank: 0, smokeStack: 0, vent: 1, maintenanceHut: 1 },
-    accentColor: 0xa8c2cf,
-    signColors: [0x9fd0e8, 0xb8f1ff, 0x93a4b3],
+    accentColor: 0xde5932,
+    signColors: [0xf5ba2c, 0x22a0dc, 0x4d5f36],
     billboardCount: 1,
-    openSpaceChance: 0.5,
+    openSpaceChance: 0.4,
     landmarkChance: 1,
     crossStreetHalf: 10,
     propDensity: 0.9,
   },
   desert: {
     name: 'desert',
-    palette: [0xc3a94e, 0xb78f42, 0x9b7841, 0xd2bf77, 0xa8894a],
-    ground: 0xd6b55b,
-    shoulder: 0xb99643,
-    sidewalk: 0xd3bd82,
-    windowColor: 0xf7d36f,
-    trimColor: 0xf7d36f,
-    density: 0.22,
-    footprintWeights: [0.7, 0.24, 0.06],
-    heightBand: [4, 9],
-    skyscraperChance: 0,
-    skyscraperHeight: [10, 16],
-    detailPalette: [0xcaa84e, 0xb98e3f, 0xd0ba65, 0x98713d],
+    palette: [0xd8cfc0, 0xc7bcab, 0xb59e75, 0xde5932, 0xb8ac98],
+    ground: 0xe5be82,
+    shoulder: 0xd4a86a,
+    sidewalk: 0xd4cbbd,
+    windowColor: 0xf5ba2c,
+    trimColor: 0xde5932,
+    density: 0.3,
+    footprintWeights: [0.65, 0.25, 0.1],
+    heightBand: [12, 22],
+    skyscraperChance: 0.12,
+    skyscraperHeight: [24, 42],
+    detailPalette: [0xe5be82, 0xd4a86a, 0xb59e75, 0x4e9138],
     landmark: 'mesa',
-    rooftopClutter: 0.15,
+    rooftopClutter: 0.2,
     rooftopProps: { helipad: 0, antenna: 0, acUnit: 0, mast: 0, waterTank: 0, smokeStack: 1, vent: 0, maintenanceHut: 0 },
-    accentColor: 0xf7d36f,
-    signColors: [0xf7d36f, 0xc3a94e],
+    accentColor: 0xde5932,
+    signColors: [0xf5ba2c, 0xde5932],
     billboardCount: 1,
-    openSpaceChance: 0.8,
+    openSpaceChance: 0.65,
     landmarkChance: 0.6,
     crossStreetHalf: 8,
     propDensity: 0.25,
   },
   forest: {
     name: 'forest',
-    palette: [0x224c38, 0x315f41, 0x4d6d4b, 0x20362f, 0x3a7a52],
-    ground: 0x3f8c5d,
-    shoulder: 0x2f744e,
-    sidewalk: 0x93a99a,
-    windowColor: 0x7fe09a,
-    trimColor: 0x5cc47a,
-    density: 0.26,
-    footprintWeights: [0.72, 0.22, 0.06],
-    heightBand: [4, 8],
-    skyscraperChance: 0,
-    skyscraperHeight: [10, 14],
-    detailPalette: [0x2f7249, 0x24583f, 0x3f8559, 0x1f4634],
+    palette: [0x4d5f36, 0x3c4a2a, 0x2c3b22, 0xb59e75, 0xc7bcab],
+    ground: 0x4e9138,
+    shoulder: 0x3b7529,
+    sidewalk: 0xc8bfaf,
+    windowColor: 0x89c4de,
+    trimColor: 0xf5ba2c,
+    density: 0.32,
+    footprintWeights: [0.65, 0.25, 0.1],
+    heightBand: [12, 24],
+    skyscraperChance: 0.1,
+    skyscraperHeight: [25, 40],
+    detailPalette: [0x4e9138, 0x3b7529, 0x4d5f36, 0xe5be82],
     landmark: 'giantTree',
-    rooftopClutter: 0.2,
+    rooftopClutter: 0.25,
     rooftopProps: { helipad: 1, antenna: 0, acUnit: 0, mast: 0, waterTank: 0, smokeStack: 0, vent: 0, maintenanceHut: 0 },
-    accentColor: 0x5cc47a,
-    signColors: [0x5cc47a, 0x7fe09a],
+    accentColor: 0xf5ba2c,
+    signColors: [0x4e9138, 0xf5ba2c],
     billboardCount: 1,
-    openSpaceChance: 0.8,
+    openSpaceChance: 0.65,
     landmarkChance: 0.6,
     crossStreetHalf: 8,
     propDensity: 0.2,
   },
   ruins: {
     name: 'ruins',
-    palette: [0x565a62, 0x6e6f6e, 0x454950, 0x7d7168, 0x5c5d5c],
-    ground: 0x6b6d6f,
-    shoulder: 0x505255,
-    sidewalk: 0x8f8d8e,
-    windowColor: 0xa9c4d8,
-    trimColor: 0xa6aab2,
-    density: 0.4,
+    palette: [0xc7bcab, 0x6e7682, 0x5c6570, 0x4d5f36, 0xb8ac98],
+    ground: 0x6e737c,
+    shoulder: 0x5a6068,
+    sidewalk: 0xb5ad9e,
+    windowColor: 0x89c4de,
+    trimColor: 0xde5932,
+    density: 0.48,
     footprintWeights: [0.55, 0.35, 0.1],
-    heightBand: [6, 14],
-    skyscraperChance: 0.25,
-    skyscraperHeight: [18, 30],
-    detailPalette: [0x676978, 0x555967, 0x77736e, 0x454a57],
+    heightBand: [18, 38],
+    skyscraperChance: 0.35,
+    skyscraperHeight: [42, 75],
+    detailPalette: [0x6e7682, 0x5c6570, 0xe5be82, 0x4d5f36],
     landmark: 'fallenTower',
-    rooftopClutter: 0.25,
+    rooftopClutter: 0.3,
     rooftopProps: { helipad: 0, antenna: 1, acUnit: 1, mast: 0, waterTank: 1, smokeStack: 1, vent: 1, maintenanceHut: 1 },
-    accentColor: 0xaab0c9,
-    signColors: [0xaab0c9, 0x8bd0ff],
+    accentColor: 0xde5932,
+    signColors: [0xde5932, 0x75b8ff],
     billboardCount: 1,
-    openSpaceChance: 0.6,
+    openSpaceChance: 0.45,
     landmarkChance: 1,
     crossStreetHalf: 10,
     propDensity: 0.5,
@@ -1505,15 +1593,9 @@ export function defaultPerks(): PerkRanks {
 
 export function readPerks(storage: Pick<Storage, 'getItem'> = window.localStorage): PerkRanks {
   const ranks = defaultPerks();
-  try {
-    const raw = storage.getItem('helistrike:perks');
-    if (!raw) return ranks;
-    const parsed = JSON.parse(raw) as Partial<Record<PerkId, number>>;
-    for (const id of Object.keys(ranks) as PerkId[]) {
-      ranks[id] = clamp(Math.floor(parsed?.[id] ?? 0), 0, MAX_PERK_RANK);
-    }
-  } catch {
-    // storage unavailable — defaults
+  const parsed = readLocalStorage<Partial<Record<PerkId, number>>>('helistrike:perks', {}, storage);
+  for (const id of Object.keys(ranks) as PerkId[]) {
+    ranks[id] = clamp(Math.floor(parsed?.[id] ?? 0), 0, MAX_PERK_RANK);
   }
   return ranks;
 }
@@ -1525,11 +1607,7 @@ export function writePerkRank(
 ): PerkRanks {
   const ranks = readPerks(storage);
   ranks[id] = clamp(Math.floor(rank), 0, MAX_PERK_RANK);
-  try {
-    storage.setItem('helistrike:perks', JSON.stringify(ranks));
-  } catch {
-    // storage unavailable — ignore
-  }
+  writeLocalStorage('helistrike:perks', ranks, storage);
   return ranks;
 }
 
@@ -1570,14 +1648,8 @@ export const WEAPON_MODS: Record<number, [WeaponModInfo, WeaponModInfo]> = {
 };
 
 export function readWeaponMods(storage: Pick<Storage, 'getItem'> = window.localStorage): number[] {
-  try {
-    const raw = storage.getItem('helistrike:weaponMods');
-    if (!raw) return [0, 0, 0, 0];
-    const parsed = JSON.parse(raw) as number[];
-    return [0, 1, 2, 3].map((i) => clamp(Math.floor(parsed[i] ?? 0), 0, 2));
-  } catch {
-    return [0, 0, 0, 0];
-  }
+  const parsed = readLocalStorage<number[]>('helistrike:weaponMods', [0, 0, 0, 0], storage);
+  return [0, 1, 2, 3].map((i) => clamp(Math.floor(parsed[i] ?? 0), 0, 2));
 }
 
 export function writeWeaponMod(
@@ -1589,11 +1661,7 @@ export function writeWeaponMod(
   if (weaponIndex >= 0 && weaponIndex < mods.length) {
     mods[weaponIndex] = clamp(Math.floor(choice), 0, 2);
   }
-  try {
-    storage.setItem('helistrike:weaponMods', JSON.stringify(mods));
-  } catch {
-    // storage unavailable — ignore
-  }
+  writeLocalStorage('helistrike:weaponMods', mods, storage);
   return mods;
 }
 
@@ -1655,22 +1723,16 @@ export interface RunRecord {
 export const RUN_HISTORY_LIMIT = 10;
 
 export function readRunHistory(storage: Pick<Storage, 'getItem'> = window.localStorage): RunRecord[] {
-  try {
-    const raw = storage.getItem('helistrike:history');
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((r): r is RunRecord =>
-        !!r &&
-        Number.isFinite(r.score) &&
-        Number.isFinite(r.wave) &&
-        Number.isFinite(r.kills),
-      )
-      .slice(0, RUN_HISTORY_LIMIT);
-  } catch {
-    return [];
-  }
+  const parsed = readLocalStorage<unknown>('helistrike:history', [], storage);
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((r): r is RunRecord =>
+      !!r &&
+      Number.isFinite(r.score) &&
+      Number.isFinite(r.wave) &&
+      Number.isFinite(r.kills),
+    )
+    .slice(0, RUN_HISTORY_LIMIT);
 }
 
 /** Prepend a run to the persisted history (most recent first, capped). */
@@ -1679,11 +1741,7 @@ export function recordRun(
   storage: Pick<Storage, 'getItem' | 'setItem'> = window.localStorage,
 ): RunRecord[] {
   const history = [rec, ...readRunHistory(storage)].slice(0, RUN_HISTORY_LIMIT);
-  try {
-    storage.setItem('helistrike:history', JSON.stringify(history));
-  } catch {
-    // storage unavailable — ignore
-  }
+  writeLocalStorage('helistrike:history', history, storage);
   return history;
 }
 
@@ -1724,33 +1782,24 @@ export function defaultProgress(): ProgressSave {
 /** Versioned, migration-friendly read. Corrupt or missing data degrades to
  *  defaults instead of crashing; unknown future versions are kept intact. */
 export function readProgress(storage: Pick<Storage, 'getItem'> = window.localStorage): ProgressSave {
-  try {
-    const raw = storage.getItem(PROGRESS_SAVE_KEY);
-    if (!raw) return defaultProgress();
-    const parsed = JSON.parse(raw) as Partial<ProgressSave>;
-    const achievements = Array.isArray(parsed.achievements)
-      ? parsed.achievements.filter((a): a is string => typeof a === 'string')
-      : [];
-    // Future migration hooks key off `parsed.version` — v1 is the baseline.
-    return {
-      version: PROGRESS_SAVE_VERSION,
-      starterGranted: Boolean(parsed.starterGranted),
-      achievements,
-    };
-  } catch {
-    return defaultProgress();
-  }
+  const parsed = readLocalStorage<Partial<ProgressSave> | null>(PROGRESS_SAVE_KEY, null, storage);
+  if (!parsed) return defaultProgress();
+  const achievements = Array.isArray(parsed.achievements)
+    ? parsed.achievements.filter((a): a is string => typeof a === 'string')
+    : [];
+  // Future migration hooks key off `parsed.version` — v1 is the baseline.
+  return {
+    version: PROGRESS_SAVE_VERSION,
+    starterGranted: Boolean(parsed.starterGranted),
+    achievements,
+  };
 }
 
 export function writeProgress(
   save: ProgressSave,
   storage: Pick<Storage, 'setItem'> = window.localStorage,
 ) {
-  try {
-    storage.setItem(PROGRESS_SAVE_KEY, JSON.stringify(save));
-  } catch {
-    // storage unavailable — progression stays in-memory for this session
-  }
+  writeLocalStorage(PROGRESS_SAVE_KEY, save, storage);
 }
 
 export interface AchievementInfo {

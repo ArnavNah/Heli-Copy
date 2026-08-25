@@ -31,28 +31,71 @@ export function createLowPolyMaterial(colorHex: number) {
   return material;
 }
 
-// --- ENVIRONMENT PALETTE (Pass 8) ------------------------------------------
-// A small reusable set of material families for the urban layer. City code
-// should pull from here instead of scattering one-off hexes — the environment
-// stays subdued so gameplay (tracers, explosions, pickups, enemy glows) keeps
-// the saturated color budget.
+// --- ENVIRONMENT PALETTE ---------------------------------------------------
+// Stylized coastal & military warzone palette matching the reference diorama look:
+// warm grey asphalt, crisp painted road markings, lush grass medians, golden sand,
+// sparkling turquoise water, terracotta & warm tan facades, military olive & camo.
 export const ENV_PALETTE = {
-  /** Sidewalk / plaza concrete — sun-bleached sand. */
-  concrete: 0xc9ba8d,
-  /** Dark concrete pads and plazas — packed dirt. */
-  darkConcrete: 0xa29468,
-  /** Dirt service roads — grand avenue. */
-  asphalt: 0xb3a070,
-  /** Darker dirt roads — side streets. */
-  asphaltDark: 0x9c8a62,
-  /** Industrial metal / sheds — weathered olive-drab. */
-  industrialMetal: 0x84795b,
-  /** Generic rooftop tone — sun-baked tan. */
-  rooftop: 0x8f7d58,
+  /** Sidewalk / plaza concrete — warm sunlit concrete. */
+  concrete: 0xc8bfaf,
+  /** Dark concrete pads and curbs. */
+  darkConcrete: 0x727782,
+  /** Main avenue asphalt — warm mid-tone road grey. */
+  asphalt: 0x5e636b,
+  /** Side streets and secondary roads. */
+  asphaltDark: 0x4a4e56,
+  /** Road lane dividers, arrows, crosswalks — crisp off-white. */
+  roadWhite: 0xf5f7fa,
+  /** Road center lines, hazard stripes, arrows — warm amber yellow. */
+  roadYellow: 0xf5ba2c,
+  /** Road medians & planter lawns — lush tropical green grass. */
+  grass: 0x4e9138,
+  /** Darker foliage / shrub green. */
+  grassDark: 0x3b7529,
+  /** Coastal beach & desert ground — warm golden sand. */
+  sand: 0xe5be82,
+  /** Wet shoreline / compacted sand. */
+  sandDark: 0xd4a86a,
+  /** Coastal ocean & waterways — sparkling tropical turquoise. */
+  water: 0x22a0dc,
+  /** Deep water channels. */
+  waterDeep: 0x167db8,
+  /** Shoreline foam and surf edge. */
+  waterFoam: 0xe6faff,
+  /** Palm tree trunk — warm textured segmented bark. */
+  palmTrunk: 0x6c492b,
+  /** Palm fan fronds — vibrant emerald green. */
+  palmFrond: 0x429e30,
+  /** Palm fan fronds highlight — bright lime. */
+  palmFrondLight: 0x56c242,
+  /** Modern apartment concrete facade — warm tan. */
+  facadeTan: 0xc7bcab,
+  /** Light cream concrete facade. */
+  facadeBeige: 0xd8cfc0,
+  /** Warm sand concrete facade. */
+  facadeWarm: 0xb8ac98,
+  /** Bold horizontal accent paneling — terracotta / warm orange (matching reference). */
+  accentOrange: 0xde5932,
+  /** Signal / hazard red. */
+  accentRed: 0xc7382c,
+  /** Taxi / hazard yellow. */
+  accentYellow: 0xebb828,
+  /** Industrial metal / bridge steel — vibrant cobalt / steel blue. */
+  industrialBlue: 0x346fa6,
+  /** Weathered industrial metal. */
+  industrialMetal: 0x5c6570,
+  /** Generic rooftop tone — sun-baked grey-tan. */
+  rooftop: 0x787d85,
   /** Soft glass accent for windows (cool contrast on warm facades). */
-  glassAccent: 0xa8d0da,
-  /** Muted military olive. */
-  military: 0x5f6b3c,
+  glassAccent: 0x7faec2,
+  /** Deep tinted window pane glass. */
+  windowDark: 0x202a35,
+  /** Muted military olive drab. */
+  military: 0x4d5f36,
+  /** Military camo shadow green. */
+  militaryDark: 0x3c4a2a,
+  /** Natural rock / cliff stone. */
+  rock: 0x8a7f72,
 } as const;
 
 // --- SHARED POOLS -----------------------------------------------------------
@@ -88,6 +131,19 @@ export function getLowPolyMaterial(colorHex: number): THREE.MeshToonMaterial {
   return material;
 }
 
+/** Low-poly box with a shared cached geometry and material. */
+export function createBox(
+  width: number,
+  height: number,
+  depth: number,
+  colorHex: number,
+) {
+  const mesh = new THREE.Mesh(getBoxGeometry(width, height, depth), getLowPolyMaterial(colorHex));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
 /**
  * Merge a set of same-material boxes into one mesh (positions baked into the
  * geometry). Used to collapse a building's body + cap + setback tiers into a
@@ -99,7 +155,20 @@ export function mergeBoxMeshes(meshes: THREE.Mesh[]): THREE.Mesh | null {
   let material: THREE.Material | null = null;
   for (const m of meshes) {
     if (!(m.geometry instanceof THREE.BufferGeometry)) continue;
-    geos.push(m.geometry.clone().translate(m.position.x, m.position.y, m.position.z));
+    let g = m.geometry.clone();
+    if (g.index) g = g.toNonIndexed();
+    g.translate(m.position.x, m.position.y, m.position.z);
+    if (!g.getAttribute('normal')) g.computeVertexNormals();
+    const count = g.getAttribute('position').count;
+    if (!g.getAttribute('uv')) {
+      g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    }
+    for (const name in g.attributes) {
+      if (name !== 'position' && name !== 'normal' && name !== 'uv') {
+        g.deleteAttribute(name);
+      }
+    }
+    geos.push(g);
     const single = Array.isArray(m.material) ? m.material[0] : m.material;
     if (single) material = single;
   }
@@ -212,7 +281,8 @@ const _collapseColor = new THREE.Color();
 export function collapseStaticMeshes(root: THREE.Object3D, bakeGlow = false): THREE.Mesh[] {
   const opaqueGeos: THREE.BufferGeometry[] = [];
   const glowGeos: THREE.BufferGeometry[] = [];
-  const victims: THREE.Mesh[] = [];
+  const opaqueVictims: THREE.Mesh[] = [];
+  const glowVictims: THREE.Mesh[] = [];
 
   root.updateMatrixWorld(true);
   _collapseInv.copy(root.matrixWorld).invert();
@@ -235,7 +305,11 @@ export function collapseStaticMeshes(root: THREE.Object3D, bakeGlow = false): TH
       material.blending === THREE.AdditiveBlending;
 
     _collapseRel.multiplyMatrices(_collapseInv, mesh.matrixWorld);
-    const geo = mesh.geometry.clone().applyMatrix4(_collapseRel);
+    let geo = mesh.geometry.clone();
+    if (geo.index) geo = geo.toNonIndexed();
+    geo.applyMatrix4(_collapseRel);
+    if (!geo.getAttribute("normal")) geo.computeVertexNormals();
+
     _collapseColor.copy(material.color ?? _collapseColor.set(0xffffff));
     if (isGlow) {
       const opacity = material.opacity ?? 1;
@@ -255,27 +329,42 @@ export function collapseStaticMeshes(root: THREE.Object3D, bakeGlow = false): TH
       colors[i * 3 + 2] = _collapseColor.b;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-    (isGlow && !bakeGlow ? glowGeos : opaqueGeos).push(geo);
-    victims.push(mesh);
+    if (!geo.getAttribute("uv")) {
+      geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    }
+    for (const name in geo.attributes) {
+      if (name !== "position" && name !== "normal" && name !== "uv" && name !== "color") {
+        geo.deleteAttribute(name);
+      }
+    }
+
+    if (isGlow && !bakeGlow) {
+      glowGeos.push(geo);
+      glowVictims.push(mesh);
+    } else {
+      opaqueGeos.push(geo);
+      opaqueVictims.push(mesh);
+    }
   });
 
-  if (victims.length === 0) return [];
-  for (const mesh of victims) mesh.parent?.remove(mesh);
-
   const merged: THREE.Mesh[] = [];
-  const addMerged = (geos: THREE.BufferGeometry[], material: THREE.Material) => {
+  const addMerged = (geos: THREE.BufferGeometry[], victims: THREE.Mesh[], material: THREE.Material) => {
     if (geos.length === 0) return;
     const combined = mergeGeometries(geos, false);
     for (const g of geos) g.dispose();
-    if (!combined) return;
+    if (!combined) {
+      console.warn("collapseStaticMeshes: mergeGeometries failed, preserving original meshes");
+      return;
+    }
+    for (const mesh of victims) mesh.parent?.remove(mesh);
     const mesh = new THREE.Mesh(combined, material);
     mesh.castShadow = true;
     mesh.receiveShadow = false;
     root.add(mesh);
     merged.push(mesh);
   };
-  addMerged(opaqueGeos, getVertexToonMaterial());
-  addMerged(glowGeos, getVertexGlowMaterial());
+  addMerged(opaqueGeos, opaqueVictims, getVertexToonMaterial());
+  addMerged(glowGeos, glowVictims, getVertexGlowMaterial());
   return merged;
 }
 
@@ -287,16 +376,25 @@ const glowMaterialCache = new Map<string, THREE.MeshBasicMaterial>();
 
 export function getGlowMaterial(colorHex: number, opacity = 0.72): THREE.MeshBasicMaterial {
   // Round the opacity so float chains like opacity * 0.3 never split the cache.
-  const key = `${colorHex}|${Math.round(opacity * 1000) / 1000}`;
-  let material = glowMaterialCache.get(key);
-  if (!material) {
-    material = createGlowMaterial(colorHex, opacity);
-    material.userData.shared = true;
-    glowMaterialCache.set(key, material);
+  const op = Math.round(opacity * 100) / 100;
+  const key = `${colorHex.toString(16)}|${op.toFixed(2)}`;
+  let mat = glowMaterialCache.get(key);
+  if (!mat) {
+    mat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: op,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    mat.userData.shared = true;
+    mat.userData.baseOpacity = op;
+    glowMaterialCache.set(key, mat);
   }
-  return material;
+  return mat;
 }
 
+/** Low-poly box with an additive-blended glow material. */
 export function createGlowBox(
   width: number,
   height: number,
@@ -310,21 +408,21 @@ export function createGlowBox(
   return mesh;
 }
 
-export function createSkyDome() {
-  const geometry = new THREE.SphereGeometry(340, 32, 16);
+// --- Sky Dome ---------------------------------------------------------------
+// Coastal atmosphere: sunny clear cyan zenith fading to warm horizon.
+export function createSkyDome(radius = 700): THREE.Mesh {
+  const geometry = new THREE.SphereGeometry(radius, 24, 16);
   const material = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
     uniforms: {
-      // Desert dome: pale dry blue zenith fading to a dust haze horizon so the
-      // scene reads as a bright desert day.
-      topColor: { value: new THREE.Color(0x6fa3c4) },
-      horizonColor: { value: new THREE.Color(0xe6d3a2) },
-      sunColor: { value: new THREE.Color(0xffd98f) },
-      // Warm glow pooled around the horizon line — the arcade sunrise feel.
-      glowColor: { value: new THREE.Color(0xffc986) },
-      // Seconds (scaled) — drives a slow halo breathe so the sky subtly moves.
-      uTime: { value: 0 },
+      topColor: { value: new THREE.Color(0x6caee2) },
+      bottomColor: { value: new THREE.Color(0xdaf0fc) },
+      sunColor: { value: new THREE.Color(0xfff4cf) },
+      sunDirection: { value: new THREE.Vector3(-0.45, 0.72, 0.52).normalize() },
+      sunGlowSize: { value: 0.045 },
+      cloudColor: { value: new THREE.Color(0xffffff) },
+      time: { value: 0 },
+      offset: { value: 18 },
+      exponent: { value: 0.65 },
     },
     vertexShader: `
       varying vec3 vWorldPosition;
@@ -336,66 +434,99 @@ export function createSkyDome() {
     `,
     fragmentShader: `
       uniform vec3 topColor;
-      uniform vec3 horizonColor;
+      uniform vec3 bottomColor;
       uniform vec3 sunColor;
-      uniform vec3 glowColor;
-      uniform float uTime;
+      uniform vec3 sunDirection;
+      uniform float sunGlowSize;
+      uniform vec3 cloudColor;
+      uniform float time;
+      uniform float offset;
+      uniform float exponent;
       varying vec3 vWorldPosition;
+
+      // Cheap procedural 2D hash for sky banding / cirrus streaks
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
+                   mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
+      }
 
       void main() {
         vec3 dir = normalize(vWorldPosition);
+        float h = normalize(vWorldPosition + offset).y;
+        float f = max(pow(max(h, 0.0), exponent), 0.0);
+        vec3 sky = mix(bottomColor, topColor, f);
 
-        // Zenith -> horizon gradient (bright dust-blue sky to warm sandy haze).
-        float horizon = smoothstep(-0.12, 0.72, dir.y);
-        vec3 color = mix(horizonColor, topColor, horizon);
+        // Sun disc + radial haze
+        float sunDot = max(dot(dir, sunDirection), 0.0);
+        float sunGlow = pow(sunDot, 64.0) * 0.9;
+        float sunCore = step(0.9992, sunDot) * 1.5;
+        sky += sunColor * (sunGlow + sunCore);
 
-        // Warm band hugging the horizon line (above AND below it), so distant
-        // city silhouettes sit in a soft amber atmospheric pool.
-        float warmBand = pow(max(0.0, 1.0 - abs(dir.y) * 1.25), 9.0);
-        color += (horizonColor * 0.28 + glowColor * 0.5) * warmBand * 0.55;
-
-        // Sun direction (kept aligned with the engine's sun disc + key light).
-        vec3 sunDir = normalize(vec3(-0.38, 0.58, -0.72));
-        float sunDot = max(dot(dir, sunDir), 0.0);
-        // Layered halo: a tight bright core plus a wide, soft scattering pool.
-        float sunCore = pow(sunDot, 52.0);
-        float sunHalo = pow(sunDot, 9.0) * (0.85 + 0.15 * sin(uTime * 1.4));
-        color += sunColor * (sunCore * 0.55 + sunHalo * 0.16);
-
-        // A cool steel-blue band near the zenith top keeps the sky from reading
-        // as a single flat wash (subtle, never dusk).
-        float zenith = pow(max(0.0, dir.y), 3.0);
-        color += topColor * zenith * 0.06;
-
-        // Faint animated cirrus streaks high up — thin, banded, slowly drifting.
-        // Opacity is low so it reads as atmosphere, not painted clouds.
-        if (dir.y > 0.15) {
-          float drift = uTime * 0.02;
-          float streak = 0.5 + 0.5 * sin(
-            dir.y * 46.0 + (dir.x + dir.z) * 24.0 + drift
-          );
-          streak *= streak;
-          float h = smoothstep(0.15, 0.6, dir.y) * (1.0 - smoothstep(0.6, 1.0, dir.y));
-          color += vec3(1.0, 0.98, 0.94) * streak * h * 0.045;
+        // Subtle high-altitude cirrus cloud streaks
+        if (dir.y > 0.05) {
+          vec2 cloudUv = dir.xz / (dir.y + 0.2) * 1.8 + vec2(time * 0.003, time * 0.001);
+          float n = noise(cloudUv * 3.0) * 0.6 + noise(cloudUv * 6.0) * 0.4;
+          float cloudMask = smoothstep(0.55, 0.78, n) * smoothstep(0.05, 0.35, dir.y) * 0.32;
+          sky = mix(sky, cloudColor, cloudMask);
         }
 
-        gl_FragColor = vec4(color, 1.0);
+        gl_FragColor = vec4(sky, 1.0);
       }
     `,
+    side: THREE.BackSide,
+    depthWrite: false,
   });
-  const dome = new THREE.Mesh(geometry, material);
-  dome.name = "ArcadeSkyDome";
-  dome.frustumCulled = false;
-  return dome;
+  return new THREE.Mesh(geometry, material);
 }
 
-export function createBox(
+// --- Prism / Wedge Geometry Cache -------------------------------------------
+const prismGeometryCache = new Map<string, THREE.BufferGeometry>();
+
+/** Return a shared low-poly triangular prism (e.g. for gables, road arrows, ramps). */
+export function getPrismGeometry(width: number, height: number, depth: number): THREE.BufferGeometry {
+  const key = `${width.toFixed(2)}|${height.toFixed(2)}|${depth.toFixed(2)}`;
+  let geo = prismGeometryCache.get(key);
+  if (!geo) {
+    const hw = width / 2;
+    const hd = depth / 2;
+    const positions = new Float32Array([
+      // Bottom face
+      -hw, 0, -hd,   hw, 0, -hd,   hw, 0,  hd,
+      -hw, 0, -hd,   hw, 0,  hd,  -hw, 0,  hd,
+      // Front tri (at +hd)
+      -hw, 0,  hd,   hw, 0,  hd,    0, height, hd,
+      // Back tri (at -hd)
+       hw, 0, -hd,  -hw, 0, -hd,    0, height, -hd,
+      // Right slope
+       hw, 0, -hd,   0, height, -hd,  0, height,  hd,
+       hw, 0, -hd,   0, height,  hd,  hw, 0,  hd,
+      // Left slope
+      -hw, 0,  hd,   0, height,  hd,  0, height, -hd,
+      -hw, 0,  hd,   0, height, -hd, -hw, 0, -hd,
+    ]);
+    geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+    geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array((positions.length / 3) * 2), 2));
+    geo.userData.shared = true;
+    prismGeometryCache.set(key, geo);
+  }
+  return geo;
+}
+
+export function createPrism(
   width: number,
   height: number,
   depth: number,
   colorHex: number,
 ) {
-  const mesh = new THREE.Mesh(getBoxGeometry(width, height, depth), getLowPolyMaterial(colorHex));
+  const mesh = new THREE.Mesh(getPrismGeometry(width, height, depth), getLowPolyMaterial(colorHex));
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;

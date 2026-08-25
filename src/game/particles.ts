@@ -276,6 +276,8 @@ export class GPUParticleSystem {
     this.mesh.matrixAutoUpdate = false;
   }
 
+  private dirty: boolean = false;
+
   spawnExplosion(
     x: number,
     y: number,
@@ -299,7 +301,7 @@ export class GPUParticleSystem {
       this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
     }
 
-    this.updateAttrs();
+    this.dirty = true;
   }
 
   spawnSmoke(x: number, y: number, z: number, now: number) {
@@ -314,7 +316,7 @@ export class GPUParticleSystem {
     this.startTimeAttr.setX(idx, now - Math.random() * 0.2);
     this.pTypeAttr.setX(idx, 1.0); // Smoke type
     this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
-    this.updateAttrs();
+    this.dirty = true;
   }
 
   /** Rotor-downwash dust — smoke-type puffs kicked outward from the ground
@@ -334,7 +336,7 @@ export class GPUParticleSystem {
     this.startTimeAttr.setX(idx, now - Math.random() * 0.15);
     this.pTypeAttr.setX(idx, 1.0); // Smoke type
     this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
-    this.updateAttrs();
+    this.dirty = true;
   }
 
   spawnSparks(x: number, y: number, z: number, now: number, count = 3, speed = 15) {
@@ -351,27 +353,25 @@ export class GPUParticleSystem {
       this.pTypeAttr.setX(idx, 2.0); // Spark type
       this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
     }
-    this.updateAttrs();
+    this.dirty = true;
   }
 
-  /** Debris chunks — dark heavy fragments that fly out with strong gravity and
-   *  fade over ~1.6s. Reuses the type-3 shader branch. Cheap: N attribute
-   *  writes per call, no allocations. */
-  spawnDebris(x: number, y: number, z: number, now: number, count = 10, speed = 24) {
+  /** Physics-driven debris chunks kicked off by explosions / impacts. */
+  spawnDebris(x: number, y: number, z: number, now: number, count = 6, speed = 22) {
     for (let i = 0; i < count; i++) {
       const idx = this.currentIndex;
       this.positionAttr.setXYZ(idx, x, y, z);
       this.velocityAttr.setXYZ(
         idx,
         (Math.random() - 0.5) * speed,
-        Math.random() * speed * 0.8 + 4,
+        Math.random() * speed * 0.8 + 6,
         (Math.random() - 0.5) * speed,
       );
-      this.startTimeAttr.setX(idx, now - Math.random() * 0.08);
+      this.startTimeAttr.setX(idx, now - Math.random() * 0.05);
       this.pTypeAttr.setX(idx, 3.0); // Debris type
       this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
     }
-    this.updateAttrs();
+    this.dirty = true;
   }
 
   updateAttrs() {
@@ -383,6 +383,10 @@ export class GPUParticleSystem {
 
   update(time: number) {
     this.uniforms.uTime.value = time;
+    if (this.dirty) {
+      this.updateAttrs();
+      this.dirty = false;
+    }
   }
 }
 
@@ -398,6 +402,7 @@ export class VolumetricExplosions {
   maxParticles: number;
   dummy = new THREE.Object3D();
   
+  positions: Float32Array;
   scales: Float32Array;
   lifetimes: Float32Array;
   maxLifetimes: Float32Array;
@@ -412,6 +417,7 @@ export class VolumetricExplosions {
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxParticles * 3), 3);
     
+    this.positions = new Float32Array(maxParticles * 3);
     this.scales = new Float32Array(maxParticles);
     this.lifetimes = new Float32Array(maxParticles);
     this.maxLifetimes = new Float32Array(maxParticles);
@@ -437,11 +443,15 @@ export class VolumetricExplosions {
         this.maxLifetimes[i] = 0.5 + Math.random() * 0.7;
         this.scales[i] = size * (0.5 + Math.random() * 1.5);
         
-        this.dummy.position.set(
-          x + (Math.random() - 0.5) * size * 1.5,
-          y + (Math.random() - 0.5) * size * 1.5,
-          z + (Math.random() - 0.5) * size * 1.5
-        );
+        const px = x + (Math.random() - 0.5) * size * 1.5;
+        const py = y + (Math.random() - 0.5) * size * 1.5;
+        const pz = z + (Math.random() - 0.5) * size * 1.5;
+
+        this.positions[i * 3] = px;
+        this.positions[i * 3 + 1] = py;
+        this.positions[i * 3 + 2] = pz;
+
+        this.dummy.position.set(px, py, pz);
         this.dummy.scale.set(0.1, 0.1, 0.1);
         this.dummy.updateMatrix();
         this.mesh.setMatrixAt(i, this.dummy.matrix);
@@ -470,6 +480,7 @@ export class VolumetricExplosions {
         
         if (lifeRatio >= 1.0) {
           this.activeFlags[i] = 0;
+          this.dummy.position.set(0, -9999, 0);
           this.dummy.scale.set(0,0,0);
           this.dummy.updateMatrix();
           this.mesh.setMatrixAt(i, this.dummy.matrix);
@@ -477,10 +488,12 @@ export class VolumetricExplosions {
           const scaleCurve = lifeRatio < 0.2 ? lifeRatio * 5.0 : 1.0 - (lifeRatio - 0.2) * 0.5;
           const s = this.scales[i] * scaleCurve;
           
-          this.mesh.getMatrixAt(i, this.dummy.matrix);
-          this.dummy.matrix.decompose(this.dummy.position, this.dummy.quaternion, this.dummy.scale);
-          this.dummy.position.y += delta * 4.0;
-          this.dummy.scale.set(s,s,s);
+          const px = this.positions[i * 3];
+          const py = (this.positions[i * 3 + 1] += delta * 4.0);
+          const pz = this.positions[i * 3 + 2];
+
+          this.dummy.position.set(px, py, pz);
+          this.dummy.scale.set(s, s, s);
           this.dummy.updateMatrix();
           this.mesh.setMatrixAt(i, this.dummy.matrix);
           

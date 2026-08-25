@@ -105,6 +105,7 @@ import {
   AttackPattern,
   EnemyModifier,
   copyPhysicsPos,
+  EnemyMovementClass,
   EnemyType,
   EnemyVariant,
   FOG_CLEAR_COLOR,
@@ -130,6 +131,10 @@ import {
   comboMultiplier,
   DIFFICULTIES,
   ENEMY_VARIANTS,
+  GROUND_THREAT_COSTS,
+  AIR_THREAT_COSTS,
+  pickGroundComposition,
+  pickMixedComposition,
   MAX_RUN_LEVEL,
   MAX_WEAPON_LEVEL,
   objectiveConfig,
@@ -188,6 +193,7 @@ import {
 } from "./logic";
 import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, UpgradeId, UpgradeOption, WaveThemeConfig } from "./logic";
 import { armorMitigation, resolvePlayerDamage, resolveRepair, type PlayerDamageType } from "./combat";
+import { FloatingCombatTextManager, type CombatTextType } from "./floatingText";
 import {
   CountermeasureState,
   countermeasureConfig,
@@ -231,6 +237,15 @@ const TUTORIAL_DONE_KEY = "helistrike:tutorialDone";
 export class GameEngine {
   private static readonly MAX_SIMULATION_DT = 0.05;
 
+  private static readonly _scratchFrustum = new THREE.Frustum();
+  private static readonly _scratchMatrix = new THREE.Matrix4();
+  private static readonly _scratchVec3 = new THREE.Vector3();
+  private static readonly _scratchCamFwd = new THREE.Vector3();
+  private static readonly _scratchCamRight = new THREE.Vector3();
+
+  floatingCombatText: FloatingCombatTextManager;
+  private overlayCanvas: HTMLCanvasElement | null = null;
+
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   cameraLookAtTarget: THREE.Vector3 = new THREE.Vector3();
@@ -238,6 +253,9 @@ export class GameEngine {
   /** Layered sun disc (core + halo) used to frame the desert sun. */
   sunDisc: THREE.Group;
   renderer: THREE.WebGLRenderer;
+  private canvas: HTMLCanvasElement;
+  private contextLost = false;
+  private tickErrorCount = 0;
   composer: EffectComposer;
   bloomPass: UnrealBloomPass;
     retroPass: ShaderPass;
@@ -400,6 +418,7 @@ export class GameEngine {
   // shadows that spread with altitude instead of static discs stuck underfoot.
   private playerShadow: THREE.Mesh;
   private enemyShadows = new Map<Enemy, THREE.Mesh>();
+  private shadowSeenSet = new Set<Enemy>();
   // Horizontal shadow-cast direction, normalized (the key light sits roughly SW
   // of the scene, so cast shadows fall toward +x / -z).
   private readonly sunShadowDir = new THREE.Vector3(0.66, 0, -0.75).normalize();
@@ -526,6 +545,13 @@ export class GameEngine {
   samSuppressionTimer: number = 0; // enemy fire-rate debuff while > 0
   samActive: boolean = false; // any SAM site alive boosts enemy fire rate
   radarActive: boolean = false; // modest enemy acquisition + nearby SAM uplink
+  samSiteAnnouncedThisRun: boolean = false;
+  radarSiteAnnouncedThisRun: boolean = false;
+  airThreatAnnouncedThisRun: boolean = false;
+  desiredGroundThreat: number = 0;
+  desiredAirThreat: number = 0;
+  private microLullTimer: number = 28.0;
+  private microLullActiveTimer: number = 0;
 
   // Weapon XP & levels
   weaponXp: Map<WeaponType, number> = new Map();
@@ -570,48 +596,7 @@ export class GameEngine {
   private particleBudgetThisFrame = 0;
   private static readonly PARTICLE_BUDGET_PER_FRAME = 180;
 
-  // 3d: simple spatial grid for fast nearby-enemy queries.
-  // Rebuilt each frame from active enemy positions; queries are O(1) cell lookup.
-  private spatialGrid = new Map<number, number[]>();
-  private static readonly GRID_CELL = 48; // cell size in world units
-  private gridKey(x: number, z: number): number {
-    const cx = Math.floor(x / GameEngine.GRID_CELL);
-    const cz = Math.floor(z / GameEngine.GRID_CELL);
-    return cx * 7919 + cz; // prime-based hash
-  }
-  private rebuildSpatialGrid() {
-    this.spatialGrid.clear();
-    for (let i = 0; i < this.enemies.length; i++) {
-      const e = this.enemies[i];
-      if (!e.active) continue;
-      const key = this.gridKey(e.body.position.x, e.body.position.z);
-      let cell = this.spatialGrid.get(key);
-      if (!cell) { cell = []; this.spatialGrid.set(key, cell); }
-      cell.push(i);
-    }
-  }
-  /** Return indices of enemies within `radius` of (x,z). */
-  private queryNearbyEnemies(x: number, z: number, radius: number): number[] {
-    const result: number[] = [];
-    const minCx = Math.floor((x - radius) / GameEngine.GRID_CELL);
-    const maxCx = Math.floor((x + radius) / GameEngine.GRID_CELL);
-    const minCz = Math.floor((z - radius) / GameEngine.GRID_CELL);
-    const maxCz = Math.floor((z + radius) / GameEngine.GRID_CELL);
-    const rSq = radius * radius;
-    for (let cx = minCx; cx <= maxCx; cx++) {
-      for (let cz = minCz; cz <= maxCz; cz++) {
-        const cell = this.spatialGrid.get(cx * 7919 + cz);
-        if (!cell) continue;
-        for (const idx of cell) {
-          const e = this.enemies[idx];
-          const dx = e.body.position.x - x;
-          const dz = e.body.position.z - z;
-          if (dx * dx + dz * dz <= rSq) result.push(idx);
-        }
-      }
-    }
-    return result;
-  }
+
 
   // Run-scoped tactical systems. These never round-trip through React per frame.
   countermeasures = new CountermeasureState(countermeasureConfig(0));
@@ -800,6 +785,12 @@ export class GameEngine {
     const outputPass = new OutputPass();
     this.composer.addPass(outputPass);
 
+    // WebGL context loss recovery — prevents permanent crash on GPU reset,
+    // tab sleep, or mobile background/foreground cycles.
+    this.canvas = canvas;
+    canvas.addEventListener('webglcontextlost', this.onContextLost);
+    canvas.addEventListener('webglcontextrestored', this.onContextRestored);
+
     // PS1-style finish: quantize colors to a coarse palette with ordered
     // (Bayer) dithering, mimicking the console's limited color depth.
     this.retroPass = new ShaderPass(RetroDitherShader);
@@ -817,19 +808,17 @@ export class GameEngine {
     this.world.defaultContactMaterial.friction = 0;
     this.world.defaultContactMaterial.restitution = 0;
 
-    // Desert sun: strong warm key + sandy ambient so the toon gradient bands
-    // pop on every facade (lit face / midtone / shadow face).
-    const ambient = new THREE.HemisphereLight(0xf6ecd8, 0x8a7a58, 1.25);
+    // Sunny coastal warzone lighting: crisp warm key + vibrant sky hemisphere fill
+    // so low-poly faceted toon bands pop with high contrast and tabletop clarity.
+    const ambient = new THREE.HemisphereLight(0x88c8f8, 0xdcb880, 1.35);
     this.ambientLight = ambient;
     this.scene.add(ambient);
 
-    const softKey = new THREE.DirectionalLight(0xffe3b0, 1.7);
+    const softKey = new THREE.DirectionalLight(0xfff2d4, 1.9);
     this.keyLight = softKey;
     softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
-    // Player-only real shadows (HD preset): a tight frustum that trails the
-    // helicopter each frame (updateShadowRig) keeps the shadow pass covering
-    // just the patch of world around the player instead of the whole city.
+    // Player-only real shadows (HD preset): a tight frustum trailing the helicopter
     softKey.shadow.camera.left = -42;
     softKey.shadow.camera.right = 42;
     softKey.shadow.camera.top = 42;
@@ -840,26 +829,22 @@ export class GameEngine {
     softKey.shadow.mapSize.height = 1024;
     softKey.shadow.bias = -0.00018;
     this.scene.add(softKey);
-    // The target must live in the scene graph for lookAt-following in
-    // updateShadowRig to affect the light's shadow camera orientation.
     this.scene.add(softKey.target);
 
-    const rimLight = new THREE.DirectionalLight(0x9fc4e8, 0.4);
+    const rimLight = new THREE.DirectionalLight(0xaad8ff, 0.5);
     rimLight.position.set(65, 50, -85);
     this.scene.add(rimLight);
 
-    // Layered sun disc: a tight white-hot core inside a wide soft haze so the
-    // desert sun reads as a light source instead of a flat dot. Both layers are
-    // plain glowing spheres (bloom will lift the core in HD).
+    // Layered sun disc: bright white-hot core inside warm glowing halo
     this.sunDisc = new THREE.Group();
     const sunPos = new THREE.Vector3(-116, 118, -178);
     const sunCore = new THREE.Mesh(
       new THREE.SphereGeometry(8, 10, 6),
-      createGlowMaterial(0xfff4cf, 0.75),
+      createGlowMaterial(0xfffae6, 0.8),
     );
     const sunHalo = new THREE.Mesh(
       new THREE.SphereGeometry(22, 14, 8),
-      createGlowMaterial(0xffc66d, 0.16),
+      createGlowMaterial(0xffdeb0, 0.2),
     );
     sunHalo.renderOrder = -2;
     sunCore.renderOrder = -3;
@@ -1013,6 +998,15 @@ export class GameEngine {
       this.speedLines.push(line);
     }
 
+    this.floatingCombatText = new FloatingCombatTextManager();
+    if (this.canvas && this.canvas.parentElement) {
+      this.overlayCanvas = document.createElement("canvas");
+      this.overlayCanvas.className = "pointer-events-none absolute inset-0 block h-full w-full z-20";
+      this.canvas.parentElement.appendChild(this.overlayCanvas);
+      this.floatingCombatText.attachCanvas(this.overlayCanvas);
+      this.syncOverlayCanvasSize();
+    }
+
     window.addEventListener("resize", this.onResize);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerdown", this.onPointerDown);
@@ -1155,6 +1149,7 @@ export class GameEngine {
     this.objectives = [];
     this.playerProjectiles.deactivateAll();
     this.enemyProjectiles.deactivateAll();
+    this.floatingCombatText.clear();
 
     this.helicopter.reset();
     this.movementTarget.set(0, 26, 0);
@@ -1232,6 +1227,11 @@ export class GameEngine {
     this.waveTimer = 0;
     this.waveTransitionTimer = 2.2;
     this.waveMessage = "GET READY";
+    this.samSiteAnnouncedThisRun = false;
+    this.radarSiteAnnouncedThisRun = false;
+    this.airThreatAnnouncedThisRun = false;
+    this.microLullTimer = 28.0;
+    this.microLullActiveTimer = 0;
     // Opening sequence: every run starts behind the 3-2-1 countdown and the
     // spawn shield — no damage, no enemy fire, no stale protection state.
     this.openingPhase = "countdown";
@@ -1396,6 +1396,8 @@ export class GameEngine {
       this.animationFrameId = null;
     }
     this.renderer.setAnimationLoop(null);
+    this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
+    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
     this.audio.dispose();
     this.city.onHonk = null;
     this.city.onBuildingDestroyed = null;
@@ -1415,11 +1417,47 @@ export class GameEngine {
     this.scene.clear();
     this.composer.dispose();
     this.renderer.dispose();
+    if (this.overlayCanvas && this.overlayCanvas.parentElement) {
+      this.overlayCanvas.parentElement.removeChild(this.overlayCanvas);
+      this.overlayCanvas = null;
+    }
+    this.floatingCombatText.clear();
   }
+
+  syncOverlayCanvasSize = () => {
+    if (!this.overlayCanvas) return;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const dpr = this.getEffectivePixelRatio();
+    this.overlayCanvas.width = Math.floor(width * dpr);
+    this.overlayCanvas.height = Math.floor(height * dpr);
+    this.overlayCanvas.style.width = `${width}px`;
+    this.overlayCanvas.style.height = `${height}px`;
+  };
 
   onResize = () => {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(this.getEffectivePixelRatio());
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.syncOverlayCanvasSize();
+    this.applyComposerQuality();
+  };
+
+  private onContextLost = (e: Event) => {
+    e.preventDefault(); // allows restore to fire
+    this.contextLost = true;
+    console.warn('[HeliStrike] WebGL context lost — pausing render loop');
+    if (this.isPlaying) {
+      window.dispatchEvent(new CustomEvent('helistrike:autopause'));
+    }
+  };
+
+  private onContextRestored = () => {
+    this.contextLost = false;
+    console.info('[HeliStrike] WebGL context restored — resuming');
+    // Three.js WebGLRenderer handles internal state reset on context restore.
+    // Re-apply renderer settings to ensure they're in sync.
     this.renderer.setPixelRatio(this.getEffectivePixelRatio());
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.applyComposerQuality();
@@ -1520,6 +1558,7 @@ export class GameEngine {
       sceneObjects,
       powerups: this.powerups.length,
       objectives: this.objectives.length,
+      activeDamageTexts: this.floatingCombatText.getActiveCount(),
     };
   }
   /** Reused by getPerfStats — no per-poll allocation. */
@@ -1548,11 +1587,12 @@ export class GameEngine {
     for (let i = 0; i < this.particles.maxParticles; i++) {
       if (startAttr.getX(i) > -9000) particles++;
     }
+    const damageTexts = this.floatingCombatText.getActiveCount();
     console.info(
       `[Heli-Strike mem] t=${time.toFixed(1)}s fps=${this.fps} ` +
         `chunks=${this.city.chunks.size} sceneObj=${sceneObjects} blocks=${this.city.blocks.length} ` +
         `enemies=${this.enemies.length} proj=${playerProj}/${enemyProj} particles=${particles} ` +
-        `powerups=${this.powerups.length} traffic=${traffic} turrets=${this.city.turrets.length} ` +
+        `dmgTexts=${damageTexts} powerups=${this.powerups.length} traffic=${traffic} turrets=${this.city.turrets.length} ` +
         `geoms=${info.memory.geometries} textures=${info.memory.textures} ` +
         `calls=${info.render.calls} tris=${info.render.triangles}`,
     );
@@ -1579,6 +1619,9 @@ export class GameEngine {
   }
 
   private renderFrame() {
+    // Skip rendering if WebGL context was lost — the browser will fire
+    // 'webglcontextrestored' when GPU resources are available again.
+    if (this.contextLost) return;
     // Keep the horizon centered on the player so the dome never strands
     // behind the streaming city chunks.
     this.skyDome.position.set(this.camera.position.x, 0, this.camera.position.z);
@@ -1589,9 +1632,17 @@ export class GameEngine {
     }
     if (this.settings.graphics === 'sp1') {
       this.renderer.render(this.scene, this.camera);
-      return;
+    } else {
+      this.composer.render();
     }
-    this.composer.render();
+    this.floatingCombatText.render(
+      this.camera,
+      this.renderer.domElement.clientWidth || window.innerWidth,
+      this.renderer.domElement.clientHeight || window.innerHeight,
+      this.getEffectivePixelRatio(),
+      this.hitMarkerTimer,
+      this.hitMarkerPosition,
+    );
   }
 
   /** Position the fake blob shadows under the player and every active enemy,
@@ -1614,10 +1665,10 @@ export class GameEngine {
       hp.z + this.sunShadowDir.z * alt * this.sunShadowOffsetPerU,
     );
 
-    const seen = new Set<Enemy>();
+    this.shadowSeenSet.clear();
     for (const e of this.enemies) {
       if (!e.active) continue;
-      seen.add(e);
+      this.shadowSeenSet.add(e);
       let shadow = this.enemyShadows.get(e);
       if (!shadow) {
         shadow = createBlobShadow(Math.max(3, e.radius * 1.6));
@@ -1638,7 +1689,7 @@ export class GameEngine {
       );
     }
     for (const [e, shadow] of this.enemyShadows) {
-      if (seen.has(e)) continue;
+      if (this.shadowSeenSet.has(e)) continue;
       this.scene.remove(shadow);
       shadow.geometry.dispose();
       (shadow.material as THREE.Material).dispose();
@@ -1758,7 +1809,7 @@ export class GameEngine {
     // SAM sites are deliberate high-value targets, but normal enemies retain
     // priority unless the launcher is actively tracking or locking the player.
     for (const objective of this.objectives) {
-      if (!objective.active || objective.type !== ObjectiveType.SAM_SITE) continue;
+      if (!objective.active || (objective.type !== ObjectiveType.SAM_SITE && objective.type !== ObjectiveType.RADAR_TOWER)) continue;
       const targetPos = objective.targetPoint;
       const dx = targetPos.x - origin.x;
       const dz = targetPos.z - origin.z;
@@ -1772,12 +1823,12 @@ export class GameEngine {
       const cursorDistance = this.mouseAimValid
         ? Math.hypot(targetPos.x - this.mouseAimPoint.x, targetPos.z - this.mouseAimPoint.z)
         : 0;
-      const threatening = objective.samState === SamState.LOCKING || objective.samState === SamState.TRACKING;
+      const threatening = objective.type === ObjectiveType.SAM_SITE && (objective.samState === SamState.LOCKING || objective.samState === SamState.TRACKING);
       const score = distSq * (useMouseCone ? 0.3 : 1)
         + lateralDistance * (useMouseCone ? 14 : 1.9)
         + cursorDistance * (useMouseCone ? 4.5 : 0)
         + (aheadBias < -0.25 ? 9000 : 0)
-        + (threatening ? -2600 : 1800);
+        + (threatening ? -2600 : objective.type === ObjectiveType.RADAR_TOWER ? 1400 : 1800);
       if (score < bestScore) {
         bestScore = score;
         bestTarget = objective;
@@ -2451,15 +2502,37 @@ export class GameEngine {
     }
   };
 
-  triggerDash(dx: number, dz: number) {
+  triggerDash(dx?: number, dz?: number) {
     if (this.dashState !== "READY") return;
+    let targetX = dx ?? 0;
+    let targetZ = dz ?? 0;
+
+    if (Math.hypot(targetX, targetZ) < 0.01) {
+      if (this.keyboardVelocity.lengthSq() > 0.01) {
+        targetX = this.keyboardVelocity.x;
+        targetZ = this.keyboardVelocity.y;
+      } else if (Math.hypot(this.helicopter.body.velocity.x, this.helicopter.body.velocity.z) > 3.0) {
+        targetX = this.helicopter.body.velocity.x;
+        targetZ = this.helicopter.body.velocity.z;
+      } else {
+        const yaw = this.helicopter.mesh.rotation.y;
+        targetX = Math.sin(yaw);
+        targetZ = Math.cos(yaw);
+      }
+    }
+
+    const mag = Math.hypot(targetX, targetZ);
+    if (mag < 0.001) return;
+    targetX /= mag;
+    targetZ /= mag;
+
     this.dashState = "DASHING";
     this.dashCooldownTimer = 0;
     this.dashActiveTimer = MOVEMENT_CONFIG.dashDuration;
-    this.dashDirection.set(dx, 0, dz).normalize();
+    this.dashDirection.set(targetX, 0, targetZ);
     this.helicopter.body.velocity.x = this.dashDirection.x * MOVEMENT_CONFIG.dashSpeed;
     this.helicopter.body.velocity.z = this.dashDirection.z * MOVEMENT_CONFIG.dashSpeed;
-    this.helicopter.triggerDash(dx, dz);
+    this.helicopter.triggerDash(targetX, targetZ);
   }
 
   onLeftStick = (event: Event) => {
@@ -2571,7 +2644,7 @@ export class GameEngine {
    *  +90° = right, ±180° = behind, -90° = left. The HUD rotates its edge
    *  arcs by this angle. */
   private screenAngleFromDirection(dir: { x: number; z: number }): number {
-    const fwd = this.camera.getWorldDirection(new THREE.Vector3());
+    const fwd = this.camera.getWorldDirection(GameEngine._scratchVec3);
     const fLen = Math.hypot(fwd.x, fwd.z) || 1;
     const fx = fwd.x / fLen;
     const fz = fwd.z / fLen;
@@ -2949,6 +3022,55 @@ export class GameEngine {
     const detail = (e as CustomEvent<{ on?: boolean }>).detail;
     this.city.setEnvDebug(Boolean(detail?.on));
   };
+
+  /** Development telemetry metrics (Step 67) */
+  getDebugMetrics() {
+    let infantryCount = 0;
+    let tankCount = 0;
+    let airCount = 0;
+    let bossActive = false;
+    let currentGroundThreat = 0;
+    let currentAirThreat = 0;
+
+    for (const e of this.enemies) {
+      if (e.active) {
+        if (e.type === EnemyType.BASIC) {
+          infantryCount++;
+          currentGroundThreat += GROUND_THREAT_COSTS.INFANTRY;
+        } else if (e.type === EnemyType.TANK) {
+          tankCount++;
+          currentGroundThreat += GROUND_THREAT_COSTS.TANK;
+        } else if (e.type === EnemyType.DRONE) {
+          airCount++;
+          currentAirThreat += AIR_THREAT_COSTS.COMBAT_DRONE;
+        } else if (e.type === EnemyType.BOSS) {
+          bossActive = true;
+        }
+      }
+    }
+
+    const samCount = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+    const radarActive = this.objectives.some((o) => o.active && o.type === ObjectiveType.RADAR_TOWER);
+    currentGroundThreat += samCount * GROUND_THREAT_COSTS.SAM;
+
+    return {
+      wave: this.currentWave,
+      currentGroundThreat,
+      desiredGroundThreat: this.desiredGroundThreat || 0,
+      currentAirThreat,
+      desiredAirThreat: this.desiredAirThreat || 0,
+      infantryCount,
+      tankCount,
+      samCount,
+      radarActive,
+      airCount,
+      bossActive,
+      spawnQueue: this.pendingSpawns + this.pendingVariantQueue.length + this.pendingEventSpawns.length,
+      projectiles:
+        this.playerProjectiles.pool.filter((p) => p.active).length +
+        this.enemyProjectiles.pool.filter((p) => p.active).length,
+    };
+  }
 
   readPlayerModel(): HelicopterModel {
     try {
@@ -3463,7 +3585,13 @@ export class GameEngine {
       this.delivery.awardCredits(bounty);
       this.addUnsecuredCredits(threatBonusFor(bounty, this.threatLevel));
     }
-    if (enemy.type === EnemyType.BOSS) this.bossesDestroyed++;
+    if (enemy.type === EnemyType.BOSS) {
+      this.bossesDestroyed++;
+      this.delivery.awardCredits(1000);
+      this.addSalvage(10);
+      this.repairPlayer(40);
+      this.announce("HEAVY GUNSHIP DESTROYED", "Airspace liberated · +1000 CR", "#55f2a2");
+    }
     this.grantWeaponXp(this.lastFiredWeapon);
 
     // Kill streaks -> arcade announcements + slow-mo on multi-kills
@@ -3495,20 +3623,47 @@ export class GameEngine {
 
     // Vampire-Survivors style: every kill drops an XP gem you fly through.
     // Gems are the upgrade currency — collect them to level up and roll.
+    const enemyXp = xpForEnemyType(enemy.type, enemy.isElite, enemy.variant);
     this.dropXpGem(
       enemy.body.position.x,
       enemy.body.position.y,
       enemy.body.position.z,
-      xpForEnemyType(enemy.type, enemy.isElite, enemy.variant),
+      enemyXp,
     );
     this.dropEnemyLoot(enemy);
 
-    if (enemy.isElite) {
-      this.announce("ELITE DESTROYED", `+${bounty} CR`, "#ffdd55");
-    }
-
     if (enemy.type === EnemyType.BOSS) {
+      this.floatingCombatText.spawnGroupedKill(
+        enemy.id,
+        enemy.body.position,
+        "BOSS DESTROYED",
+        `+${enemyXp} XP   +${bounty} CR`,
+        "#ff3366",
+        time,
+      );
       this.announce("BOSS DESTROYED", `+${bounty} CR`, "#d78cff");
+    } else if (enemy.isElite) {
+      this.floatingCombatText.spawnGroupedKill(
+        enemy.id,
+        enemy.body.position,
+        "ELITE DESTROYED",
+        `+${enemyXp} XP   +${bounty} CR`,
+        "#ffd000",
+        time,
+      );
+      this.announce("ELITE DESTROYED", `+${bounty} CR`, "#ffdd55");
+    } else if (enemy.type === EnemyType.TANK) {
+      this.floatingCombatText.spawnGroupedKill(
+        enemy.id,
+        enemy.body.position,
+        "TANK DESTROYED",
+        `+${enemyXp} XP`,
+        "#ff9f43",
+        time,
+      );
+    } else {
+      // Basic enemy kill: show XP reward while keeping killing damage number visible
+      this.floatingCombatText.spawnReward(enemy.body.position, `+${enemyXp} XP`, "XP", undefined, enemyXp, time);
     }
 
     // Bigger explosion for enemies based on type
@@ -4294,14 +4449,36 @@ export class GameEngine {
 
     // Determine wave banner — milestones keep their iconic lines, the rest use
     // the rolled theme so roguelite variety shows up on the screen.
-    if (this.currentWave % 10 === 0) {
-      this.waveMessage = `WAVE ${this.currentWave}\n⚠ BOSS BATTLE ⚠`;
-    } else if (this.currentWave % 5 === 0) {
-      this.waveMessage = `WAVE ${this.currentWave}\nMINIBOSS INBOUND`;
-    } else if (this.currentWave === 1) {
-      this.waveMessage = "WAVE 1\nENGAGE THE DRONES";
+    if (this.currentWave === 1) {
+      this.waveMessage = "WAVE 1\nINFANTRY PATROL";
+    } else if (this.currentWave === 2) {
+      this.waveMessage = "WAVE 2\nARMORED PATROL";
     } else if (this.currentWave === 3) {
-      this.waveMessage = "WAVE 3\nSTORM INCOMING";
+      this.waveMessage = "WAVE 3\nTANK COLUMN & RADAR";
+    } else if (this.currentWave === 4) {
+      this.waveMessage = "WAVE 4\nANTI-AIR BATTERY";
+    } else if (this.currentWave === 5) {
+      this.waveMessage = "WAVE 5\nRADAR COMBINED ARMS";
+    } else if (this.currentWave === 6) {
+      this.waveMessage = "WAVE 6\nCOMBAT DRONES DETECTED";
+      if (!this.airThreatAnnouncedThisRun) {
+        this.airThreatAnnouncedThisRun = true;
+        this.announce("COMBAT DRONES DETECTED", "Hostile aircraft inbound", "#ff3344");
+      }
+    } else if (this.currentWave === 7) {
+      this.waveMessage = "WAVE 7\nCOMBINED ARMS PATROL";
+    } else if (this.currentWave === 8) {
+      this.waveMessage = "WAVE 8\nAIR & AA DEFENSE";
+    } else if (this.currentWave === 9) {
+      this.waveMessage = "WAVE 9\nMAXIMUM GROUND & AIR PRESSURE";
+    } else if (this.currentWave === 10) {
+      this.waveMessage = "WAVE 10\n⚠ HEAVY GUNSHIP INBOUND ⚠";
+      this.startBossBattle(performance.now() / 1000);
+    } else if (this.currentWave % 10 === 0) {
+      this.waveMessage = `WAVE ${this.currentWave}\n⚠ HEAVY GUNSHIP INBOUND ⚠`;
+      this.startBossBattle(performance.now() / 1000);
+    } else if (this.currentWave % 5 === 0) {
+      this.waveMessage = `WAVE ${this.currentWave}\nRADAR COMBINED ARMS`;
     } else {
       this.waveMessage = waveThemeBanner(theme, this.currentWave);
     }
@@ -4310,10 +4487,18 @@ export class GameEngine {
     // Theme reshapes the horde head-count for this wave.
     if (theme) this.totalEnemiesInWave = Math.round(this.totalEnemiesInWave * theme.enemyCountMult);
 
-    // Destroyable objectives: spawn on the battlefield (ahead of the player)
-    const objectiveCount = Math.min(2, 1 + Math.floor(this.currentWave / 4));
-    for (let i = 0; i < objectiveCount; i++) {
-      this.spawnObjective();
+    // Destroyable objectives: spawn on the battlefield based on wave progression
+    if (this.currentWave >= 3) {
+      const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
+      if (activeRadars === 0) {
+        this.spawnObjective(ObjectiveType.RADAR_TOWER);
+      }
+    }
+    if (this.currentWave >= 4) {
+      const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+      if (activeSams === 0) {
+        this.spawnObjective(ObjectiveType.SAM_SITE);
+      }
     }
 
     // Dynamic Weather based on wave + the wave's storm theme bonus.
@@ -4508,28 +4693,43 @@ export class GameEngine {
   }
 
   /** Spawn a spaced rooftop or ground emplacement ahead of the player. */
-  private spawnObjective() {
+  private spawnObjective(forcedType?: ObjectiveType, nearX?: number, nearZ?: number): Objective | null {
     const player = this.helicopter.body.position;
     const lanes = [-120, -78, -48, -24, 0, 24, 48, 78, 120];
-    const roll = Math.random();
-    let type = ObjectiveType.SAM_SITE;
-    if (this.currentWave <= WAVE1_CONFIG.noSamWaves) {
-      // Opening waves: supply depots instead of SAM pressure — lock-on threats
-      // only arrive once the player has flown, aimed and fought a bit.
-      type = ObjectiveType.AMMO_DEPOT;
-    } else if (this.currentWave >= 3 && roll >= 0.52) {
-      type = ObjectiveType.RADAR_TOWER;
-    }
-    const samCap = this.currentWave < 4 ? 1 : 2;
+    const samCap = 1;
+    const radarCap = 1;
     const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
-    if (type === ObjectiveType.SAM_SITE && activeSams >= samCap) type = ObjectiveType.RADAR_TOWER;
+    const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
 
-    let laneX = 0;
-    let z = player.z - 160;
+    let type = forcedType ?? (this.currentWave >= 3 && activeRadars === 0 && Math.random() < 0.55 ? ObjectiveType.RADAR_TOWER : ObjectiveType.SAM_SITE);
+    if (type === ObjectiveType.SAM_SITE && activeSams >= samCap) {
+      if (activeRadars < radarCap && this.currentWave >= 3) {
+        type = ObjectiveType.RADAR_TOWER;
+      } else {
+        return null;
+      }
+    }
+    if (type === ObjectiveType.RADAR_TOWER && activeRadars >= radarCap) {
+      if (activeSams < samCap && this.currentWave >= 4) {
+        type = ObjectiveType.SAM_SITE;
+      } else {
+        return null;
+      }
+    }
+
+    let laneX = nearX ?? 0;
+    let z = nearZ ?? (player.z - 160);
     let y = 2;
     let placed = false;
-    for (let attempt = 0; attempt < 10 && !placed; attempt++) {
-      const rooftop = type === ObjectiveType.SAM_SITE && Math.random() < 0.46
+    for (let attempt = 0; attempt < 12 && !placed; attempt++) {
+      if (nearX !== undefined && nearZ !== undefined) {
+        laneX = nearX;
+        z = nearZ;
+        y = this.city.getHeightAt(laneX, z, 4);
+        placed = true;
+        break;
+      }
+      const rooftop = type === ObjectiveType.SAM_SITE && Math.random() < 0.35
         ? this.city.rooftopSpots.filter((spot) =>
             spot.y >= 8 &&
             spot.z < player.z - 105 &&
@@ -4549,7 +4749,7 @@ export class GameEngine {
       }
       placed = this.objectives.every((o) => !o.active || Math.hypot(o.position.x - laneX, o.position.z - z) >= SAM_MIN_SPACING);
     }
-    if (!placed) return;
+    if (!placed) return null;
 
     const obj = new Objective(this.scene, this.world, laneX, y, z, type);
     this.objectiveMissionId(obj);
@@ -4565,13 +4765,14 @@ export class GameEngine {
       obj.hp = obj.maxHp;
     }
     this.objectives.push(obj);
-    this.announce(
-      type === ObjectiveType.SAM_SITE
-        ? "SAM SITE ONLINE"
-        : "RADAR TOWER DETECTED",
-      "Destroy it to shift the battle",
-      "#ff5566",
-    );
+    if (type === ObjectiveType.SAM_SITE && !this.samSiteAnnouncedThisRun) {
+      this.samSiteAnnouncedThisRun = true;
+      this.announce("ANTI-AIR BATTERY DETECTED", "Surface-to-air threat in sector", "#ff5566");
+    } else if (type === ObjectiveType.RADAR_TOWER && !this.radarSiteAnnouncedThisRun) {
+      this.radarSiteAnnouncedThisRun = true;
+      this.announce("RADAR STATION DETECTED", "Destroy it to weaken enemy reinforcement and SAM tracking", "#ffaa33");
+    }
+    return obj;
   }
 
   /** Apply a destroyable objective's battlefield effect. */
@@ -4596,6 +4797,7 @@ export class GameEngine {
     this.delivery.awardCredits(securedReward);
     this.addUnsecuredCredits(threatBonusFor(securedReward, this.threatLevel));
     this.addSalvage(salvageForObjective(obj.type));
+    this.floatingCombatText.spawnReward(obj.position, `+${securedReward} CR`, "CREDITS");
 
     if (obj.type === ObjectiveType.SAM_SITE) {
       this.samSitesDestroyed++;
@@ -4631,103 +4833,90 @@ export class GameEngine {
   }
 
   spawnEnemy() {
-    // --- Threat-budget variant director ---
-    // Squads take priority: a picked composition queues its remaining members
-    // into pendingVariantQueue, drained one per cadence tick below, so a squad
-    // arrives as a staggered stream instead of a single-frame model spike.
-    let variant: EnemyVariant | null = null;
+    // --- Two-Budget Director Spawning ---
+    // Spawns Combat Drone (DRONE), Tank (TANK), and Infantry Cluster (BASIC)
+    let type = EnemyType.BASIC;
     const directorConfig = threatDirectorConfig(this.threatLevel);
     const directorWave = Math.max(this.currentWave, this.threatLevel * 2 - 1) + directorConfig.directorWaveBonus;
-    if (this.waveThreatBudgetRemaining < 1) return false;
-    if (this.currentWave === 1 && this.enemiesSpawnedInWave < WAVE1_CONFIG.basicOnlySpawns) {
-      // Wave-1 onboarding: the first handful of contacts are plain basic hulls
-      // — no squads, variants or affixes until the player has found their feet.
-      variant = EnemyVariant.STANDARD;
-      this.pendingVariantQueue.length = 0;
-    } else if (this.pendingVariantQueue.length > 0) {
-      variant = this.pendingVariantQueue.shift()!;
+    
+    if (this.pendingVariantQueue.length > 0) {
+      const v = this.pendingVariantQueue.shift()!;
+      type = v === EnemyVariant.SCOUT_DRONE ? EnemyType.DRONE : v === EnemyVariant.FLAK_TANK ? EnemyType.TANK : EnemyType.BASIC;
     } else {
-      const squad = pickSquadForWave(directorWave, () => Math.max(0, Math.random() - directorConfig.squadChanceBonus - this.difficulty.specialChance));
-      if (squad && squad.length > 0 && compositionFitsBudget(squad, this.waveThreatBudgetRemaining)) {
-        variant = squad[0];
-        this.pendingVariantQueue.push(...squad.slice(1, SPAWN_CONFIG.maxQueue));
+      const isMixedWave = directorWave >= 6;
+      const mixedComp = isMixedWave ? pickMixedComposition(directorWave) : null;
+
+      if (mixedComp && Math.random() < 0.6) {
+        if (mixedComp.sam > 0) {
+          const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+          if (activeSams === 0) {
+            this.spawnObjective(ObjectiveType.SAM_SITE);
+          }
+        }
+        const total = mixedComp.air + mixedComp.tanks + mixedComp.infantry;
+        const roll = Math.random() * (total || 1);
+        if (roll < mixedComp.air) {
+          type = EnemyType.DRONE;
+        } else if (roll < mixedComp.air + mixedComp.tanks) {
+          type = EnemyType.TANK;
+        } else {
+          type = EnemyType.BASIC;
+        }
+        for (let i = 0; i < mixedComp.air - (type === EnemyType.DRONE ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
+        for (let i = 0; i < mixedComp.tanks - (type === EnemyType.TANK ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
+        for (let i = 0; i < mixedComp.infantry - (type === EnemyType.BASIC ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.STANDARD);
       } else {
-        variant = pickEnemyVariant(directorWave);
+        const comp = pickGroundComposition(directorWave);
+        if (comp.radar > 0) {
+          const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
+          if (activeRadars === 0) {
+            const radarObj = this.spawnObjective(ObjectiveType.RADAR_TOWER);
+            if (radarObj && comp.sam > 0) {
+              const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+              if (activeSams === 0) {
+                this.spawnObjective(ObjectiveType.SAM_SITE, radarObj.position.x + 36, radarObj.position.z + 18);
+              }
+            }
+          }
+        } else if (comp.sam > 0) {
+          const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
+          if (activeSams === 0) {
+            this.spawnObjective(ObjectiveType.SAM_SITE);
+          }
+        }
+
+        if (comp.tanks > 0 && Math.random() < (comp.tanks / (comp.infantry + comp.tanks || 1))) {
+          type = EnemyType.TANK;
+        } else {
+          type = EnemyType.BASIC;
+        }
+        for (let i = 0; i < comp.infantry - (type === EnemyType.BASIC ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.STANDARD);
+        for (let i = 0; i < comp.tanks - (type === EnemyType.TANK ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
+      }
+      if (this.pendingVariantQueue.length > SPAWN_CONFIG.maxQueue) {
+        this.pendingVariantQueue.length = SPAWN_CONFIG.maxQueue;
       }
     }
 
-    // Per-variant soft caps: never stack unfair support/missile/rare units.
-    // If this variant is at its battlefield cap, fall back to the base hull.
-    let vConfig = ENEMY_VARIANTS[variant];
-    if (vConfig.maxActive !== undefined) {
-      let active = 0;
-      for (const e of this.enemies) if (e.active && e.variant === variant) active++;
-      if (active >= vConfig.maxActive) {
-        variant = EnemyVariant.STANDARD;
-        vConfig = ENEMY_VARIANTS[variant];
-      }
-    }
-    const type = vConfig.baseType;
-    if (vConfig.threat > this.waveThreatBudgetRemaining) {
-      variant = EnemyVariant.STANDARD;
-      vConfig = ENEMY_VARIANTS[variant];
-    }
-
-    // --- Base hull personality: modifiers & attack patterns ---
-    // (Variant behaviors take over movement via updateVariant; these add
-    //  flavor to the shared hull for STANDARD and capped-out units.)
-    let modifier = EnemyModifier.NONE;
-    let pattern = AttackPattern.CHASE;
-    const w = directorWave;
-    const r2 = Math.random();
-
-    // Tanks: artillery or circle strafing from wave 3+; shielded from wave 5+
-    if (type === EnemyType.TANK) {
-      if (w >= 4 && r2 < 0.4) pattern = AttackPattern.ARTILLERY;
-      else if (w >= 5 && r2 < 0.65) pattern = AttackPattern.CIRCLE;
-      if (w >= 5 && Math.random() < 0.3) modifier |= EnemyModifier.SHIELDED;
-      if (w >= 7 && Math.random() < 0.25) modifier |= EnemyModifier.REGENERATING;
-    }
-    // Drones: kamikaze dives from wave 4+, occasionally shielded
-    else if (type === EnemyType.DRONE) {
-      if (w >= 4 && r2 < 0.45) pattern = AttackPattern.KAMIKAZE;
-      if (w >= 6 && Math.random() < 0.2) modifier |= EnemyModifier.SHIELDED;
-    }
-    // Shooters: circle strafing runs from wave 4+, regenerating from wave 6+
-    else if (type === EnemyType.SHOOTER) {
-      if (w >= 4 && r2 < 0.35) pattern = AttackPattern.CIRCLE;
-      if (w >= 6 && Math.random() < 0.25) modifier |= EnemyModifier.REGENERATING;
-    }
-    // Basics: shielded from wave 8+
-    else if (type === EnemyType.BASIC && w >= 8 && Math.random() < 0.15) {
-      modifier |= EnemyModifier.SHIELDED;
-    }
-
-    // Variant units skip conflicting base patterns — updateVariant drives them.
-    if (variant !== EnemyVariant.STANDARD) pattern = AttackPattern.CHASE;
-
-    // B2: elite affixes — late-game rolls turn spawns into volatile threats
-    const affixes = affixChancesForWave(w);
-    if (affixes.explosive > 0 && Math.random() < affixes.explosive) modifier |= EnemyModifier.EXPLOSIVE;
-    if (affixes.splitter > 0 && Math.random() < affixes.splitter) modifier |= EnemyModifier.SPLITTER;
-    if (affixes.vampiric > 0 && Math.random() < affixes.vampiric) modifier |= EnemyModifier.VAMPIRIC;
+    const modifier = EnemyModifier.NONE;
+    const pattern = AttackPattern.CHASE;
+    const variant = type === EnemyType.DRONE ? EnemyVariant.STANDARD : type === EnemyType.TANK ? EnemyVariant.FLAK_TANK : EnemyVariant.STANDARD;
 
     let spot;
     let attempts = 0;
     this.camera.updateMatrixWorld();
-    const frustum = new THREE.Frustum();
-    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
+    const frustum = GameEngine._scratchFrustum;
+    frustum.setFromProjectionMatrix(GameEngine._scratchMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
     const playerPos = this.helicopter.body.position;
 
-    // Safe Spawn Validation (Max 8 attempts for better placement)
+    // Safe Ground Spawn Validation (on roads/open lots, outside close camera view)
     while (attempts < 8) {
       spot = this.getArcadeSpawnPoint(type, 0, 1);
       
-      const point = new THREE.Vector3(spot.x, spot.y, spot.z);
-      // Ensure it's not popping in immediately in the frustum
+      const point = GameEngine._scratchVec3.set(spot.x, spot.y, spot.z);
       if (frustum.containsPoint(point)) {
         const distSq = (spot.x - playerPos.x) ** 2 + (spot.z - playerPos.z) ** 2;
-        if (distSq < 3600) { // Only reject if extremely close (within 60 units) to allow ahead-of-player spawn in view
+        if (distSq < 3600) {
           attempts++;
           continue; 
         }
@@ -4761,14 +4950,13 @@ export class GameEngine {
       spot.z,
       type,
       spot.y,
-      { modifier, pattern, variant, isElite: Math.random() < Math.max(0, 0.01 + directorConfig.eliteChanceBonus + this.difficulty.eliteChance + (this.currentWaveTheme?.eliteBonus ?? 0)) },
+      { modifier, pattern, variant, isElite: false },
     );
     this.scaleEnemyForDifficulty(enemy);
     this.enemies.push(enemy);
-    this.waveThreatBudgetRemaining = Math.max(0, this.waveThreatBudgetRemaining - vConfig.threat);
     
-    // Spawn teleportation/arrival effect so enemies don't just pop in jarringly
-    this.particles.spawnExplosion(spot.x, spot.y, spot.z, 30, performance.now() / 1000, 15);
+    // Spawn arrival dust / effect
+    this.particles.spawnExplosion(spot.x, spot.y, spot.z, 20, performance.now() / 1000, 10);
     
     this.enemiesSpawnedInWave++;
     this.playSpawnCue(performance.now() / 1000);
@@ -4813,9 +5001,8 @@ export class GameEngine {
 
   /** Spawn the elite miniboss for wave % 5 === 0 waves. */
   private spawnMiniboss(time: number) {
-    // Minibosses escalate every 5th wave (wave 5 → 10 → 15 …)
     const scale = 1 + Math.floor(this.currentWave / 5) * 0.35;
-    const type = this.currentWave >= 10 ? EnemyType.TANK : EnemyType.DRONE;
+    const type = EnemyType.TANK;
     const spot = this.getArcadeSpawnPoint(type, 0, 1);
     const elite = new Enemy(
       this.scene,
@@ -4827,7 +5014,7 @@ export class GameEngine {
       {
         isElite: true,
         modifier: EnemyModifier.SHIELDED,
-        pattern: this.currentWave >= 10 ? AttackPattern.ARTILLERY : AttackPattern.KAMIKAZE,
+        pattern: AttackPattern.CHASE,
       },
     );
     elite.maxHp = Math.max(5, Math.round(elite.maxHp * scale));
@@ -4841,13 +5028,12 @@ export class GameEngine {
     this.particles.spawnExplosion(spot.x, spot.y, spot.z, 50, time, 20);
     this.audio.playEnemySpawn();
     this.addCameraImpulse(2.5);
-    this.announce("ELITE MINIBOSS", "Brace for impact", "#ffdd55");
+    this.announce("ELITE HEAVY TANK", "Heavy armor incoming", "#ffdd55");
   }
 
   /**
    * Wave-10 boss presentation: a short staged intro (warning → name → spawn)
-   * so the fight lands like an event instead of a pop-in. Player control is
-   * never removed; the boss simply enters after the framing beats (~2.7s).
+   * so the fight lands like an event instead of a pop-in.
    */
   private bossIntroActive = false;
   private bossIntroStage = 0;
@@ -4858,7 +5044,7 @@ export class GameEngine {
     this.bossIntroActive = true;
     this.bossIntroStage = 1;
     this.bossIntroNextTime = time + 0.9;
-    this.announce("⚠ INCOMING ⚠", "Hostile gunship detected", "#ff3366");
+    this.announce("⚠ WARNING ⚠", "Heavy Gunship Inbound", "#ff3366");
     this.audio.playUpgrade();
   }
 
@@ -4867,7 +5053,7 @@ export class GameEngine {
     if (this.bossIntroStage === 1) {
       this.bossIntroStage = 2;
       this.bossIntroNextTime = time + 0.9;
-      this.announce("ARCHON", "Shielded heavy gunship", "#d84cff");
+      this.announce("HEAVY GUNSHIP", "Archon Airborne Command", "#d84cff");
       this.audio.playUpgrade();
     } else if (this.bossIntroStage === 2) {
       this.bossIntroStage = 3;
@@ -4879,10 +5065,7 @@ export class GameEngine {
   }
 
   /**
-   * Real boss battle every 10th wave. The BOSS type already carries the
-   * three-phase state machine (new attack at 66%/33%, telegraphed beam
-   * volleys, radial bursts); here we scale it up for the wave and escort it
-   * with a few minions so the arena feels alive.
+   * Boss battle: Heavy Gunship (EnemyType.BOSS) + controlled ground escorts.
    */
   private spawnBossBattle(time: number) {
     const spot = this.getArcadeSpawnPoint(EnemyType.BOSS, 0, 1);
@@ -4892,97 +5075,84 @@ export class GameEngine {
       spot.x,
       spot.z,
       EnemyType.BOSS,
-      Math.max(10, spot.y),
+      spot.y,
       {
-        isElite: true,
-        modifier: EnemyModifier.SHIELDED,
-        pattern: AttackPattern.CIRCLE,
+        isElite: false,
+        modifier: EnemyModifier.NONE,
+        pattern: AttackPattern.CHASE,
       },
     );
-    // Boss gets a flat ×2.0 "boss bonus" only; scaleEnemyForDifficulty below
-    // is the SINGLE place wave power + difficulty are applied (no double-dip)
-    const bossScale = 2.0;
-    boss.maxHp = Math.max(50, Math.round(boss.maxHp * bossScale));
-    boss.hp = boss.maxHp;
-    boss.basePoints = Math.round(boss.basePoints * bossScale);
-    if (boss.shieldMaxHp > 0) {
-      boss.shieldMaxHp = Math.max(50, Math.round(boss.shieldMaxHp * bossScale));
-      boss.shieldHp = boss.shieldMaxHp;
-    }
     this.scaleEnemyForDifficulty(boss);
     this.enemies.push(boss);
 
-    // Escort squad so it isn't a lonely duel — queued so the escort models
-    // construct over the next frames instead of spiking in the boss's frame.
-    for (let i = 0; i < 3; i++) {
-      const escortType = i % 2 === 0 ? EnemyType.SHOOTER : EnemyType.DRONE;
-      const eSpot = this.getArcadeSpawnPoint(escortType, i, 3);
+    // Escort squad (1 Tank + 1 Infantry Squad)
+    const escortTypes = [EnemyType.TANK, EnemyType.BASIC];
+    for (let i = 0; i < escortTypes.length; i++) {
+      const escortType = escortTypes[i];
+      const eSpot = this.getArcadeSpawnPoint(escortType, i, 2);
       this.pendingEventSpawns.push({
         type: escortType,
-        x: eSpot.x + (Math.random() - 0.5) * 30,
+        x: eSpot.x + (Math.random() - 0.5) * 16,
         z: eSpot.z + i * 14,
-        y: Math.max(2.4, eSpot.y),
+        y: eSpot.y,
         modifier: EnemyModifier.NONE,
         pattern: AttackPattern.CHASE,
       });
     }
 
-    this.particles.spawnExplosion(spot.x, spot.y, spot.z, 70, time, 30);
+    this.particles.spawnExplosion(spot.x, spot.y, spot.z, 80, time, 35);
     this.audio.playEnemySpawn();
     this.addCameraImpulse(4.0);
     this.triggerHitStop(0.35, 0.05);
-    this.announce("⚠ BOSS BATTLE ⚠", "Three phases. No mercy.", "#ff3366");
+    this.announce("⚠ HEAVY GUNSHIP ONLINE ⚠", "Airspace contested", "#ff3366");
   }
 
   private getArcadeSpawnPoint(type: EnemyType, index: number, formationSize: number) {
     const player = this.helicopter.body.position;
-    const lanes =
-      this.combatIntensity < 0.25
-        ? [-78, -48, -22, 0, 22, 48, 78]
-        : [-145, -112, -82, -52, -24, 0, 24, 52, 82, 112, 145];
-    const laneIndex = Math.floor(Math.random() * lanes.length);
-    const formationOffset = (index - (formationSize - 1) / 2) * 21;
-    const baseX = lanes[laneIndex] + formationOffset + (Math.random() - 0.5) * 12;
-    // Horde surround: ~20% of spawns come from behind at wide side lanes so
-    // enemies stream in from every direction like a Vampire-Survivors swarm.
-    const flankFromBehind = Math.random() < 0.2 && type !== EnemyType.BOSS && index === 0;
-    const aheadDistance =
-      type === EnemyType.DRONE
-        ? SPAWN_CONFIG.minDistance + Math.random() * 100
-        : type === EnemyType.TANK
-          ? 92 + Math.random() * (SPAWN_CONFIG.maxDistance - 92)
-          : SPAWN_CONFIG.minDistance + Math.random() * 120;
-    // Keep behind-spawns within ~2 camera lengths (cam sits at +52) so they
-    // arrive visible at the screen edge instead of popping in off-screen.
-    const z = flankFromBehind
-      ? player.z + SPAWN_CONFIG.minDistance + Math.random() * 25
-      : player.z - aheadDistance - index * 10;
-    const height = this.city.getHeightAt(baseX, z, type === EnemyType.DRONE ? 0 : 3);
-    const rooftopFallback =
-      height > 2
-        ? { x: baseX, y: height + 4.5, z }
-        : this.city.getAmbushSpot(player, SPAWN_CONFIG.minDistance, Math.min(205, SPAWN_CONFIG.maxDistance));
+    
+    // Survival roguelite spawn ring: spawn outside camera view, distributed around player
+    const SPAWN_INNER_RADIUS = 120;
+    const SPAWN_OUTER_RADIUS = 200;
 
-    if (type === EnemyType.DRONE) {
-      return {
-        x: THREE.MathUtils.clamp(baseX, -170, 170),
-        y: THREE.MathUtils.clamp(player.y + 4 + Math.random() * 16, 18, 58),
-        z,
-      };
+    let angle = Math.random() * Math.PI * 2;
+    if (Math.random() < 0.45) {
+      // 45% bias towards front 120-degree sector
+      angle = -Math.PI / 2 + (Math.random() - 0.5) * (Math.PI * 0.7);
+    }
+    
+    const stagger = (index - (formationSize - 1) / 2) * 14;
+    const distance = SPAWN_INNER_RADIUS + Math.random() * (SPAWN_OUTER_RADIUS - SPAWN_INNER_RADIUS) + Math.abs(stagger);
+    
+    const targetX = player.x + Math.cos(angle) * distance;
+    const targetZ = player.z + Math.sin(angle) * distance;
+
+    let baseX = THREE.MathUtils.clamp(targetX, -170, 170);
+    let baseZ = targetZ;
+
+    if (type === EnemyType.DRONE || type === EnemyType.BOSS) {
+      const minSafeHeight = this.city.getHeightAt(baseX, baseZ, 2.0) + 6.0;
+      const desiredY = player.y + (type === EnemyType.BOSS ? 4.0 : (Math.random() - 0.5) * 6.0);
+      const y = Math.max(minSafeHeight, Math.max(15, desiredY));
+      return { x: baseX, y, z: baseZ };
     }
 
-    if (height > 2 || Math.random() < 0.22) {
-      return {
-        x: THREE.MathUtils.clamp(rooftopFallback.x + (Math.random() - 0.5) * 10, -175, 175),
-        y: Math.max(2.4, rooftopFallback.y),
-        z: rooftopFallback.z,
-      };
+    const clearance = type === EnemyType.TANK ? 2.5 : 1.0;
+    let height = this.city.getHeightAt(baseX, baseZ, clearance);
+
+    // If placed on top of a building or roof, redirect to the nearest street / open ground lot
+    if (height > 2.2) {
+      const ambush = this.city.getAmbushSpot(player, SPAWN_INNER_RADIUS, SPAWN_OUTER_RADIUS);
+      baseX = THREE.MathUtils.clamp(ambush.x + (Math.random() - 0.5) * 8, -170, 170);
+      baseZ = ambush.z + (Math.random() - 0.5) * 8;
+      height = this.city.getHeightAt(baseX, baseZ, clearance);
     }
+
+    const y = Math.max(clearance === 2.5 ? 1.2 : 0.6, height + (clearance === 2.5 ? 1.2 : 0.6));
 
     return {
-      x: THREE.MathUtils.clamp(baseX, -175, 175),
-      y: 2.4,
-      z,
+      x: baseX,
+      y,
+      z: baseZ,
     };
   }
 
@@ -4994,17 +5164,17 @@ export class GameEngine {
 
   /**
    * Drain the bounded event/escort spawn queue. Constructs at most one model
-   * per call, so convoy ambushes, air raids and boss escorts
-   * arrive as a staggered stream instead of a single-frame model spike.
+   * per call so ground convoys arrive as a staggered stream.
    */
   private drainEventSpawns(time: number) {
     let drained = 0;
     while (drained < SPAWN_CONFIG.maxPerTick && this.pendingEventSpawns.length > 0) {
       const d = this.pendingEventSpawns.shift()!;
-      const enemy = new Enemy(this.scene, this.world, d.x, d.z, d.type, d.y, {
+      const groundType = d.type === EnemyType.TANK ? EnemyType.TANK : EnemyType.BASIC;
+      const enemy = new Enemy(this.scene, this.world, d.x, d.z, groundType, d.y, {
         modifier: d.modifier ?? EnemyModifier.NONE,
         pattern: d.pattern ?? AttackPattern.CHASE,
-        variant: d.variant,
+        variant: groundType === EnemyType.TANK ? EnemyVariant.FLAK_TANK : EnemyVariant.STANDARD,
       });
       this.scaleEnemyForDifficulty(enemy);
       this.enemies.push(enemy);
@@ -5012,8 +5182,7 @@ export class GameEngine {
       this.playSpawnCue(time);
       if (this.isPlaying) this.enemiesSpawnedInWave++;
       drained++;
-      // Tanks/bosses are the heaviest models — one per tick keeps frames smooth.
-      if (d.type === EnemyType.TANK || d.type === EnemyType.BOSS) break;
+      if (groundType === EnemyType.TANK) break;
     }
   }
 
@@ -5031,8 +5200,7 @@ export class GameEngine {
       1.3,
     );
 
-    // Initial start — wave 1 waits for the countdown to finish (GO), never
-    // the tutorial or the protection window.
+    // Initial start — wave 1 waits for the countdown to finish (GO)
     if (this.currentWave === 0) {
       if (this.waveTransitionTimer <= 0 && this.openingPhase !== "countdown" && !this.tutorialActive) {
         this.startNextWave();
@@ -5047,13 +5215,12 @@ export class GameEngine {
       this.powerupSpawnTimer = 8.0 + Math.random() * 4.0;
     }
 
-    // Pause spawning during transitions (milestone announcements / battlefield events)
+    // Pause spawning during transitions
     if (this.waveTransitionTimer > 0) {
       return;
     }
 
-    // Vampire-Survivors style: waves advance on a clock, never on clearing the
-    // field. Enemies stream in forever — survival time is the real score.
+    // Wave advances on clock — survival time is the score
     this.waveTimer += delta;
     if (this.waveTimer >= waveDuration(this.currentWave)) {
       this.waveTimer = 0;
@@ -5061,52 +5228,138 @@ export class GameEngine {
       return;
     }
 
-    // Full boss battle every 10th wave; elite miniboss on the other 5th waves
+    // Elite heavy tank miniboss every 5th wave
     this.updateBossIntro(time);
-    if (this.currentWave % 10 === 0 && !this.minibossSpawnedThisWave) {
-      this.minibossSpawnedThisWave = true;
-      this.startBossBattle(time);
-    } else if (this.currentWave % 5 === 0 && !this.minibossSpawnedThisWave) {
+    if (this.currentWave % 5 === 0 && !this.minibossSpawnedThisWave) {
       this.minibossSpawnedThisWave = true;
       this.spawnMiniboss(time);
     }
 
-    // Continuous horde spawning — never stops, only ramps. Bursts are queued
-    // and drained ONE per cadence tick (frame budget = 1) so hordes stream in
-    // smoothly instead of popping in as a group. The interval is unchanged, so
-    // the per-second spawn rate — and the difficulty curve — is preserved.
+    // Micro-lulls: periodic breathing pauses in continuous reinforcement
+    this.microLullTimer -= delta;
+    if (this.microLullTimer <= 0) {
+      this.microLullActiveTimer = 3.0;
+      this.microLullTimer = 30.0 + Math.random() * 8.0;
+    }
+    if (this.microLullActiveTimer > 0) {
+      this.microLullActiveTimer -= delta;
+    }
+
+    // Continuous Ground Horde Spawning (Vampire-Survivors style)
     this.spawnTimer -= delta;
     const maxActiveEnemies = Math.min(
       72,
       Math.round((26 + Math.floor(this.currentWave * 3.2) + threatDirectorConfig(this.threatLevel).activeEnemyCapBonus) * this.difficulty.spawnRate),
     );
-    const hordeInterval = Math.max(
-      0.16,
-      (0.62 - this.currentWave * 0.045) * (2 - this.difficulty.spawnRate) * (1.15 - this.combatIntensity * 0.35) * threatDirectorConfig(this.threatLevel).spawnIntervalMult,
-    );
-    if (this.spawnTimer <= 0) {
+    const radarHordeBoost = this.radarActive ? 0.78 : 1.0;
+    const baseHordeInterval = (0.62 - this.currentWave * 0.045) * (2 - this.difficulty.spawnRate) * (1.15 - this.combatIntensity * 0.35) * threatDirectorConfig(this.threatLevel).spawnIntervalMult;
+    const hordeInterval = Math.max(0.14, baseHordeInterval * radarHordeBoost);
+
+    if (this.microLullActiveTimer > 0) {
+      // During micro-lull, let the player breathe and scoop drops / maneuver
+      this.spawnTimer = Math.max(this.spawnTimer, 0.45);
+    } else if (this.spawnTimer <= 0) {
       if (this.pendingEventSpawns.length > 0) {
-        // Event/escort spawns take priority and drain on a short stagger.
         this.drainEventSpawns(time);
         this.spawnTimer = 0.18;
       } else if (this.pendingSpawns > 0) {
-        // One enemy per tick from the queued burst.
         this.spawnEnemy();
         this.pendingSpawns--;
         this.spawnTimer = hordeInterval;
-      } else if (this.enemies.length < maxActiveEnemies && this.waveThreatBudgetRemaining >= 1) {
-        // Queue a fresh burst (same sizes as before — the queue distributes
-        // them across time instead of constructing them all this frame).
-        this.pendingSpawns = Math.min(
-          maxActiveEnemies - this.enemies.length,
-          1 + Math.floor(Math.random() * (1 + Math.min(2, Math.floor(this.currentWave / 4)))),
-          SPAWN_CONFIG.maxQueue,
-        );
-        if (this.pendingSpawns <= 0) this.pendingSpawns = 1;
-        this.spawnTimer = hordeInterval;
       } else {
-        // At the active cap — wait and re-check.
-        this.spawnTimer = 0.25;
+        // Evaluate active Ground Threat and Air Threat separately (Step 12 & 13)
+        let currentGroundThreat = 0;
+        let currentAirThreat = 0;
+        let isBossActive = false;
+
+        for (const e of this.enemies) {
+          if (e.active) {
+            if (e.type === EnemyType.BOSS) {
+              isBossActive = true;
+            } else if (e.type === EnemyType.DRONE) {
+              currentAirThreat += AIR_THREAT_COSTS.COMBAT_DRONE;
+            } else if (e.type === EnemyType.TANK) {
+              currentGroundThreat += GROUND_THREAT_COSTS.TANK;
+            } else if (e.type === EnemyType.BASIC) {
+              currentGroundThreat += GROUND_THREAT_COSTS.INFANTRY;
+            }
+          }
+        }
+        for (const o of this.objectives) {
+          if (o.active && o.type === ObjectiveType.SAM_SITE) {
+            currentGroundThreat += GROUND_THREAT_COSTS.SAM;
+          }
+        }
+
+        // Air/Ground progression ratios (Step 14):
+        // Wave 1-5: Air 0%, Ground 100%
+        // Wave 6: Air ~15-20% (1.5), Ground ~80-85% (7.5)
+        // Wave 7-8: Air ~20-25% (3.0), Ground ~75-80% (9.0 - 9.5)
+        // Wave 9: Air ~25-30% (4.5), Ground ~70-75% (11.0)
+        // Wave 10+: Boss battle
+        let baseDesiredGroundThreat = 3.5;
+        let baseDesiredAirThreat = 0;
+
+        if (this.currentWave === 1) {
+          baseDesiredGroundThreat = 3.5;
+          baseDesiredAirThreat = 0;
+        } else if (this.currentWave === 2) {
+          baseDesiredGroundThreat = 5.0;
+          baseDesiredAirThreat = 0;
+        } else if (this.currentWave === 3) {
+          baseDesiredGroundThreat = 7.0;
+          baseDesiredAirThreat = 0;
+        } else if (this.currentWave === 4) {
+          baseDesiredGroundThreat = 8.5;
+          baseDesiredAirThreat = 0;
+        } else if (this.currentWave === 5) {
+          baseDesiredGroundThreat = 10.0;
+          baseDesiredAirThreat = 0;
+        } else if (this.currentWave === 6) {
+          baseDesiredGroundThreat = 7.5;
+          baseDesiredAirThreat = 1.5;
+        } else if (this.currentWave === 7) {
+          baseDesiredGroundThreat = 9.0;
+          baseDesiredAirThreat = 3.0;
+        } else if (this.currentWave === 8) {
+          baseDesiredGroundThreat = 9.5;
+          baseDesiredAirThreat = 3.0;
+        } else if (this.currentWave === 9) {
+          baseDesiredGroundThreat = 11.0;
+          baseDesiredAirThreat = 4.5;
+        } else {
+          baseDesiredGroundThreat = 8.0 + this.currentWave * 0.5;
+          baseDesiredAirThreat = 4.5;
+        }
+
+        // Boss presence reduces normal director pressure to ~40% (Step 24)
+        if (isBossActive) {
+          baseDesiredGroundThreat *= 0.4;
+          baseDesiredAirThreat *= 0.4;
+        }
+
+        this.desiredGroundThreat = baseDesiredGroundThreat * this.difficulty.spawnRate;
+        this.desiredAirThreat = baseDesiredAirThreat * this.difficulty.spawnRate;
+        const desiredGroundThreat = this.desiredGroundThreat;
+        const desiredAirThreat = this.desiredAirThreat;
+
+        const groundDeficit = desiredGroundThreat - currentGroundThreat;
+        const airDeficit = desiredAirThreat - currentAirThreat;
+        const totalDeficit = Math.max(0, groundDeficit) + Math.max(0, airDeficit);
+
+        if (totalDeficit > 0.5 && this.enemies.length < maxActiveEnemies) {
+          if (airDeficit >= 1.5 && this.currentWave >= 6 && Math.random() < 0.5) {
+            this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
+          }
+          this.pendingSpawns = Math.min(
+            maxActiveEnemies - this.enemies.length,
+            Math.max(1, Math.ceil(totalDeficit / 1.5)),
+            SPAWN_CONFIG.maxQueue,
+          );
+          this.spawnTimer = hordeInterval;
+        } else {
+          this.spawnTimer = 0.35;
+        }
       }
     }
 
@@ -5239,89 +5492,178 @@ export class GameEngine {
       return;
     }
 
-    const DEADZONE = 0.15;
-    const lx = gp.axes[0];
-    const ly = gp.axes[1];
-    const rx = gp.axes[2];
-    const ry = gp.axes[3];
+    const DEADZONE = MOVEMENT_CONFIG.analogDeadzone;
+    // Left stick: horizontal (axes[0]) & vertical (axes[1])
+    const lx = gp.axes[0] ?? 0;
+    const ly = gp.axes[1] ?? 0;
+    // Standard gamepad has ly negative for UP, positive for DOWN.
+    // In our screen coordinate space: +Y is UP, -Y is DOWN.
+    const rawY = this.settings.invertedY ? ly : -ly;
+    const rawX = lx;
+    const lMag = Math.hypot(rawX, rawY);
 
-    // Move target with Right Stick (or Left Stick if Right is idle)
-    let aimX = Math.abs(rx) > DEADZONE ? rx : Math.abs(lx) > DEADZONE ? lx : 0;
-    let aimY = Math.abs(ry) > DEADZONE ? ry : Math.abs(ly) > DEADZONE ? ly : 0;
-
-    const hasGamepadInput =
-      Math.abs(aimX) > DEADZONE ||
-      Math.abs(aimY) > DEADZONE ||
-      gp.buttons.some((b) => b.pressed);
-
-    if (Math.abs(aimX) > DEADZONE || Math.abs(aimY) > DEADZONE) {
+    if (lMag > DEADZONE) {
       this.hasInputThisFrame = true;
-      // Circular deadzone/curve for smoother input
-      const mag = Math.sqrt(aimX * aimX + aimY * aimY);
-      const normX = aimX / mag;
-      const normY = aimY / mag;
-      const curvedMag = Math.pow((mag - DEADZONE) / (1 - DEADZONE), 1.2);
+      const normX = rawX / lMag;
+      const normY = rawY / lMag;
+      const clampedMag = Math.min(1, (lMag - DEADZONE) / (1 - DEADZONE));
+      const curvedMag = Math.pow(clampedMag, 1.05);
 
-      const sens = this.settings.gamepadSensitivity;
-      this.gamepadMove.x = normX * curvedMag * sens;
-      this.gamepadMove.z = (this.settings.invertedY ? -normY : normY) * curvedMag * sens;
+      this.gamepadMove.x = normX * curvedMag;
+      this.gamepadMove.z = normY * curvedMag; // Stores screen Y in gamepadMove.z
 
-      // Resume audio on stick move
       this.audio.resume();
-
-      // Disable mouse logic if gamepad is active
-      this.isMouseActive = false;
     } else {
       this.gamepadMove.x = 0;
       this.gamepadMove.z = 0;
-      if (hasGamepadInput) {
-        // Even if just buttons, maybe keep mouse logic off to avoid snapping?
-        this.isMouseActive = false;
-      }
     }
 
-    // Buttons (A or R2 to fire)
+    // Right stick: weapon aiming & auto-fire (independent from body movement)
+    const rx = gp.axes[2] ?? 0;
+    const ry = gp.axes[3] ?? 0;
+    const rMag = Math.hypot(rx, ry);
+    if (rMag > DEADZONE) {
+      this.audio.resume();
+      this.isMouseActive = false;
+      this.mouseAimValid = false;
+
+      const aimDist = 65;
+      const aimHeight = this.helicopter.body.position.y;
+
+      const camFwd = GameEngine._scratchCamFwd;
+      this.camera.getWorldDirection(camFwd);
+      camFwd.y = 0;
+      if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+      else camFwd.normalize();
+
+      const camRight = GameEngine._scratchCamRight;
+      camRight.crossVectors(camFwd, this.worldUp).normalize();
+
+      const rNormX = rx / rMag;
+      const rScreenY = this.settings.invertedY ? ry / rMag : -ry / rMag;
+
+      const aimWorldX = camRight.x * rNormX + camFwd.x * rScreenY;
+      const aimWorldZ = camRight.z * rNormX + camFwd.z * rScreenY;
+
+      this.aimPoint.set(
+        this.helicopter.body.position.x + aimWorldX * aimDist,
+        aimHeight,
+        this.helicopter.body.position.z + aimWorldZ * aimDist,
+      );
+      this.helicopter.setGunAim(this.aimPoint.x, aimHeight, this.aimPoint.z, true);
+      this.targetGroup.visible = false;
+    }
+
+    // Gamepad buttons
     this.isFiringGamepad =
-      gp.buttons[0].pressed ||
-      gp.buttons[7].pressed ||
-      (gp.buttons[6] && gp.buttons[6].value > 0.1);
+      gp.buttons[0]?.pressed ||
+      gp.buttons[7]?.pressed ||
+      (gp.buttons[7] && gp.buttons[7].value > 0.1) ||
+      gp.buttons[5]?.pressed ||
+      rMag > DEADZONE;
     if (this.isFiringGamepad) {
       this.audio.resume();
+    }
+
+    // B button (1) = Dash
+    if (gp.buttons[1]?.pressed && this.dashState === "READY") {
+      this.triggerDash();
+    }
+
+    // X button (2) = Reload
+    if (gp.buttons[2]?.pressed) {
+      this.startReload();
+    }
+
+    // LB (4) = Countermeasure
+    if (gp.buttons[4]?.pressed) {
+      this.deployCountermeasure(performance.now() / 1000);
     }
   }
 
   updateKeyboardMovement(delta: number) {
-    let moveX = 0;
-    let moveZ = 0;
+    // 1. Digital keyboard screen input (-1..1)
+    let kbX = 0;
+    let kbY = 0;
 
     if (this.movementKeys.has("a") || this.movementKeys.has("arrowleft"))
-      moveX -= 1;
+      kbX -= 1;
     if (this.movementKeys.has("d") || this.movementKeys.has("arrowright"))
-      moveX += 1;
+      kbX += 1;
     if (this.movementKeys.has("w") || this.movementKeys.has("arrowup"))
-      moveZ -= 1;
+      kbY += 1; // Up on screen
     if (this.movementKeys.has("s") || this.movementKeys.has("arrowdown"))
-      moveZ += 1;
+      kbY -= 1; // Down on screen
 
+    const kbMag = Math.hypot(kbX, kbY);
+    if (kbMag > 1) {
+      kbX /= kbMag;
+      kbY /= kbMag;
+    }
+
+    // 2. Touch left stick (virtual joystick)
+    let touchX = 0;
+    let touchY = 0;
     if (this.leftStick.active) {
-      // Touch left stick: apply the same circular deadzone + response curve the
-      // gamepad uses, so the virtual stick has a consistent, predictable feel
-      // instead of raw linear travel (small inputs are too twitchy to control).
-      let lx = THREE.MathUtils.clamp(this.leftStick.x, -1, 1);
-      let ly = THREE.MathUtils.clamp(this.leftStick.y, -1, 1);
-      const lMag = Math.sqrt(lx * lx + ly * ly);
+      const lx = THREE.MathUtils.clamp(this.leftStick.x, -1, 1);
+      const ly = THREE.MathUtils.clamp(this.leftStick.y, -1, 1);
+      // Virtual joystick: ly > 0 is down, ly < 0 is up
+      const rawY = -ly; // Screen Up is positive
+      const rawX = lx;
+      const lMag = Math.hypot(rawX, rawY);
+      const TOUCH_DEADZONE = 0.12;
       if (lMag > TOUCH_DEADZONE) {
-        const curved = Math.pow((lMag - TOUCH_DEADZONE) / (1 - TOUCH_DEADZONE), 1.15);
-        moveX += (lx / lMag) * curved;
-        moveZ += (ly / lMag) * curved;
+        const clamped = Math.min(1, (lMag - TOUCH_DEADZONE) / (1 - TOUCH_DEADZONE));
+        const curved = Math.pow(clamped, 1.1);
+        touchX = (rawX / lMag) * curved;
+        touchY = (rawY / lMag) * curved;
       }
     }
-    // Phase 2: route gamepad stick input into the same normalization pipeline.
-    if (this.gamepadMove.x !== 0 || this.gamepadMove.z !== 0) {
-      moveX += this.gamepadMove.x;
-      moveZ += this.gamepadMove.z;
+
+    // 3. Select active horizontal screen input
+    let screenX = kbX;
+    let screenY = kbY;
+
+    if (this.leftStick.active) {
+      screenX = touchX;
+      screenY = touchY;
+    } else if (this.gamepadMove.x !== 0 || this.gamepadMove.z !== 0) {
+      screenX = this.gamepadMove.x;
+      screenY = this.gamepadMove.z; // gamepadMove.z holds screen Y
     }
 
+    const screenMag = Math.hypot(screenX, screenY);
+    const clampedMag = Math.min(1, screenMag);
+    if (clampedMag > 0.005) {
+      this.hasInputThisFrame = true;
+    }
+
+    // 4. Project Screen (X, Y) onto Camera-Relative Horizontal Plane (world X, Z)
+    const camFwd = GameEngine._scratchCamFwd;
+    this.camera.getWorldDirection(camFwd);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() < 0.0001) {
+      camFwd.set(0, 0, -1);
+    } else {
+      camFwd.normalize();
+    }
+
+    const camRight = GameEngine._scratchCamRight;
+    camRight.crossVectors(camFwd, this.worldUp).normalize();
+
+    let normScreenX = 0;
+    let normScreenY = 0;
+    if (screenMag > 0.0001) {
+      normScreenX = screenX / screenMag;
+      normScreenY = screenY / screenMag;
+    }
+
+    const worldMoveX = (camRight.x * normScreenX + camFwd.x * normScreenY) * clampedMag;
+    const worldMoveZ = (camRight.z * normScreenX + camFwd.z * normScreenY) * clampedMag;
+
+    this.keyboardVelocity.set(worldMoveX, worldMoveZ);
+
+    // 5. Vertical input (Space / Alt / Gamepad D-pad)
     let moveY = 0;
     if (
       this.movementKeys.has(" ") ||
@@ -5335,46 +5677,24 @@ export class GameEngine {
     )
       moveY -= 1;
 
-    // Normalize desired keyboard input vector
-    const mag = Math.sqrt(moveX * moveX + moveZ * moveZ);
-    let normX = 0;
-    let normZ = 0;
-    if (mag > 0) {
-      normX = moveX / mag;
-      normZ = moveZ / mag;
+    if (this.gamepadIndex !== null) {
+      const gp = navigator.getGamepads()[this.gamepadIndex];
+      if (gp) {
+        if (gp.buttons[12]?.pressed) moveY += 1;
+        if (gp.buttons[13]?.pressed) moveY -= 1;
+      }
     }
 
-    // Arcade: digital input is immediate. Simulation: the command vector eases
-    // in for weighty inertia. The single physical response layer lives in
-    // Helicopter.update, so neither preset adds an input-lag stack.
-    const targetMag = Math.min(1, mag);
-    const cmdX = normX * targetMag;
-    const cmdZ = normZ * targetMag;
-    if (this.settings.movement === 'simulation') {
-      const k = 1 - Math.exp(-6.5 * delta);
-      this.keyboardVelocity.x += (cmdX - this.keyboardVelocity.x) * k;
-      this.keyboardVelocity.y += (cmdZ - this.keyboardVelocity.y) * k;
-    } else {
-      this.keyboardVelocity.set(cmdX, cmdZ);
-    }
-
-    const inputLength = this.keyboardVelocity.length();
-    if (inputLength > 0.005) {
-      this.hasInputThisFrame = true;
-      // keyboardVelocity is a normalized command, not a smoothed velocity.
-    }
+    this.verticalInput = THREE.MathUtils.clamp(moveY, -1, 1);
 
     // Afterburner: hold Shift to burn fuel for speed + damage
     this.afterburnerActive =
       this.movementKeys.has("shift") &&
       this.currentFuel > 1 &&
-      this.isPlaying;
+      this.isPlaying &&
+      this.health > 0;
 
-    // Phase 2: vertical is fully separate from horizontal — Space = climb,
-    // Alt = descend, each with velocity-based accel/brake in the helicopter.
-    // The engine conveys vertical input directly; vertical physics supplies weight.
     if (moveY !== 0) this.hasInputThisFrame = true;
-    this.verticalInput = moveY;
   }
 
 
@@ -5382,11 +5702,11 @@ export class GameEngine {
   tick = () => {
     if (this.disposed || !this.running) return;
     this.animationFrameId = requestAnimationFrame(this.tick);
+
+    try {
     this.frameCount++;
     // 2m: reset per-frame particle budget.
     this.particleBudgetThisFrame = GameEngine.PARTICLE_BUDGET_PER_FRAME;
-    // 3d: rebuild spatial grid for fast enemy queries this frame.
-    this.rebuildSpatialGrid();
 
     const time = performance.now() / 1000;
     // Phase 1: clamp frame spikes so a 0.2–2s hitch (tab switch, GC, driver
@@ -5667,8 +5987,14 @@ export class GameEngine {
       }
     }
 
-    // --- Clean Up Dead Enemies in Salvo Locks ---
-    this.salvoLocks = this.salvoLocks.filter((enemy) => enemy.active);
+    // --- Clean Up Dead Enemies in Salvo Locks (zero-allocation in-place) ---
+    let activeLockCount = 0;
+    for (let r = 0; r < this.salvoLocks.length; r++) {
+      if (this.salvoLocks[r].active) {
+        this.salvoLocks[activeLockCount++] = this.salvoLocks[r];
+      }
+    }
+    this.salvoLocks.length = activeLockCount;
 
     // --- Update Salvo Lock Indicator Visual Positions & Rotations ---
     for (const [enemy, group] of this.salvoLockIndicators.entries()) {
@@ -6099,6 +6425,7 @@ export class GameEngine {
       this.shotsHit++;
       const objDmg = proj.damage * (proj.blastRadius > 0 ? 1.1 : 1.0);
       const destroyed = obj.takeDamage(objDmg);
+      this.floatingCombatText.spawnDamage(obj.id, proj.pos, objDmg, 'NORMAL', time);
       this.hitMarkerTimer = 0.12;
       this.hitMarkerPosition.set(obj.targetPoint.x, obj.targetPoint.y, obj.targetPoint.z);
       this.particles.spawnSparks(proj.pos.x, proj.pos.y, proj.pos.z, time);
@@ -6113,6 +6440,7 @@ export class GameEngine {
     this.playerProjectiles.checkTurretHits(this.city.turrets, (proj, turret) => {
       this.shotsHit++;
       const destroyed = turret.takeDamage(proj.damage);
+      this.floatingCombatText.spawnDamage(null, proj.pos, proj.damage, 'NORMAL', time);
       this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 14, time, 9);
       if (destroyed) {
         this.score += Math.floor(turret.basePoints * this.comboMultiplier);
@@ -6136,14 +6464,33 @@ export class GameEngine {
       let totalDmg = proj.damage * this.comboMultiplier;
       if (proj.piercing && (enemy.type === EnemyType.TANK || enemy.type === EnemyType.BOSS)) totalDmg *= 1.35;
       if (proj.shaped && (enemy.type === EnemyType.BOSS || enemy.isElite)) totalDmg *= 1.45;
+      const isShielded = enemy.shieldHp > 0;
       const result = enemy.takeDamage(totalDmg, time);
       const died = result === "destroyed";
       // B1/C6: status procs from mods + run upgrades + proc perks
       this.tryApplyStatusProc(proj, enemy, time);
 
-      this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 15, time, 10);
-      this.volumetricExplosions.spawn(proj.pos.x, proj.pos.y, proj.pos.z, 6, proj.blastRadius > 0 ? 3.5 : 1.5);
-      this.audio.playExplosion(0.2);
+      let dmgType: CombatTextType = 'NORMAL';
+      if (isShielded || result === 'shield-broken') {
+        dmgType = 'SHIELD';
+      } else if (totalDmg >= 75 || proj.blastRadius > 0) {
+        dmgType = 'HEAVY';
+      } else if (proj.piercing || proj.shaped || this.comboMultiplier >= 3) {
+        dmgType = 'CRITICAL';
+      }
+      this.floatingCombatText.spawnDamage(enemy.id, proj.pos, totalDmg, dmgType, time);
+      this.hitMarkerTimer = 0.10;
+      this.hitMarkerPosition.set(proj.pos.x, proj.pos.y, proj.pos.z);
+
+      if (proj.blastRadius > 0) {
+        this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 16, time, 10);
+        this.volumetricExplosions.spawn(proj.pos.x, proj.pos.y, proj.pos.z, 6, 3.5);
+        this.audio.playExplosion(0.3);
+      } else {
+        // Bullet hit on enemy: sparks + lightweight audio feedback
+        this.particles.spawnSparks(proj.pos.x, proj.pos.y, proj.pos.z, time);
+        this.audio.playHit();
+      }
 
       if (result === "shield-broken") {
         this.particles.spawnExplosion(
@@ -6168,6 +6515,7 @@ export class GameEngine {
             // B1: guaranteed-proc mods (EMP warheads) disable everything in the blast
             if (proj.procKind && proj.procChance >= 1) nearby.applyStatus(proj.procKind, time);
             const r = nearby.takeDamage(totalDmg * 0.55, time);
+            this.floatingCombatText.spawnDamage(nearby.id, nearby.body.position, totalDmg * 0.55, 'HEAVY', time);
             if (r === "destroyed") {
               this.onEnemyDestroyed(nearby, time);
             }
@@ -6284,11 +6632,13 @@ export class GameEngine {
       if (pu.checkCollection(playerPos)) {
         if (pu.type === PowerUpType.XP_GEM) {
           this.grantRunXp(pu.value, time);
+          this.floatingCombatText.spawnReward(playerPos, `+${pu.value} XP`, 'XP', undefined, pu.value, time);
         } else if (pu.type === PowerUpType.SALVAGE) {
           this.addSalvage(pu.value);
-          this.announce("SALVAGE COLLECTED", `+${pu.value} scrap`, "#ffa632");
+          this.floatingCombatText.spawnReward(playerPos, `+${pu.value} SALVAGE`, 'SALVAGE', undefined, pu.value, time);
         } else if (pu.type === PowerUpType.COUNTERMEASURE) {
           this.countermeasures.replenish(1);
+          this.floatingCombatText.spawnReward(playerPos, "+1 FLARE", "CREDITS", "#ffe66d", 1, time);
         } else {
           this.applyPowerUp(pu.type, time);
         }
@@ -6325,6 +6675,7 @@ export class GameEngine {
     this.volumetricExplosions.update(delta);
     this.debris?.update(time);
     this.shockwaves?.update(time);
+    this.floatingCombatText.update(delta);
     this.updateNightOps(time, delta);
     this.updateThemeGrading(delta);
 
@@ -6335,7 +6686,20 @@ export class GameEngine {
     this.updateCamera(delta);
 
     this.syncBlobShadows();
+    this.tickErrorCount = 0; // reset on successful frame
     this.renderFrame();
+
+    } catch (err) {
+      // Error boundary: log the exception but keep the rAF loop alive so the
+      // game doesn't permanently freeze from a transient runtime error.
+      // Track consecutive errors to prevent infinite error-spam loops.
+      this.tickErrorCount = (this.tickErrorCount ?? 0) + 1;
+      console.error('[HeliStrike] Tick error:', err);
+      if (this.tickErrorCount > 60) {
+        console.error('[HeliStrike] Too many consecutive tick errors — stopping render loop');
+        this.running = false;
+      }
+    }
   };
 
   /** Bounded camera-shake impulse — the settings-gated jitter is applied
@@ -6518,23 +6882,14 @@ export class GameEngine {
     const pullback = Math.min(speed * 0.12, 9);
     const camTargetX = heli.x + THREE.MathUtils.clamp(velocity.x * 0.22, -9, 9);
     const camTargetZ =
-      heli.z + 44 + pullback + this.combatIntensity * 8 + THREE.MathUtils.clamp(velocity.z * 0.18, -9, 9);
+      heli.z + 36 + pullback + this.combatIntensity * 6 + THREE.MathUtils.clamp(velocity.z * 0.16, -8, 8);
     const camLerp = 1 - Math.exp(-(this.isPlaying ? 10 : 3.5) * delta);
     this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camLerp;
     this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camLerp;
 
-    const blockedTop = this.city.getCameraBlockedHeight(
-      this.baseCamPos.x,
-      this.baseCamPos.y,
-      this.baseCamPos.z,
-      heli.x,
-      heli.y,
-      heli.z,
-    );
-    const baseCamY = heli.y + 36 + Math.min(speed * 0.10, 9) + this.combatIntensity * 5;
-    const camTargetY = blockedTop > 0 ? Math.max(baseCamY, blockedTop + 6) : baseCamY;
-    const camYLerp = 1 - Math.exp(-(blockedTop > 0 ? 8 : 6) * delta);
-    this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camYLerp;
+    const baseCamY = heli.y + 28 + Math.min(speed * 0.08, 6) + this.combatIntensity * 4;
+    const camYLerp = 1 - Math.exp(-6 * delta);
+    this.baseCamPos.y += (baseCamY - this.baseCamPos.y) * camYLerp;
 
     const targetFov = 52 + Math.min(speed * 0.07, 6) + this.combatIntensity * 4;
     this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4 * delta));

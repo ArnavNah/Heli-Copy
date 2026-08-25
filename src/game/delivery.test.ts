@@ -89,7 +89,11 @@ describe("delivery contract generation", () => {
   });
 
   it("rejects identical endpoints", () => {
-    const depot = depotHubForChunk(-3)!;
+    let depot = depotHubForChunk(0);
+    for (let c = -10; c <= 10 && !depot; c++) {
+      depot = depotHubForChunk(c);
+    }
+    expect(depot).not.toBeNull();
     expect(createDeliveryContract(depot, depot, 1, 0)).toBeNull();
   });
 
