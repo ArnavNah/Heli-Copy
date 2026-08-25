@@ -107,8 +107,12 @@ export class CountermeasureState {
     this.activeTimer = Math.max(0, this.activeTimer - dt);
   }
 
+  canDeploy(): boolean {
+    return this.charges > 0 && this.cooldownRemaining <= 0;
+  }
+
   deploy(time: number): boolean {
-    if (this.charges <= 0 || this.cooldownRemaining > 0) return false;
+    if (!this.canDeploy()) return false;
     this.charges--;
     this.cooldownRemaining = this.cooldown;
     this.activeTimer = this.config.activeWindow;

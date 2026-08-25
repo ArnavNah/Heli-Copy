@@ -283,6 +283,72 @@ export enum AttackPattern {
   ARTILLERY = 3, // Sit at range and lob arcing shells
 }
 
+/** Explicit 3-layer Combat AI states for aerial Combat Drones. */
+export enum DroneCombatState {
+  SPAWN_ENTRY = "SPAWN_ENTRY",
+  APPROACH = "APPROACH",
+  ATTACK_SETUP = "ATTACK_SETUP",
+  ATTACK_RUN = "ATTACK_RUN",
+  BREAK_AWAY = "BREAK_AWAY",
+  REPOSITION = "REPOSITION",
+  DEATH_SPIRAL = "DEATH_SPIRAL",
+}
+
+/** Tactical lane and line-of-sight firing states for Tanks. */
+export enum TankCombatState {
+  MOVE_TO_LANE = "MOVE_TO_LANE",
+  AIM = "AIM",
+  FIRE = "FIRE",
+  REPOSITION = "REPOSITION",
+}
+
+/** Directional approach sectors around player for coordinated pressure. */
+export enum AttackSector {
+  FRONT_LEFT = "FRONT_LEFT",
+  FRONT_RIGHT = "FRONT_RIGHT",
+  LEFT = "LEFT",
+  RIGHT = "RIGHT",
+  REAR_LEFT = "REAR_LEFT",
+  REAR_RIGHT = "REAR_RIGHT",
+}
+
+/** Directional pressure mode representing approach complexity. */
+export enum DirectionalPressureMode {
+  SINGLE_SECTOR = "SINGLE_SECTOR",
+  DOMINANT_AND_FLANK = "DOMINANT_AND_FLANK",
+  DUAL_SECTORS = "DUAL_SECTORS",
+  PINCER_SURROUND = "PINCER_SURROUND",
+}
+
+export type CombatDirectorSnapshot = {
+  wave: number;
+  combatIntensity: number;
+  activeEnemies: number;
+  targetEnemies: number;
+  groundThreat: number;
+  targetGroundThreat: number;
+  airThreat: number;
+  targetAirThreat: number;
+  activeAirEnemies: number;
+  activeAirAttackers: number;
+  maxAirAttackSlots: number;
+  activeGroundAttackers: number;
+  maxGroundAttackSlots: number;
+  activeHeavyAttacks: number;
+  maxHeavyAttacks: number;
+  spawnInterval: number;
+  attackRotationDelay: number;
+  isMicroLull: boolean;
+  microLullRemaining: number;
+  currentDirectionalBias: string;
+  directionalMode: string;
+  hpScale: number;
+  damageScale: number;
+  speedScale: number;
+  attackingIds: number[];
+  preparingIds: number[];
+};
+
 export enum ObjectiveType {
   SAM_SITE = 0, // Enemy accuracy buff while alive; destroys to debuff
   RADAR_TOWER = 1, // Reveals/damages all enemies on destroy

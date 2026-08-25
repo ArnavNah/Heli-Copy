@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EnemyType, EnemyVariant } from "./types";
+import { EnemyType, EnemyVariant, WeaponType } from "./types";
 import {
   accuracyFor,
   affixChancesForWave,
@@ -7,6 +7,7 @@ import {
   bossVolleyConfig,
   buildingArchetype,
   buildingMassing,
+  calculateDamageAffinity,
   canOfferExtraction,
   clamp,
   coinsForScore,
@@ -64,6 +65,7 @@ import {
   writeWeaponMod,
   xpForEnemyType,
   enemyAimAccuracy,
+  enemySpeedScale,
   waveEnemyCount,
   waveEnemyDamage,
   waveEnemyFireRate,
@@ -96,48 +98,58 @@ describe("occlusionStrength", () => {
   });
 });
 
-describe("waveEnemyCount", () => {
-  it("scales with wave", () => {
-    expect(waveEnemyCount(1)).toBe(14);
-    expect(waveEnemyCount(5)).toBe(40);
-    expect(waveEnemyCount(10)).toBe(73);
+describe("waveEnemyCount and enemyPopulationTarget", () => {
+  it("scales with wave without flooding early game", () => {
+    expect(waveEnemyCount(1)).toBe(5);
+    expect(waveEnemyCount(5)).toBe(14);
+    expect(waveEnemyCount(9)).toBe(24);
   });
 });
 
-describe("procedural wave scaling", () => {
-  it("waveEnemyPower grows steadily and caps at 4.5x", () => {
+describe("procedural wave scaling (non-sponge design)", () => {
+  it("waveEnemyPower / enemyHPScale grows conservatively and caps at 2.35x", () => {
     expect(waveEnemyPower(1)).toBe(1);
-    expect(waveEnemyPower(2)).toBeCloseTo(1.12);
-    expect(waveEnemyPower(10)).toBeCloseTo(2.08);
-    expect(waveEnemyPower(20)).toBeCloseTo(3.28);
-    expect(waveEnemyPower(100)).toBe(4.5);
+    expect(waveEnemyPower(5)).toBeCloseTo(1.20);
+    expect(waveEnemyPower(9)).toBeCloseTo(1.40);
+    expect(waveEnemyPower(15)).toBeCloseTo(1.75);
+    expect(waveEnemyPower(100)).toBeLessThanOrEqual(2.35);
   });
 
-  it("waveEnemyDamage grows slower than HP and caps at 3.2x", () => {
+  it("waveEnemyDamage / enemyDamageScale grows slower than HP and caps at 1.70x", () => {
     expect(waveEnemyDamage(1)).toBe(1);
-    expect(waveEnemyDamage(10)).toBeCloseTo(1.63);
-    expect(waveEnemyDamage(20)).toBeCloseTo(2.33);
-    expect(waveEnemyDamage(100)).toBe(3.2);
+    expect(waveEnemyDamage(5)).toBeCloseTo(1.12);
+    expect(waveEnemyDamage(9)).toBeCloseTo(1.24);
+    expect(waveEnemyDamage(15)).toBeCloseTo(1.45);
+    expect(waveEnemyDamage(100)).toBeLessThanOrEqual(1.70);
   });
 
-  it("waveEnemyFireRate gets faster (mult < 1) and floors at 0.45", () => {
+  it("enemySpeedScale scales conservatively and caps at 1.18x", () => {
+    expect(enemySpeedScale(1)).toBe(1.0);
+    expect(enemySpeedScale(5)).toBeCloseTo(1.04);
+    expect(enemySpeedScale(9)).toBeCloseTo(1.12);
+    expect(enemySpeedScale(50)).toBe(1.18);
+  });
+
+  it("waveEnemyFireRate maintains readable attack loops", () => {
     expect(waveEnemyFireRate(1)).toBe(1);
-    expect(waveEnemyFireRate(10)).toBeCloseTo(0.64);
-    expect(waveEnemyFireRate(20)).toBeCloseTo(0.45);
-    expect(waveEnemyFireRate(100)).toBe(0.45);
+    expect(waveEnemyFireRate(5)).toBeCloseTo(0.90);
+    expect(waveEnemyFireRate(10)).toBeCloseTo(0.775);
+    expect(waveEnemyFireRate(100)).toBe(0.68);
   });
 
   it("enemyAimAccuracy tightens shot cones as waves rise, capped below 1", () => {
-    expect(enemyAimAccuracy(1)).toBeCloseTo(0.6);
-    expect(enemyAimAccuracy(5)).toBeCloseTo(0.72);
-    expect(enemyAimAccuracy(13)).toBeCloseTo(0.96);
-    expect(enemyAimAccuracy(30)).toBe(0.96); // capped
-    expect(enemyAimAccuracy(0)).toBe(0.6); // clamped to wave 1
-    expect(enemyAimAccuracy(NaN)).toBe(0.6); // non-finite guard
+    expect(enemyAimAccuracy(1)).toBeCloseTo(0.45);
+    expect(enemyAimAccuracy(5)).toBeCloseTo(0.63);
+    expect(enemyAimAccuracy(9)).toBeCloseTo(0.764);
+    expect(enemyAimAccuracy(30)).toBe(0.80); // capped for normal waves
+    expect(enemyAimAccuracy(10, true)).toBe(0.82); // Boss accuracy
+    expect(enemyAimAccuracy(0)).toBe(0.45); // clamped to wave 1
+    expect(enemyAimAccuracy(NaN)).toBe(0.45); // non-finite guard
   });
 
-  it("HP outpaces damage so later waves feel tankier but fair", () => {
+  it("HP outpaces damage so later waves feel tankier but fair without bullet sponges", () => {
     expect(waveEnemyPower(15)).toBeGreaterThan(waveEnemyDamage(15));
+    expect(waveEnemyPower(9)).toBeLessThan(2.0); // Never 4x sponge on wave 9
   });
 });
 
@@ -326,7 +338,7 @@ describe("public wave API (budget → composition → stat scale)", () => {
     expect(s20.hp).toBe(waveEnemyPower(20));
     expect(s20.damage).toBe(waveEnemyDamage(20));
     expect(s20.fireRate).toBe(waveEnemyFireRate(20));
-    expect(waveStatScale(200).damage).toBe(3.2);
+    expect(waveStatScale(200).damage).toBe(1.70);
   });
 });
 
@@ -901,11 +913,27 @@ describe("pilot perks", () => {
     expect(perkEffect("magnet", 0)).toBe(0);
     expect(perkEffect("magnet", 2)).toBeCloseTo(PERK_INFO.magnet.perRank * 2);
   });
-  it("every perk has exactly 3 rank costs", () => {
+  it("every perk has rank costs up to MAX_PERK_RANK", () => {
     for (const info of Object.values(PERK_INFO)) {
-      expect(info.costs.length).toBe(3);
+      expect(info.costs.length).toBe(MAX_PERK_RANK);
       expect(info.costs[1]).toBeGreaterThan(info.costs[0]);
     }
+  });
+});
+
+describe("damage affinities", () => {
+  it("computes weapon vs target category multipliers properly", () => {
+    // Machine gun favors Air (1.25x), weaker vs armor (0.85x)
+    expect(calculateDamageAffinity(WeaponType.MACHINE_GUN, 'AIR', 20)).toBe(25);
+    expect(calculateDamageAffinity(WeaponType.MACHINE_GUN, 'ARMORED', 20)).toBe(17);
+
+    // Rocket favors Armored (1.4x) and Structures (1.4x)
+    expect(calculateDamageAffinity(WeaponType.ROCKET, 'ARMORED', 50)).toBe(70);
+    expect(calculateDamageAffinity(WeaponType.ROCKET, 'STRUCTURE', 50)).toBe(70);
+
+    // Missile favors Armored (1.45x) and Boss Core (1.3x)
+    expect(calculateDamageAffinity(WeaponType.MISSILE, 'BOSS_CORE', 100)).toBe(130);
+    expect(calculateDamageAffinity(WeaponType.MISSILE, 'ARMORED', 100)).toBe(145);
   });
 });
 

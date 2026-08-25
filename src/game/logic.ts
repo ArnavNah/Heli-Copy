@@ -60,25 +60,25 @@ export const WAVE1_CONFIG = {
   noSamWaves: 2,
 } as const;
 
-/** Total enemies to spawn for a given wave number. */
+/** Total enemies to spawn / active population target for a given wave number. */
 export function waveEnemyCount(wave: number): number {
-  return 8 + Math.floor(wave * 6.5);
+  return enemyPopulationTarget(wave);
 }
 
 /**
- * Procedural HP multiplier that grows with the wave — the core of the
- * "enemies keep getting harder" curve. +18% HP per wave, capped at 9x
- * (wave ~46) so late runs stay challenging without becoming sponges.
+ * Procedural HP multiplier that grows moderately with the wave.
+ * Instead of exponential sponge HP, HP rises conservatively:
+ * Wave 1: 1.00x, Wave 5: 1.20x, Wave 9: 1.40x, Wave 15: 1.75x, capped at 2.35x.
  */
-export function waveEnemyPower(wave: number): number {
-  return Math.min(4.5, 1 + Math.max(0, wave - 1) * 0.12);
+export function waveEnemyPower(wave: number, difficulty: Difficulty = "normal"): number {
+  return enemyHPScale(wave, difficulty);
 }
 
 export const SPAWN_CONFIG = {
   minDistance: 70,
   maxDistance: 245,
   separation: 12,
-  maxQueue: 24,
+  maxQueue: 18,
   maxPerTick: 1,
 } as const;
 
@@ -86,13 +86,11 @@ export const SPAWN_CONFIG = {
 export function waveThreatBudget(wave: number, threatLevel = 1): number {
   const safeWave = Math.max(1, Math.floor(wave));
   const safeThreat = Math.max(1, Math.min(5, Math.floor(threatLevel)));
-  return Math.round((16 + safeWave * 7) * (1 + (safeThreat - 1) * 0.12));
+  return Math.round((16 + safeWave * 6) * (1 + (safeThreat - 1) * 0.10));
 }
 
 // ---------------------------------------------------------------------------
 // Public wave API — the plan contract: budget → composition → stat scaling.
-// These wrap the threat-budget director so gameplay code can drive a wave from
-// one surface without reaching into the pickers below.
 // ---------------------------------------------------------------------------
 
 /** Total spawn budget the horde director may spend this wave. */
@@ -102,8 +100,7 @@ export function waveSpawnBudget(wave: number, threatLevel = 1): number {
 
 /**
  * Pick the next composition member within the remaining budget, preferring a
- * wave-gated squad template (arrives as a staggered stream) before falling
- * back to an individual variant. Returns STANDARD when nothing heavier fits.
+ * wave-gated squad template before falling back to an individual variant.
  */
 export function waveComposition(
   wave: number,
@@ -118,40 +115,326 @@ export function waveComposition(
   return ENEMY_VARIANTS[v].threat <= remainingBudget ? v : EnemyVariant.STANDARD;
 }
 
-/** Unified stat scaling for a wave: hp, shot damage, and fire-rate multipliers. */
-export function waveStatScale(wave: number): { hp: number; damage: number; fireRate: number } {
+/** Unified stat scaling for a wave: hp, shot damage, fire-rate, and speed multipliers. */
+export function waveStatScale(wave: number): { hp: number; damage: number; fireRate: number; speed: number } {
   return {
     hp: waveEnemyPower(wave),
     damage: waveEnemyDamage(wave),
     fireRate: waveEnemyFireRate(wave),
+    speed: enemySpeedScale(wave),
   };
 }
 
 /**
- * Procedural damage multiplier for enemy shots, +7% per wave capped at 3.2x.
- * Grows slower than HP so late waves hurt without one-shotting the player.
+ * Procedural damage multiplier for enemy shots (+3% per wave early, capped at 1.70x).
+ * Wave 1: 1.00x, Wave 5: 1.12x, Wave 9: 1.24x, Wave 15: 1.45x.
  */
-export function waveEnemyDamage(wave: number): number {
-  return Math.min(3.2, 1 + (wave - 1) * 0.07);
+export function waveEnemyDamage(wave: number, difficulty: Difficulty = "normal"): number {
+  return enemyDamageScale(wave, difficulty);
 }
 
 /**
- * Procedural fire-rate multiplier for enemies (<1 = faster). +4% faster per
- * wave, capped at 2.2x the base rate.
+ * Procedural fire-rate multiplier for enemies (<1 = faster).
+ * Controlled rate reduction so attack loops remain readable.
  */
 export function waveEnemyFireRate(wave: number): number {
-  return Math.max(0.45, 1 - (wave - 1) * 0.04);
+  const w = Math.max(1, Math.floor(Number.isFinite(wave) ? wave : 1));
+  return Math.max(0.68, 1 - (w - 1) * 0.025);
 }
 
 /**
- * Enemy aim skill 0..~0.96 — how tight each enemy's shot cone is. Enemies
- * start loose and sloppy (~61% on wave 1) and sharpen as waves rise, so the
- * battlefield grows measurably deadlier late-run without the shots becoming a
- * perfect aimbot. This feeds the angular aim error in `Enemy.applyAimError`.
+ * Enemy speed scaling factor (1.00 early -> 1.12 late -> capped at 1.18 max).
+ * Movement speed scaling is intentionally conservative to preserve dogfight physics.
  */
-export function enemyAimAccuracy(wave: number): number {
+export function enemySpeedScale(wave: number): number {
+  const w = Math.max(1, Number.isFinite(wave) ? wave : 1);
+  if (w <= 3) return 1.0;
+  if (w <= 6) return 1.0 + (w - 3) * 0.02; // 1.02 -> 1.06
+  if (w <= 9) return 1.06 + (w - 6) * 0.02; // 1.08 -> 1.12
+  return Math.min(1.18, 1.12 + (w - 9) * 0.008);
+}
+
+/**
+ * Enemy aim skill 0.45..0.82 — how tight each enemy's shot cone and lead prediction is.
+ * Early: 45-53%, Mid: 55-67%, Late: 68-76%, Boss: 82%.
+ * Never reaches 100% so player dodges are always achievable.
+ */
+export function enemyAimAccuracy(wave: number, isBoss = false): number {
+  if (isBoss) return 0.82;
   const w = Math.max(1, Math.floor(Number.isFinite(wave) ? wave : 1));
-  return Math.min(0.96, 0.6 + (w - 1) * 0.03);
+  if (w <= 3) {
+    return 0.45 + (w - 1) * 0.04;
+  }
+  if (w <= 6) {
+    return 0.55 + (w - 3) * 0.04;
+  }
+  if (w <= 9) {
+    return 0.68 + (w - 6) * 0.028;
+  }
+  return Math.min(0.80, 0.76 + (w - 9) * 0.006);
+}
+
+/**
+ * Dedicated HP scaling curve with difficulty weighting.
+ * Wave 1: 1.00x, Wave 5: 1.20x, Wave 9: 1.40x, Wave 15: 1.75x, Overdrive: <= 2.35x.
+ */
+export function enemyHPScale(wave: number, difficulty: Difficulty = "normal"): number {
+  const w = Math.max(1, Number.isFinite(wave) ? wave : 1);
+  let base: number;
+  if (w <= 1) {
+    base = 1.0;
+  } else if (w <= 9) {
+    base = 1.0 + (w - 1) * 0.05;
+  } else if (w <= 15) {
+    base = 1.40 + (w - 9) * 0.058;
+  } else {
+    base = Math.min(2.35, 1.75 + Math.log10(1 + (w - 15) * 0.15) * 0.75);
+  }
+  const diffMult = difficulty === "casual" ? 0.75 : difficulty === "hard" ? 1.25 : 1.0;
+  return base * diffMult;
+}
+
+/**
+ * Dedicated Damage scaling curve with difficulty weighting.
+ * Wave 1: 1.00x, Wave 5: 1.12x, Wave 9: 1.24x, Wave 15: 1.45x, Overdrive: <= 1.70x.
+ */
+export function enemyDamageScale(wave: number, difficulty: Difficulty = "normal"): number {
+  const w = Math.max(1, Number.isFinite(wave) ? wave : 1);
+  let base: number;
+  if (w <= 1) {
+    base = 1.0;
+  } else if (w <= 9) {
+    base = 1.0 + (w - 1) * 0.03;
+  } else if (w <= 15) {
+    base = 1.24 + (w - 9) * 0.035;
+  } else {
+    base = Math.min(1.70, 1.45 + Math.log10(1 + (w - 15) * 0.10) * 0.45);
+  }
+  const diffMult = difficulty === "casual" ? 0.45 : difficulty === "hard" ? 1.25 : 1.0;
+  return base * diffMult;
+}
+
+/**
+ * Central Combat Intensity parameters.
+ */
+export interface CombatIntensityParams {
+  elapsedRunTime: number;
+  wave: number;
+  threatLevel: number;
+  healthRatio: number;
+  activeEnemiesCount: number;
+  targetEnemiesCount: number;
+  isBossActive: boolean;
+  isOverdrive: boolean;
+  overdriveMultiplier: number;
+  missionsCompleted?: number;
+}
+
+/**
+ * Unified Combat Intensity calculator — combines run duration, wave tier, threat level,
+ * active population, and player health danger, modulated by a crest-and-trough surge wave.
+ */
+export function calculateCombatIntensity(params: CombatIntensityParams): number {
+  const waveNorm = Math.min(1.0, (params.wave - 1) / 8.0);
+  const timeNorm = Math.min(1.0, params.elapsedRunTime / 180);
+  const threatNorm = Math.min(1.0, (params.threatLevel - 1) / 4.0);
+  const healthDanger = Math.max(0, 1.0 - THREE_MathUtils_clamp(params.healthRatio, 0, 1));
+  const populationLoad = Math.min(1.2, params.activeEnemiesCount / Math.max(1, params.targetEnemiesCount));
+
+  // Breathing surge cycle ("waves inside waves")
+  const waveSurge = Math.sin(params.elapsedRunTime * 0.12) * 0.12;
+
+  let intensity =
+    waveNorm * 0.45 +
+    timeNorm * 0.15 +
+    threatNorm * 0.20 +
+    healthDanger * 0.15 +
+    populationLoad * 0.10 +
+    waveSurge;
+
+  if (params.isBossActive) intensity += 0.25;
+  if (params.isOverdrive) intensity += (params.overdriveMultiplier - 1.0) * 0.30;
+
+  return THREE_MathUtils_clamp(intensity, 0.1, 1.5);
+}
+
+/**
+ * Target active combat enemy population on screen per wave.
+ * Wave 1: ~5, Wave 3: ~10, Wave 5: ~14, Wave 7: ~18, Wave 9: ~24, Boss: 10, Overdrive: 25..48.
+ */
+export function enemyPopulationTarget(
+  wave: number,
+  threatLevel = 1,
+  isOverdrive = false,
+  overdriveMult = 1.0,
+  isBossActive = false,
+): number {
+  if (isBossActive) {
+    return 10; // 35-50% of Wave 9, boss provides main threat
+  }
+  const threatBonus = Math.max(0, (threatLevel - 1) * 1.5);
+  if (isOverdrive) {
+    const base = 25 + (overdriveMult - 1.0) * 10;
+    return Math.min(48, Math.round(base + threatBonus));
+  }
+  const w = Math.max(1, Math.floor(wave));
+  const targets: Record<number, number> = {
+    1: 5,
+    2: 7,
+    3: 10,
+    4: 12,
+    5: 14,
+    6: 16,
+    7: 18,
+    8: 21,
+    9: 24,
+  };
+  const baseCount = targets[w] ?? (24 + (w - 9) * 2.5);
+  return Math.min(48, Math.round(baseCount + threatBonus));
+}
+
+/**
+ * Target ground threat points per wave.
+ */
+export function groundThreatTarget(
+  wave: number,
+  threatLevel = 1,
+  isOverdrive = false,
+  isBossActive = false,
+): number {
+  const w = Math.max(1, Math.floor(wave));
+  if (isBossActive) return 5.0;
+  const threatBonus = (threatLevel - 1) * 1.2;
+  if (isOverdrive) {
+    return Math.min(22.0, 14.0 + (w - 10) * 0.8 + threatBonus);
+  }
+  const groundMap: Record<number, number> = {
+    1: 4.0,
+    2: 6.0,
+    3: 8.0,
+    4: 9.5,
+    5: 11.0,
+    6: 8.5,
+    7: 10.0,
+    8: 11.5,
+    9: 13.0,
+  };
+  return (groundMap[w] ?? 13.0) + threatBonus;
+}
+
+/**
+ * Target aerial threat points per wave.
+ */
+export function airThreatTarget(
+  wave: number,
+  threatLevel = 1,
+  isOverdrive = false,
+  isBossActive = false,
+): number {
+  const w = Math.max(1, Math.floor(wave));
+  if (isBossActive) return 2.5;
+  const threatBonus = (threatLevel - 1) * 0.8;
+  if (isOverdrive) {
+    return Math.min(14.0, 7.0 + (w - 10) * 0.6 + threatBonus);
+  }
+  const airMap: Record<number, number> = {
+    1: 0,
+    2: 0,
+    3: 0,
+    4: 0,
+    5: 0,
+    6: 2.5,
+    7: 4.0,
+    8: 5.0,
+    9: 6.5,
+  };
+  return (airMap[w] ?? 6.5) + threatBonus;
+}
+
+/**
+ * Maximum concurrent aerial attack slots (Combat Drones in ATTACK_RUN).
+ * Wave 1: 1, Wave 2-3: 1-2, Wave 4-6: 2, Wave 7-8: 2-3, Wave 9: 3-4, Boss: 1-2, Overdrive: 4-6.
+ */
+export function maxActiveAirAttackers(
+  wave: number,
+  threatLevel = 1,
+  isOverdrive = false,
+  overdriveMult = 1.0,
+  isBossActive = false,
+): number {
+  if (isBossActive) return 2;
+  if (isOverdrive) {
+    return Math.min(6, Math.max(3, Math.floor(3 + (overdriveMult - 1.0) * 2.5)));
+  }
+  const w = Math.max(1, Math.floor(wave));
+  if (w <= 1) return 1;
+  if (w <= 3) return 1 + (threatLevel >= 3 ? 1 : 0);
+  if (w <= 6) return 2;
+  if (w <= 8) return 3;
+  if (w <= 9) return 4;
+  return Math.min(5, Math.max(2, Math.floor(2 + w * 0.35 + threatLevel * 0.3)));
+}
+
+/**
+ * Maximum concurrent heavy attacks (Tank main cannons, SAM missiles, Boss beams).
+ * Wave 1-3: 1, Wave 4-7: 2, Wave 8+: 3, Boss: 1.
+ */
+export function maxActiveHeavyAttacks(wave: number, isBossActive = false): number {
+  if (isBossActive) return 1;
+  const w = Math.max(1, Math.floor(wave));
+  if (w <= 3) return 1;
+  if (w <= 7) return 2;
+  return 3;
+}
+
+/**
+ * Delay before an attack slot can be reassigned to a new attacker.
+ * Early: 0.8-1.4s, Mid: 0.45-0.85s, Late: 0.25-0.50s, Overdrive: 0.15-0.35s.
+ */
+export function attackRotationDelay(wave: number, isOverdrive = false, overdriveMult = 1.0): number {
+  if (isOverdrive) {
+    return Math.max(0.15, 0.35 - (overdriveMult - 1.0) * 0.08);
+  }
+  const w = Math.max(1, Math.floor(wave));
+  if (w <= 3) return 1.10 - (w - 1) * 0.15;
+  if (w <= 6) return 0.75 - (w - 4) * 0.12;
+  if (w <= 9) return 0.45 - (w - 7) * 0.08;
+  return 0.28;
+}
+
+/**
+ * Micro-lull configuration: duration and frequency interval per wave.
+ * Early: 3.5s duration every 28s -> Late: 2.2s duration every 26s -> Overdrive: 1.8s duration every 24s.
+ */
+export function microLullConfig(wave: number, isOverdrive = false): { duration: number; interval: number } {
+  if (isOverdrive) return { duration: 1.8, interval: 24.0 };
+  const w = Math.max(1, Math.floor(wave));
+  if (w <= 3) return { duration: 3.5, interval: 28.0 };
+  if (w <= 6) return { duration: 3.0, interval: 28.0 };
+  if (w <= 9) return { duration: 2.2, interval: 26.0 };
+  return { duration: 2.0, interval: 25.0 };
+}
+
+/**
+ * Dynamic spawn cadence (seconds between reinforcement evaluations).
+ */
+export function calculateSpawnInterval(
+  wave: number,
+  spawnRate: number,
+  threatMult: number,
+  combatIntensity: number,
+  isLull: boolean,
+): number {
+  if (isLull) return 0.55;
+  const w = Math.max(1, Math.floor(wave));
+  const baseCadence = Math.max(0.20, 0.68 - (w - 1) * 0.052);
+  const intensityMod = 1.15 - Math.min(1.0, combatIntensity) * 0.35;
+  const diffMod = 2 - Math.min(1.5, Math.max(0.5, spawnRate));
+  return Math.max(0.14, baseCadence * diffMod * intensityMod * threatMult);
+}
+
+function THREE_MathUtils_clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,26 +1846,26 @@ export type PerkId =
   | 'superCharge'
   | 'procChance';
 
-export const MAX_PERK_RANK = 3;
+export const MAX_PERK_RANK = 5;
 
 export interface PerkInfo {
   name: string;
   desc: string;
   /** Salvage-credit cost per rank (index 0 = rank 1). */
-  costs: [number, number, number];
+  costs: [number, number, number, number, number];
   /** Numeric effect granted per rank (meaning depends on the perk). */
   perRank: number;
 }
 
 export const PERK_INFO: Record<PerkId, PerkInfo> = {
-  magnet: { name: 'Salvage Magnet', desc: '+20% pickup & gem magnet radius per rank', costs: [100, 280, 600], perRank: 0.2 },
-  dash: { name: 'Vector Thrusters', desc: 'Dash cooldown -8% per rank', costs: [110, 300, 640], perRank: 0.08 },
-  salvageLuck: { name: 'Scavenger Rig', desc: '+10% salvage from all sources per rank', costs: [120, 320, 680], perRank: 0.1 },
-  crashResist: { name: 'Crash Plating', desc: 'Collision damage -12% per rank', costs: [105, 290, 620], perRank: 0.12 },
-  xpGain: { name: 'Combat Computer', desc: '+8% run XP per rank', costs: [130, 340, 700], perRank: 0.08 },
-  fuelSaver: { name: 'Lean Burn', desc: 'Fuel drain -6% per rank', costs: [100, 280, 600], perRank: 0.06 },
-  superCharge: { name: 'Devastator Core', desc: '+15% Devastation charge rate per rank', costs: [140, 380, 760], perRank: 0.15 },
-  procChance: { name: 'Elemental Coils', desc: '+5% status proc chance per rank', costs: [135, 360, 720], perRank: 0.05 },
+  magnet: { name: 'Magnet Radius', desc: '+15% pickup & gem magnet radius per rank', costs: [100, 220, 420, 700, 1100], perRank: 0.15 },
+  dash: { name: 'Vector Thrusters', desc: 'Dash cooldown -8% per rank', costs: [110, 240, 450, 750, 1150], perRank: 0.08 },
+  salvageLuck: { name: 'Scavenger Rig', desc: '+10% salvage from all sources per rank', costs: [120, 260, 480, 800, 1200], perRank: 0.1 },
+  crashResist: { name: 'Rotor Armor', desc: 'Damage taken -4% per rank', costs: [130, 280, 500, 820, 1250], perRank: 0.04 },
+  xpGain: { name: 'Combat Computer', desc: '+8% run XP per rank', costs: [130, 280, 500, 820, 1250], perRank: 0.08 },
+  fuelSaver: { name: 'Lean Burn', desc: 'Fuel drain -6% per rank', costs: [100, 220, 420, 700, 1100], perRank: 0.06 },
+  superCharge: { name: 'Devastator Core', desc: '+15% Devastation charge rate per rank', costs: [140, 300, 520, 850, 1300], perRank: 0.15 },
+  procChance: { name: 'EMP Rounds', desc: '+4% weapon hit EMP disrupt proc per rank', costs: [140, 300, 520, 850, 1300], perRank: 0.04 },
 };
 
 export type PerkRanks = Record<PerkId, number>;
@@ -1611,9 +1894,49 @@ export function writePerkRank(
   return ranks;
 }
 
-/** Numeric effect of a perk at a rank (e.g. magnet rank 2 = 0.4 → +40% radius). */
+/** Numeric effect of a perk at a rank (e.g. magnet rank 2 = 0.3 → +30% radius). */
 export function perkEffect(id: PerkId, rank: number): number {
   return PERK_INFO[id].perRank * clamp(Math.floor(rank), 0, MAX_PERK_RANK);
+}
+
+// ---------------------------------------------------------------------------
+// Damage Affinity Architecture (Stage 5)
+// ---------------------------------------------------------------------------
+
+export type TargetCategory = 'LIGHT' | 'ARMORED' | 'STRUCTURE' | 'AIR' | 'BOSS_CORE';
+
+export function calculateDamageAffinity(
+  weapon: WeaponType,
+  target: TargetCategory,
+  baseDamage: number,
+): number {
+  let mult = 1.0;
+  switch (weapon) {
+    case WeaponType.MACHINE_GUN:
+      if (target === 'AIR') mult = 1.25;
+      else if (target === 'LIGHT') mult = 1.1;
+      else if (target === 'ARMORED') mult = 0.85;
+      else if (target === 'STRUCTURE') mult = 0.8;
+      break;
+    case WeaponType.ROCKET:
+      if (target === 'ARMORED') mult = 1.4;
+      else if (target === 'STRUCTURE') mult = 1.4;
+      else if (target === 'LIGHT') mult = 1.2;
+      else if (target === 'AIR') mult = 0.9;
+      break;
+    case WeaponType.MISSILE:
+      if (target === 'ARMORED') mult = 1.45;
+      else if (target === 'STRUCTURE') mult = 1.35;
+      else if (target === 'BOSS_CORE') mult = 1.3;
+      else if (target === 'AIR') mult = 1.0;
+      break;
+    case WeaponType.SHOTGUN:
+      if (target === 'LIGHT') mult = 1.3;
+      else if (target === 'AIR') mult = 1.15;
+      else if (target === 'ARMORED') mult = 0.9;
+      break;
+  }
+  return baseDamage * mult;
 }
 
 // ---------------------------------------------------------------------------

@@ -339,6 +339,39 @@ export class GPUParticleSystem {
     this.dirty = true;
   }
 
+  /** Procedural rotor downwash vortex with vehicle-speed drag and radial outward puff. */
+  spawnRotorDownwash(
+    centerX: number,
+    groundY: number,
+    centerZ: number,
+    vx: number,
+    vz: number,
+    radius: number,
+    strength: number,
+    now: number,
+    count: number = 2,
+  ) {
+    for (let i = 0; i < count; i++) {
+      const idx = this.currentIndex;
+      const ang = Math.random() * Math.PI * 2;
+      const r = (0.35 + Math.random() * 0.65) * radius;
+      const spawnX = centerX + Math.cos(ang) * r;
+      const spawnZ = centerZ + Math.sin(ang) * r;
+
+      const outSpeed = (6 + Math.random() * 8) * strength;
+      const outVx = Math.cos(ang) * outSpeed + vx * 0.35;
+      const outVz = Math.sin(ang) * outSpeed + vz * 0.35;
+      const outVy = (0.8 + Math.random() * 2.0) * strength;
+
+      this.positionAttr.setXYZ(idx, spawnX, groundY + 0.1, spawnZ);
+      this.velocityAttr.setXYZ(idx, outVx, outVy, outVz);
+      this.startTimeAttr.setX(idx, now - Math.random() * 0.1);
+      this.pTypeAttr.setX(idx, 1.0); // Smoke/dust type
+      this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    }
+    this.dirty = true;
+  }
+
   spawnSparks(x: number, y: number, z: number, now: number, count = 3, speed = 15) {
     for (let i = 0; i < count; i++) {
       const idx = this.currentIndex;

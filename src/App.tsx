@@ -2059,7 +2059,7 @@ function HangarScreen({
                         <div className="text-xs font-military tracking-wide text-[#ffcc00]">{info.name}</div>
                         <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-[#a89d7c]">Rank {rank} / {MAX_PERK_RANK}</div>
                         <div className="mt-2 flex items-center justify-center gap-1.5">
-                          {[1, 2, 3].map((level) => (
+                          {[1, 2, 3, 4, 5].map((level) => (
                             <span key={level} className={level <= rank ? 'mil-led-on' : 'mil-led-off'} />
                           ))}
                         </div>
@@ -2215,6 +2215,34 @@ export default function App() {
   const [hitFlash, setHitFlash] = useState(0);
   // Directional damage indicators: red edge arcs pointing toward the threat.
   const [damageArcs, setDamageArcs] = useState<{ id: number; angle: number }[]>([]);
+  const [missileThreats, setMissileThreats] = useState<Array<{
+    id: number;
+    distance: number;
+    bearing: number;
+    tti: number;
+    danger: "YELLOW" | "ORANGE" | "RED";
+    isDecoyed: boolean;
+  }>>([]);
+  const [isOverdrive, setIsOverdrive] = useState(false);
+  const [overdriveMultiplier, setOverdriveMultiplier] = useState(1.0);
+  const [canFlare, setCanFlare] = useState(true);
+  const [postBossModal, setPostBossModal] = useState<{
+    open: boolean;
+    credits: number;
+    salvage: number;
+    score: number;
+    kills: number;
+    wave: number;
+    overdriveMultiplier: number;
+  }>({
+    open: false,
+    credits: 0,
+    salvage: 0,
+    score: 0,
+    kills: 0,
+    wave: 10,
+    overdriveMultiplier: 1.25,
+  });
 
   const applySettings = (patch: Partial<GameSettings>) => {
     const next = { ...settings, ...patch };
@@ -2385,6 +2413,10 @@ export default function App() {
         engineRef.current?.audio.playWarning();
       }
       lastFuelWarnTier = fuelTier;
+      if (e.detail.missileThreats) setMissileThreats(e.detail.missileThreats);
+      if (e.detail.isOverdrive !== undefined) setIsOverdrive(Boolean(e.detail.isOverdrive));
+      if (e.detail.overdriveMultiplier !== undefined) setOverdriveMultiplier(e.detail.overdriveMultiplier);
+      if (e.detail.canFlare !== undefined) setCanFlare(Boolean(e.detail.canFlare));
     };
 
     const handleAutoPause = () => {
@@ -2427,6 +2459,18 @@ export default function App() {
       setTutorial((e.detail ?? { active: false }) as TutorialState);
     };
 
+    const handlePostBossDecision = (e: CustomEvent) => {
+      setPostBossModal({
+        open: true,
+        credits: e.detail?.credits ?? 0,
+        salvage: e.detail?.salvage ?? 0,
+        score: e.detail?.score ?? 0,
+        kills: e.detail?.kills ?? 0,
+        wave: e.detail?.wave ?? 10,
+        overdriveMultiplier: e.detail?.overdriveMultiplier ?? 1.25,
+      });
+    };
+
     window.addEventListener('helistrike:update', handleUpdate as EventListener);
     window.addEventListener('helistrike:stats', handleStats as EventListener);
     window.addEventListener('helistrike:gameover', handleGameOver as EventListener);
@@ -2437,6 +2481,7 @@ export default function App() {
     window.addEventListener('helistrike:damage', handleDamageDirection as EventListener);
     window.addEventListener('helistrike:opening', handleOpening as EventListener);
     window.addEventListener('helistrike:tutorial', handleTutorialEvent as EventListener);
+    window.addEventListener('helistrike:post-boss-decision', handlePostBossDecision as EventListener);
 
     return () => {
       window.removeEventListener('helistrike:update', handleUpdate as EventListener);
@@ -2449,6 +2494,7 @@ export default function App() {
       window.removeEventListener('helistrike:damage', handleDamageDirection as EventListener);
       window.removeEventListener('helistrike:opening', handleOpening as EventListener);
       window.removeEventListener('helistrike:tutorial', handleTutorialEvent as EventListener);
+      window.removeEventListener('helistrike:post-boss-decision', handlePostBossDecision as EventListener);
       engine.dispose();
       engineRef.current = null;
       if (import.meta.env.DEV) (window as unknown as { __engine: GameEngine | null }).__engine = null;
@@ -2701,14 +2747,24 @@ export default function App() {
 
               {/* Compact Wave badge */}
               <div className="flex flex-col items-center border-l border-[#4a593b] pl-3">
-                <span className="font-hud text-[11px] font-bold text-[#a89d7c] leading-none tracking-wider">SECTOR</span>
-                <div className="flex items-center gap-1 mt-0.5">
-                  <span className="font-military text-base text-white leading-none">WAVE {wave}</span>
-                  <span className="flex items-center gap-0.5">
-                    {Array.from({ length: Math.min(wave, 5) }).map((_, i) => (
-                      <Skull key={i} size={10} className="text-[#ff3344] drop-shadow-[0_0_4px_rgba(239,35,60,0.95)]" />
-                    ))}
+                <span className="font-hud text-[11px] font-bold text-[#a89d7c] leading-none tracking-wider">
+                  {isOverdrive ? 'OVERDRIVE' : 'SECTOR'}
+                </span>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className={`font-military text-base leading-none ${isOverdrive ? 'text-[#ffaa00]' : 'text-white'}`}>
+                    {isOverdrive ? `WAVE ${wave}` : `WAVE ${wave}`}
                   </span>
+                  {isOverdrive ? (
+                    <span className="rounded bg-[#ffaa00]/20 px-1 py-0.5 font-tech text-[10px] font-bold text-[#ffcc00] border border-[#ffaa00]/50">
+                      ×{overdriveMultiplier.toFixed(2)}
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-0.5">
+                      {Array.from({ length: Math.min(wave, 5) }).map((_, i) => (
+                        <Skull key={i} size={10} className="text-[#ff3344] drop-shadow-[0_0_4px_rgba(239,35,60,0.95)]" />
+                      ))}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -3024,6 +3080,41 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* Screen-Edge Tactical SAM Missile Threat Indicators */}
+        {mode === 'playing' && missileThreats.map((threat) => (
+          <div
+            key={`threat-${threat.id}`}
+            className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-30 flex flex-col items-center"
+            style={{
+              transform: `translate(-50%, -50%) rotate(${threat.bearing}deg) translateY(-min(34vh, 210px)) rotate(${-threat.bearing}deg)`,
+            }}
+          >
+            <div
+              className={`text-2xl font-black transition-transform duration-75 ${
+                threat.danger === 'RED'
+                  ? 'text-[#ff3344] animate-ping'
+                  : threat.danger === 'ORANGE'
+                  ? 'text-[#ff9900] animate-pulse'
+                  : 'text-[#ffd43b]'
+              }`}
+              style={{ transform: `rotate(${threat.bearing}deg)` }}
+            >
+              ▲
+            </div>
+            <div className="mt-0.5 rounded bg-black/80 px-1.5 py-0.5 border border-white/20 text-center shadow-lg backdrop-blur-xs">
+              <span className={`font-tech text-[10px] font-bold ${threat.danger === 'RED' ? 'text-[#ff3344]' : threat.danger === 'ORANGE' ? 'text-[#ff9900]' : 'text-[#ffd43b]'}`}>
+                {threat.distance}M · {threat.tti.toFixed(1)}S
+              </span>
+              {threat.isDecoyed && <span className="block text-[8px] font-military text-[#7df9ff]">DECOYED</span>}
+            </div>
+            {threat.danger === 'RED' && canFlare && (
+              <div className="mt-1 rounded bg-[#ff3344] px-1.5 py-0.5 text-[9px] font-military font-bold text-white shadow-[0_0_8px_#ff3344] animate-bounce">
+                [Q] FLARES
+              </div>
+            )}
+          </div>
+        ))}
 
         {/* ══ BOTTOM-LEFT: Unified Player Status Console (Hull, Fuel, Flares, Status) ══ */}
         {mode === 'playing' && (
@@ -3409,6 +3500,62 @@ export default function App() {
         </div>
       )}
 
+      {/* Wave 10 Post-Boss Tactical Decision Modal */}
+      {postBossModal.open && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="mil-panel flex w-full max-w-md flex-col p-6 text-center border-[#55f2a2] shadow-[0_0_30px_rgba(85,242,162,0.3)]">
+            <div className="mil-hazard-strip rounded-[1px] mb-3" />
+            <div className="text-xs font-military tracking-[0.25em] text-[#55f2a2]">MISSION ACCOMPLISHED</div>
+            <h2 className="mt-1 text-xl font-military font-bold text-white tracking-wider">HEAVY GUNSHIP DESTROYED</h2>
+
+            <div className="mt-4 mil-panel bg-[#12161a] p-4 text-left font-tech text-xs space-y-2">
+              <div className="flex justify-between border-b border-[#2d3b45] pb-1.5">
+                <span className="text-[#a89d7c]">CREDITS EARNED</span>
+                <span className="font-bold text-[#ffcc00]">{postBossModal.credits.toLocaleString()} CR</span>
+              </div>
+              <div className="flex justify-between border-b border-[#2d3b45] pb-1.5">
+                <span className="text-[#a89d7c]">SALVAGE COLLECTED</span>
+                <span className="font-bold text-[#55f2a2]">{postBossModal.salvage}</span>
+              </div>
+              <div className="flex justify-between border-b border-[#2d3b45] pb-1.5">
+                <span className="text-[#a89d7c]">AIR / GROUND KILLS</span>
+                <span className="font-bold text-white">{postBossModal.kills}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#a89d7c]">FINAL SCORE</span>
+                <span className="font-bold text-[#7df9ff]">{postBossModal.score.toLocaleString()}</span>
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  uiClick();
+                  setPostBossModal((m) => ({ ...m, open: false }));
+                  engineRef.current?.handleExtractSafely(performance.now() / 1000);
+                }}
+                className="mil-btn mil-btn-primary py-3 text-sm font-bold tracking-wider"
+              >
+                EXTRACT SAFELY (BANK REWARDS)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  uiClick();
+                  setPostBossModal((m) => ({ ...m, open: false }));
+                  engineRef.current?.handleChooseOverdrive(performance.now() / 1000);
+                }}
+                className="mil-btn mil-btn-secondary py-3 text-sm font-bold tracking-wider text-[#ffaa00] border-[#ffaa00]/60 hover:bg-[#ffaa00]/20"
+              >
+                ENDLESS OVERDRIVE (WAVE 11+ · ×{postBossModal.overdriveMultiplier.toFixed(2)})
+              </button>
+            </div>
+            <div className="mil-hazard-strip rounded-[1px] mt-4" />
+          </div>
+        </div>
+      )}
+
       {showSettings && (
         <SettingsPanel
           settings={settings}
@@ -3477,6 +3624,26 @@ export default function App() {
           <div className="text-[#ffe66d]">
             {perfStats.enemies} EN · {perfStats.playerProjectiles}+{perfStats.enemyProjectiles} PROJ · {perfStats.particles} PART · {perfStats.physicsBodies} BOD
           </div>
+          {perfStats.combatDirector && (
+            <div className="mt-1 border-t border-white/20 pt-1 text-[9.5px]">
+              <div className="text-[#38ef7d]">
+                WAVE {perfStats.combatDirector.wave} · INTENSITY: {perfStats.combatDirector.combatIntensity.toFixed(2)} · POP: {perfStats.combatDirector.activeEnemies}/{perfStats.combatDirector.targetEnemies} (max 48)
+              </div>
+              <div className="text-[#50ebff]">
+                THREAT: GND {perfStats.combatDirector.groundThreat}/{perfStats.combatDirector.targetGroundThreat} · AIR {perfStats.combatDirector.airThreat}/{perfStats.combatDirector.targetAirThreat}
+              </div>
+              <div className="text-[#ffd000]">
+                AIR SLOTS: {perfStats.combatDirector.activeAirAttackers}/{perfStats.combatDirector.maxAirAttackSlots} · HEAVY: {perfStats.combatDirector.activeHeavyAttacks}/{perfStats.combatDirector.maxHeavyAttacks} · ROT GAP: {perfStats.combatDirector.attackRotationDelay.toFixed(2)}s
+              </div>
+              <div className="text-[#ff9b3d]">
+                SPAWN: {perfStats.combatDirector.spawnInterval.toFixed(2)}s · BIAS: {perfStats.combatDirector.currentDirectionalBias} ({perfStats.combatDirector.directionalMode})
+                {perfStats.combatDirector.isMicroLull ? ` · [MICRO-LULL ${perfStats.combatDirector.microLullRemaining.toFixed(1)}s]` : ''}
+              </div>
+              <div className="text-white/80">
+                SCALING: HP {perfStats.combatDirector.hpScale.toFixed(2)}× · DMG {perfStats.combatDirector.damageScale.toFixed(2)}× · SPD {perfStats.combatDirector.speedScale.toFixed(2)}×
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

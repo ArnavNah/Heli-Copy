@@ -93,6 +93,7 @@ import {
 import type { HangarUpgrades } from "./delivery";
 import { MissionManager, MissionType, convoyPositionAt, type Mission, type MissionRuntimeSnapshot } from "./mission";
 import { canUseDepotService, collectSalvage, rollLoot } from "./loot";
+import { CombatDirector, PERFORMANCE_CAPS } from "./combatDirector";
 import {
   SAM_DETECTION_RANGE,
   SAM_MIN_SPACING,
@@ -176,6 +177,7 @@ import {
   governorPixelScale,
   nightOpForWave,
   perkEffect,
+  calculateDamageAffinity,
   readPerks,
   readProgress,
   readWeaponMods,
@@ -190,8 +192,16 @@ import {
   VAMPIRIC_HEAL_FRACTION,
   WAVE1_CONFIG,
   writeProgress,
+  calculateCombatIntensity,
+  enemyPopulationTarget,
+  groundThreatTarget,
+  airThreatTarget,
+  calculateSpawnInterval,
+  enemyHPScale,
+  enemyDamageScale,
+  enemySpeedScale,
 } from "./logic";
-import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, UpgradeId, UpgradeOption, WaveThemeConfig } from "./logic";
+import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, TargetCategory, UpgradeId, UpgradeOption, WaveThemeConfig } from "./logic";
 import { armorMitigation, resolvePlayerDamage, resolveRepair, type PlayerDamageType } from "./combat";
 import { FloatingCombatTextManager, type CombatTextType } from "./floatingText";
 import {
@@ -273,6 +283,7 @@ export class GameEngine {
 
   helicopter: Helicopter;
   enemies: Enemy[] = [];
+  combatDirector = new CombatDirector();
 
   playerProjectiles: ProjectilePool;
   enemyProjectiles: ProjectilePool;
@@ -550,6 +561,13 @@ export class GameEngine {
   airThreatAnnouncedThisRun: boolean = false;
   desiredGroundThreat: number = 0;
   desiredAirThreat: number = 0;
+  currentGroundThreat: number = 0;
+  currentAirThreat: number = 0;
+  isOverdrive: boolean = false;
+  overdriveMultiplier: number = 1.0;
+  postBossDecisionPending: boolean = false;
+  postBossDecisionTimer: number = 0;
+  postBossDecisionAvailable: boolean = false;
   private microLullTimer: number = 28.0;
   private microLullActiveTimer: number = 0;
 
@@ -1127,6 +1145,7 @@ export class GameEngine {
     if (this.decoyTarget) this.decoyTarget.active = false;
     this.delivery.reset();
     this.missionManager.reset();
+    this.combatDirector.reset();
     this.city.reset(this.world);
     for (const enemy of this.enemies) {
       enemy.destroy();
@@ -1230,6 +1249,11 @@ export class GameEngine {
     this.samSiteAnnouncedThisRun = false;
     this.radarSiteAnnouncedThisRun = false;
     this.airThreatAnnouncedThisRun = false;
+    this.isOverdrive = false;
+    this.overdriveMultiplier = 1.0;
+    this.postBossDecisionPending = false;
+    this.postBossDecisionTimer = 0;
+    this.postBossDecisionAvailable = false;
     this.microLullTimer = 28.0;
     this.microLullActiveTimer = 0;
     // Opening sequence: every run starts behind the 3-2-1 countdown and the
@@ -1559,6 +1583,19 @@ export class GameEngine {
       powerups: this.powerups.length,
       objectives: this.objectives.length,
       activeDamageTexts: this.floatingCombatText.getActiveCount(),
+      combatDirector: this.combatDirector.getSnapshot(
+        this.enemies.filter((e) => e.type === EnemyType.DRONE && e.active).length,
+        this.enemies.filter((e) => e.active).length,
+        this.currentGroundThreat,
+        this.currentAirThreat,
+        this.combatIntensity,
+        this.currentWave,
+        this.threatLevel,
+        this.isOverdrive,
+        this.overdriveMultiplier,
+        this.enemies.some((e) => e.type === EnemyType.BOSS && e.active),
+        this.settings.difficulty,
+      ),
     };
   }
   /** Reused by getPerfStats — no per-poll allocation. */
@@ -2387,6 +2424,25 @@ export class GameEngine {
     this.dispatchGameOver(time, "EXTRACTED", before + salvageCredits, extractedSalvage);
   }
 
+  /** Safe post-boss victory extraction: banks all rewards and finishes run as Victory. */
+  handleExtractSafely(time: number) {
+    this.postBossDecisionAvailable = false;
+    this.postBossDecisionPending = false;
+    this.completeExtraction(time);
+  }
+
+  /** Post-boss Endless Overdrive choice: continues into Wave 11+ with escalating multipliers. */
+  handleChooseOverdrive(time: number) {
+    this.postBossDecisionAvailable = false;
+    this.postBossDecisionPending = false;
+    this.isOverdrive = true;
+    this.overdriveMultiplier = 1.25;
+    this.currentWave = 10; // startNextWave will increment to 11
+    this.startNextWave();
+    this.announce("ENDLESS OVERDRIVE ENGAGED", "Wave 11 · Multiplier ×1.25", "#ffaa33");
+    this.audio.playWaveStart();
+  }
+
   onSuperEvent = () => {
     this.activateDevastation(performance.now() / 1000);
   };
@@ -2583,7 +2639,8 @@ export class GameEngine {
     // B3: invulnerable during Devastation overcharge
     if (this.superActiveUntil > time) return 0;
     const blocked = this.shieldTimer > 0 || this.dashActiveTimer > 0;
-    const mitigation = armorMitigation(this.hangarUpgrades.armor, this.runUpgrades.armor);
+    const rotorArmorBonus = perkEffect("crashResist", this.perks.crashResist);
+    const mitigation = armorMitigation(this.hangarUpgrades.armor, this.runUpgrades.armor) + rotorArmorBonus;
     const result = resolvePlayerDamage(this.health, this.maxHealth, amount, mitigation, blocked);
     if (result.applied <= 0) return 0;
     this.health = result.health;
@@ -3591,6 +3648,8 @@ export class GameEngine {
       this.addSalvage(10);
       this.repairPlayer(40);
       this.announce("HEAVY GUNSHIP DESTROYED", "Airspace liberated · +1000 CR", "#55f2a2");
+      this.postBossDecisionPending = true;
+      this.postBossDecisionTimer = time + 1.5;
     }
     this.grantWeaponXp(this.lastFiredWeapon);
 
@@ -3613,7 +3672,11 @@ export class GameEngine {
 
     // Risky Rendezvous: low health multiplies score (difficulty-scaled ceiling)
     const risk = riskMultiplier(this.health, this.maxHealth, this.difficulty.maxRisk);
-    this.score += Math.floor(enemy.basePoints * this.comboMultiplier * risk);
+    const overdriveMult = this.isOverdrive ? this.overdriveMultiplier : 1.0;
+    this.score += Math.floor(enemy.basePoints * this.comboMultiplier * risk * overdriveMult);
+    if (this.isOverdrive && Math.random() < (this.overdriveMultiplier - 1.0) * 0.35) {
+      this.addSalvage(1);
+    }
     this.updateUI(time);
 
     // Trigger Hit-Stop for enemy kills to give a crunchy impact feel
@@ -4178,6 +4241,10 @@ export class GameEngine {
           } : null,
           delivery,
           credits: this.delivery.credits,
+          missileThreats: this.getMissileThreats(),
+          isOverdrive: this.isOverdrive,
+          overdriveMultiplier: this.overdriveMultiplier,
+          canFlare: this.countermeasures.canDeploy(),
         },
       }),
     );
@@ -4630,6 +4697,17 @@ export class GameEngine {
   }
 
   private launchSamMissile(sam: Objective, time: number) {
+    const isBossActive = this.enemies.some((e) => e.active && e.type === EnemyType.BOSS);
+    const canLaunch = this.combatDirector.requestHeavyAttackSlot(
+      sam.id,
+      "SAM",
+      time,
+      this.currentWave,
+      isBossActive,
+      3.0,
+    );
+    if (!canLaunch) return;
+
     const launch = sam.getSamLaunchPosition();
     const player = this.helicopter.body.position;
     const dx = player.x - launch.x;
@@ -4646,8 +4724,12 @@ export class GameEngine {
       0,
       waveEnemyDamage(this.currentWave),
     );
-    if (!projectile) return;
+    if (!projectile) {
+      this.combatDirector.releaseHeavyAttackSlot(sam.id, time, 1.0);
+      return;
+    }
     projectile.configureSamMissile(sam);
+    this.combatDirector.releaseHeavyAttackSlot(sam.id, time, 4.0);
     this.particles.spawnSmoke(launch.x, launch.y, launch.z, time);
     this.particles.spawnSparks(launch.x, launch.y, launch.z, time);
     this.audio.playSamMissileLaunch();
@@ -4690,6 +4772,58 @@ export class GameEngine {
       distance: Math.round(best.distanceTo(player.x, player.z)),
       bearing: Math.atan2(best.position.x - player.x, -(best.position.z - player.z)) * 180 / Math.PI,
     };
+  }
+
+  /**
+   * Screen-edge missile threat indicators (TTI, bearing, danger level).
+   * Supports up to 3 nearest homing missiles targeting the helicopter.
+   */
+  getMissileThreats(): Array<{
+    id: number;
+    distance: number;
+    bearing: number;
+    tti: number;
+    danger: "YELLOW" | "ORANGE" | "RED";
+    isDecoyed: boolean;
+  }> {
+    const player = this.helicopter.body.position;
+    const threats: Array<{
+      id: number;
+      distance: number;
+      bearing: number;
+      tti: number;
+      danger: "YELLOW" | "ORANGE" | "RED";
+      isDecoyed: boolean;
+    }> = [];
+
+    for (const proj of this.enemyProjectiles.pool) {
+      if (!proj.active || proj.homingStrength <= 0) continue;
+      const isTargetingPlayer = proj.target?.body === this.helicopter.body;
+      const isDecoyed = proj.targetType === "DECOY";
+      if (!isTargetingPlayer && !isDecoyed) continue;
+
+      const dx = proj.pos.x - player.x;
+      const dz = proj.pos.z - player.z;
+      const distance = Math.hypot(dx, dz);
+      if (distance > 280) continue;
+
+      const closingSpeed = Math.max(25, proj.vel ? Math.hypot(proj.vel.x, proj.vel.z) : 95);
+      const tti = distance / closingSpeed;
+      const danger: "YELLOW" | "ORANGE" | "RED" = tti < 1.2 ? "RED" : (tti < 2.5 ? "ORANGE" : "YELLOW");
+      const bearing = Math.atan2(dx, -dz) * 180 / Math.PI;
+
+      threats.push({
+        id: proj.index,
+        distance: Math.round(distance),
+        bearing,
+        tti,
+        danger,
+        isDecoyed,
+      });
+    }
+
+    threats.sort((a, b) => a.tti - b.tti);
+    return threats.slice(0, 3);
   }
 
   /** Spawn a spaced rooftop or ground emplacement ahead of the player. */
@@ -4791,7 +4925,12 @@ export class GameEngine {
     this.particles.spawnExplosion(obj.position.x, obj.position.y, obj.position.z, 160, time, 50);
     this.volumetricExplosions.spawn(obj.position.x, obj.position.y, obj.position.z, 22, 9);
     this.addExplosionImpulse(obj.position.x, obj.position.y, obj.position.z, 4.5);
-    this.audio.playExplosion(2.0);
+    if (obj.type === ObjectiveType.RADAR_TOWER) {
+      this.audio.playRadarDestruction();
+      this.particles.spawnDebris(obj.position.x, obj.position.y + 3, obj.position.z, time, 16, 26);
+    } else {
+      this.audio.playExplosion(2.0);
+    }
     this.triggerHitStop(0.24, 0.05);
     const securedReward = securedObjectiveReward(obj.type);
     this.delivery.awardCredits(securedReward);
@@ -5045,7 +5184,7 @@ export class GameEngine {
     this.bossIntroStage = 1;
     this.bossIntroNextTime = time + 0.9;
     this.announce("⚠ WARNING ⚠", "Heavy Gunship Inbound", "#ff3366");
-    this.audio.playUpgrade();
+    this.audio.playBossIntro(1);
   }
 
   private updateBossIntro(time: number) {
@@ -5054,7 +5193,7 @@ export class GameEngine {
       this.bossIntroStage = 2;
       this.bossIntroNextTime = time + 0.9;
       this.announce("HEAVY GUNSHIP", "Archon Airborne Command", "#d84cff");
-      this.audio.playUpgrade();
+      this.audio.playBossIntro(2);
     } else if (this.bossIntroStage === 2) {
       this.bossIntroStage = 3;
       this.bossIntroNextTime = time + 0.9;
@@ -5101,6 +5240,7 @@ export class GameEngine {
     }
 
     this.particles.spawnExplosion(spot.x, spot.y, spot.z, 80, time, 35);
+    this.audio.playBossIntro(3);
     this.audio.playEnemySpawn();
     this.addCameraImpulse(4.0);
     this.triggerHitStop(0.35, 0.05);
@@ -5191,14 +5331,28 @@ export class GameEngine {
     if (this.waveFireSilenceTimer > 0) {
       this.waveFireSilenceTimer = Math.max(0, this.waveFireSilenceTimer - delta);
     }
-    const pressureFromTime = Math.min(1, this.survivalTime / 180);
-    const pressureFromThreats = Math.min(1, this.enemies.length / 22);
-    const pressureFromHealth = 1 - this.health / this.maxHealth;
-    this.combatIntensity = THREE.MathUtils.clamp(
-      pressureFromTime * 0.5 + pressureFromThreats * 0.35 + pressureFromHealth * 0.3,
-      0,
-      1.3,
+
+    const isBossActive = this.enemies.some((e) => e.active && e.type === EnemyType.BOSS);
+    const targetPop = enemyPopulationTarget(
+      this.currentWave,
+      this.threatLevel,
+      this.isOverdrive,
+      this.overdriveMultiplier,
+      isBossActive,
     );
+
+    // Dynamic combat intensity calculation
+    this.combatIntensity = calculateCombatIntensity({
+      elapsedRunTime: this.survivalTime,
+      wave: this.currentWave,
+      threatLevel: this.threatLevel,
+      healthRatio: this.maxHealth > 0 ? this.health / this.maxHealth : 1.0,
+      activeEnemiesCount: this.enemies.filter((e) => e.active).length,
+      targetEnemiesCount: targetPop,
+      isBossActive,
+      isOverdrive: this.isOverdrive,
+      overdriveMultiplier: this.overdriveMultiplier,
+    });
 
     // Initial start — wave 1 waits for the countdown to finish (GO)
     if (this.currentWave === 0) {
@@ -5235,27 +5389,51 @@ export class GameEngine {
       this.spawnMiniboss(time);
     }
 
-    // Micro-lulls: periodic breathing pauses in continuous reinforcement
-    this.microLullTimer -= delta;
-    if (this.microLullTimer <= 0) {
-      this.microLullActiveTimer = 3.0;
-      this.microLullTimer = 30.0 + Math.random() * 8.0;
+    // Evaluate active Ground Threat and Air Threat separately
+    let currentGroundThreat = 0;
+    let currentAirThreat = 0;
+
+    for (const e of this.enemies) {
+      if (e.active) {
+        if (e.type === EnemyType.DRONE) {
+          currentAirThreat += AIR_THREAT_COSTS.COMBAT_DRONE;
+        } else if (e.type === EnemyType.TANK) {
+          currentGroundThreat += GROUND_THREAT_COSTS.TANK;
+        } else if (e.type === EnemyType.BASIC) {
+          currentGroundThreat += GROUND_THREAT_COSTS.INFANTRY;
+        }
+      }
     }
-    if (this.microLullActiveTimer > 0) {
-      this.microLullActiveTimer -= delta;
+    for (const o of this.objectives) {
+      if (o.active && o.type === ObjectiveType.SAM_SITE) {
+        currentGroundThreat += GROUND_THREAT_COSTS.SAM;
+      }
     }
 
-    // Continuous Ground Horde Spawning (Vampire-Survivors style)
-    this.spawnTimer -= delta;
-    const maxActiveEnemies = Math.min(
-      72,
-      Math.round((26 + Math.floor(this.currentWave * 3.2) + threatDirectorConfig(this.threatLevel).activeEnemyCapBonus) * this.difficulty.spawnRate),
+    this.currentGroundThreat = currentGroundThreat;
+    this.currentAirThreat = currentAirThreat;
+
+    // Compute decoupled threat targets from central curves
+    this.desiredGroundThreat =
+      groundThreatTarget(this.currentWave, this.threatLevel, this.isOverdrive, isBossActive) *
+      this.difficulty.spawnRate;
+    this.desiredAirThreat =
+      airThreatTarget(this.currentWave, this.threatLevel, this.isOverdrive, isBossActive) *
+      this.difficulty.spawnRate;
+
+    const maxActiveEnemies = Math.min(PERFORMANCE_CAPS.MAX_ACTIVE_ENEMIES, targetPop);
+    const radarHordeBoost = this.radarActive ? 0.82 : 1.0;
+    const hordeInterval = calculateSpawnInterval(
+      this.currentWave,
+      this.difficulty.spawnRate,
+      radarHordeBoost * threatDirectorConfig(this.threatLevel).spawnIntervalMult,
+      this.combatIntensity,
+      this.combatDirector.isMicroLull(),
     );
-    const radarHordeBoost = this.radarActive ? 0.78 : 1.0;
-    const baseHordeInterval = (0.62 - this.currentWave * 0.045) * (2 - this.difficulty.spawnRate) * (1.15 - this.combatIntensity * 0.35) * threatDirectorConfig(this.threatLevel).spawnIntervalMult;
-    const hordeInterval = Math.max(0.14, baseHordeInterval * radarHordeBoost);
 
-    if (this.microLullActiveTimer > 0) {
+    // Continuous Horde Spawning
+    this.spawnTimer -= delta;
+    if (this.combatDirector.isMicroLull()) {
       // During micro-lull, let the player breathe and scoop drops / maneuver
       this.spawnTimer = Math.max(this.spawnTimer, 0.45);
     } else if (this.spawnTimer <= 0) {
@@ -5267,84 +5445,8 @@ export class GameEngine {
         this.pendingSpawns--;
         this.spawnTimer = hordeInterval;
       } else {
-        // Evaluate active Ground Threat and Air Threat separately (Step 12 & 13)
-        let currentGroundThreat = 0;
-        let currentAirThreat = 0;
-        let isBossActive = false;
-
-        for (const e of this.enemies) {
-          if (e.active) {
-            if (e.type === EnemyType.BOSS) {
-              isBossActive = true;
-            } else if (e.type === EnemyType.DRONE) {
-              currentAirThreat += AIR_THREAT_COSTS.COMBAT_DRONE;
-            } else if (e.type === EnemyType.TANK) {
-              currentGroundThreat += GROUND_THREAT_COSTS.TANK;
-            } else if (e.type === EnemyType.BASIC) {
-              currentGroundThreat += GROUND_THREAT_COSTS.INFANTRY;
-            }
-          }
-        }
-        for (const o of this.objectives) {
-          if (o.active && o.type === ObjectiveType.SAM_SITE) {
-            currentGroundThreat += GROUND_THREAT_COSTS.SAM;
-          }
-        }
-
-        // Air/Ground progression ratios (Step 14):
-        // Wave 1-5: Air 0%, Ground 100%
-        // Wave 6: Air ~15-20% (1.5), Ground ~80-85% (7.5)
-        // Wave 7-8: Air ~20-25% (3.0), Ground ~75-80% (9.0 - 9.5)
-        // Wave 9: Air ~25-30% (4.5), Ground ~70-75% (11.0)
-        // Wave 10+: Boss battle
-        let baseDesiredGroundThreat = 3.5;
-        let baseDesiredAirThreat = 0;
-
-        if (this.currentWave === 1) {
-          baseDesiredGroundThreat = 3.5;
-          baseDesiredAirThreat = 0;
-        } else if (this.currentWave === 2) {
-          baseDesiredGroundThreat = 5.0;
-          baseDesiredAirThreat = 0;
-        } else if (this.currentWave === 3) {
-          baseDesiredGroundThreat = 7.0;
-          baseDesiredAirThreat = 0;
-        } else if (this.currentWave === 4) {
-          baseDesiredGroundThreat = 8.5;
-          baseDesiredAirThreat = 0;
-        } else if (this.currentWave === 5) {
-          baseDesiredGroundThreat = 10.0;
-          baseDesiredAirThreat = 0;
-        } else if (this.currentWave === 6) {
-          baseDesiredGroundThreat = 7.5;
-          baseDesiredAirThreat = 1.5;
-        } else if (this.currentWave === 7) {
-          baseDesiredGroundThreat = 9.0;
-          baseDesiredAirThreat = 3.0;
-        } else if (this.currentWave === 8) {
-          baseDesiredGroundThreat = 9.5;
-          baseDesiredAirThreat = 3.0;
-        } else if (this.currentWave === 9) {
-          baseDesiredGroundThreat = 11.0;
-          baseDesiredAirThreat = 4.5;
-        } else {
-          baseDesiredGroundThreat = 8.0 + this.currentWave * 0.5;
-          baseDesiredAirThreat = 4.5;
-        }
-
-        // Boss presence reduces normal director pressure to ~40% (Step 24)
-        if (isBossActive) {
-          baseDesiredGroundThreat *= 0.4;
-          baseDesiredAirThreat *= 0.4;
-        }
-
-        this.desiredGroundThreat = baseDesiredGroundThreat * this.difficulty.spawnRate;
-        this.desiredAirThreat = baseDesiredAirThreat * this.difficulty.spawnRate;
-        const desiredGroundThreat = this.desiredGroundThreat;
-        const desiredAirThreat = this.desiredAirThreat;
-
-        const groundDeficit = desiredGroundThreat - currentGroundThreat;
-        const airDeficit = desiredAirThreat - currentAirThreat;
+        const groundDeficit = this.desiredGroundThreat - currentGroundThreat;
+        const airDeficit = this.desiredAirThreat - currentAirThreat;
         const totalDeficit = Math.max(0, groundDeficit) + Math.max(0, airDeficit);
 
         if (totalDeficit > 0.5 && this.enemies.length < maxActiveEnemies) {
@@ -5354,7 +5456,7 @@ export class GameEngine {
           this.pendingSpawns = Math.min(
             maxActiveEnemies - this.enemies.length,
             Math.max(1, Math.ceil(totalDeficit / 1.5)),
-            SPAWN_CONFIG.maxQueue,
+            PERFORMANCE_CAPS.MAX_SPAWN_QUEUE,
           );
           this.spawnTimer = hordeInterval;
         } else {
@@ -5956,6 +6058,13 @@ export class GameEngine {
 
     this.updateAIDirector(time, delta);
 
+    // Step CombatDirector for attack slot coordination and directional pressure
+    const activeEnemyIds = new Set<number>();
+    for (const e of this.enemies) {
+      if (e.active) activeEnemyIds.add(e.id);
+    }
+    this.combatDirector.update(delta, time, this.currentWave, activeEnemyIds, this.isOverdrive);
+
     // Twin-stick aim has priority on mobile; desktop mouse fire uses auto-lock.
     if (this.rightStick.active) {
       this.updateStickAim();
@@ -6152,26 +6261,50 @@ export class GameEngine {
       },
     );
 
-    // Rotor downwash kicks dust when hovering low over the terrain — the
-    // idle hover visibly interacts with the ground instead of floating above
-    // it. Rate scales with proximity; high or fast flight stirs nothing.
+    // Rotor downwash kicks dust when flying low over the terrain — height-based
+    // vortex scales with ground clearance, and vehicle speed adds trailing drag.
     this.downwashTimer += delta;
-    if (this.downwashTimer >= 0.06) {
+    if (this.downwashTimer >= 0.05) {
       this.downwashTimer = 0;
       const heliAlt = hp.y - hoverFloor;
-      const hoverSpeed = Math.hypot(hv.x, hv.z);
-      if (this.health > 0 && heliAlt < 15 && hoverSpeed < 12) {
-        const strength = 1 - heliAlt / 15;
-        const puffs = heliAlt < 6 ? 3 : 2;
-        for (let i = 0; i < puffs; i++) {
-          if (Math.random() > strength + 0.25) continue;
-          const ang = Math.random() * Math.PI * 2;
-          const r = 4 + Math.random() * 4;
-          this.particles.spawnDust(
-            hp.x + Math.cos(ang) * r,
-            hoverFloor + 0.4,
-            hp.z + Math.sin(ang) * r,
+      if (this.health > 0 && heliAlt < 24.0) {
+        const strength = THREE.MathUtils.clamp(1.0 - (heliAlt - 6.0) / 18.0, 0.12, 1.0);
+        const puffs = heliAlt < 8.0 ? 3 : (heliAlt < 16.0 ? 2 : 1);
+        this.particles.spawnRotorDownwash(
+          hp.x,
+          hoverFloor,
+          hp.z,
+          hv.x,
+          hv.z,
+          5.5,
+          strength,
+          time,
+          puffs,
+        );
+      }
+
+      // Combat Drone downwash — bounded to nearest low-altitude drones
+      let droneWashCount = 0;
+      for (const e of this.enemies) {
+        if (!e.active || e.type !== EnemyType.DRONE || droneWashCount >= 2) continue;
+        const dx = e.body.position.x - hp.x;
+        const dz = e.body.position.z - hp.z;
+        if (dx * dx + dz * dz > 7200) continue; // within ~85m
+        const droneFloor = this.city.getHeightAt(e.body.position.x, e.body.position.z, 0.5);
+        const droneAlt = e.body.position.y - droneFloor;
+        if (droneAlt < 16.0) {
+          droneWashCount++;
+          const dStrength = THREE.MathUtils.clamp(1.0 - droneAlt / 16.0, 0.1, 0.55);
+          this.particles.spawnRotorDownwash(
+            e.body.position.x,
+            droneFloor,
+            e.body.position.z,
+            e.smoothVelX,
+            e.smoothVelZ,
+            2.6,
+            dStrength,
             time,
+            1,
           );
         }
       }
@@ -6272,6 +6405,18 @@ export class GameEngine {
       // B1: burn DoT + status timestamps tick every frame for every enemy.
       e.tickStatusEffects(time, delta);
       if (!e.active) {
+        if (e.isDying) {
+          const finished = e.updateDeathSpiral(delta, this.city, time, this.particles);
+          if (finished || e.readyForRemoval) {
+            this.particles.spawnExplosion(e.body.position.x, e.body.position.y, e.body.position.z, 55, time, 18);
+            this.volumetricExplosions.spawn(e.body.position.x, e.body.position.y, e.body.position.z, 14, 5);
+            this.audio.playExplosion(0.85);
+            this.releaseShieldAuras(e);
+            e.destroy();
+            this.enemies.splice(i, 1);
+          }
+          continue;
+        }
         if (e.diedFromStatus) {
           this.onEnemyDestroyed(e, time);
         } else {
@@ -6324,6 +6469,12 @@ export class GameEngine {
         delta,
         undefined,
         this.helicopter.body.velocity,
+        this.combatDirector,
+        this.currentWave,
+        this.threatLevel,
+        this.isOverdrive,
+        this.overdriveMultiplier,
+        this.enemies.some((en) => en.type === EnemyType.BOSS && en.active),
       );
       // Only announce when the boss LOSES a phase (never on spawn)
       if (e.type === EnemyType.BOSS && e.phase < prevPhase) {
@@ -6335,6 +6486,32 @@ export class GameEngine {
         this.audio.playUpgrade();
         this.addCameraImpulse(2.0); // boss phase slam
         this.triggerHitStop(0.2, 0.4);
+      }
+      // Boss visual damage phases (Phase 2: left engine damage, Phase 1: both engines + hull critical)
+      if (e.type === EnemyType.BOSS && e.active) {
+        if (e.phase <= 2 && e.damagePoints?.engineLeft && this.frameCount % 4 === 0) {
+          const pt = new THREE.Vector3();
+          e.damagePoints.engineLeft.getWorldPosition(pt);
+          this.particles.spawnSmoke(pt.x, pt.y, pt.z, time);
+          if (Math.random() < 0.35) {
+            this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 2, 10);
+          }
+        }
+        if (e.phase <= 1) {
+          if (e.damagePoints?.engineRight && this.frameCount % 4 === 2) {
+            const pt = new THREE.Vector3();
+            e.damagePoints.engineRight.getWorldPosition(pt);
+            this.particles.spawnSmoke(pt.x, pt.y, pt.z, time);
+            if (Math.random() < 0.35) {
+              this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 2, 10);
+            }
+          }
+          if (e.damagePoints?.hull && this.frameCount % 5 === 0) {
+            const pt = new THREE.Vector3();
+            e.damagePoints.hull.getWorldPosition(pt);
+            this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 3, 14);
+          }
+        }
       }
       if (fired && time - this.lastEnemyFireSoundTime >= 0.15) {
         this.audio.playEnemyFire();
@@ -6423,7 +6600,8 @@ export class GameEngine {
     // --- Objective hits ---
     this.playerProjectiles.checkObjectiveHits(this.objectives, (proj, obj) => {
       this.shotsHit++;
-      const objDmg = proj.damage * (proj.blastRadius > 0 ? 1.1 : 1.0);
+      const affinityDmg = calculateDamageAffinity(this.currentWeapon, 'STRUCTURE', proj.damage);
+      const objDmg = affinityDmg * (proj.blastRadius > 0 ? 1.1 : 1.0);
       const destroyed = obj.takeDamage(objDmg);
       this.floatingCombatText.spawnDamage(obj.id, proj.pos, objDmg, 'NORMAL', time);
       this.hitMarkerTimer = 0.12;
@@ -6439,8 +6617,9 @@ export class GameEngine {
     // --- Rooftop turret hits ---
     this.playerProjectiles.checkTurretHits(this.city.turrets, (proj, turret) => {
       this.shotsHit++;
-      const destroyed = turret.takeDamage(proj.damage);
-      this.floatingCombatText.spawnDamage(null, proj.pos, proj.damage, 'NORMAL', time);
+      const turretDmg = calculateDamageAffinity(this.currentWeapon, 'STRUCTURE', proj.damage);
+      const destroyed = turret.takeDamage(turretDmg);
+      this.floatingCombatText.spawnDamage(null, proj.pos, turretDmg, 'NORMAL', time);
       this.particles.spawnExplosion(proj.pos.x, proj.pos.y, proj.pos.z, 14, time, 9);
       if (destroyed) {
         this.score += Math.floor(turret.basePoints * this.comboMultiplier);
@@ -6460,8 +6639,16 @@ export class GameEngine {
 
     this.playerProjectiles.checkEnemyHits(this.enemies, (proj, enemy) => {
       this.shotsHit++;
-      // C6: mod damage bonuses against favored hull types
-      let totalDmg = proj.damage * this.comboMultiplier;
+      // C6: mod damage bonuses against favored hull types + damage affinities
+      const targetCategory: TargetCategory = enemy.type === EnemyType.BOSS
+        ? 'BOSS_CORE'
+        : enemy.type === EnemyType.DRONE
+        ? 'AIR'
+        : enemy.type === EnemyType.TANK
+        ? 'ARMORED'
+        : 'LIGHT';
+      const affinityDmg = calculateDamageAffinity(this.currentWeapon, targetCategory, proj.damage);
+      let totalDmg = affinityDmg * this.comboMultiplier;
       if (proj.piercing && (enemy.type === EnemyType.TANK || enemy.type === EnemyType.BOSS)) totalDmg *= 1.35;
       if (proj.shaped && (enemy.type === EnemyType.BOSS || enemy.isElite)) totalDmg *= 1.45;
       const isShielded = enemy.shieldHp > 0;
@@ -6669,6 +6856,23 @@ export class GameEngine {
 
     if (this.health <= 0) {
       this.dispatchGameOver(time);
+    }
+
+    if (this.postBossDecisionPending && time >= this.postBossDecisionTimer) {
+      this.postBossDecisionPending = false;
+      this.postBossDecisionAvailable = true;
+      window.dispatchEvent(
+        new CustomEvent("helistrike:post-boss-decision", {
+          detail: {
+            credits: this.delivery.credits,
+            salvage: this.runSalvage,
+            score: this.score,
+            kills: this.totalKills,
+            wave: this.currentWave,
+            overdriveMultiplier: 1.25,
+          },
+        }),
+      );
     }
 
     this.particles.update(time);

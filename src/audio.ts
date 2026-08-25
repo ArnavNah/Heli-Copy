@@ -901,6 +901,174 @@ export class AudioManager {
     });
   }
 
+  /** Boss 3-stage intro audio sequence (sub-bass drop + ominous alarm + arrival chord). */
+  public playBossIntro(stage: number) {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    if (stage === 1) {
+      // Sub-bass drop + warning siren
+      const subOsc = this.ctx.createOscillator();
+      const subGain = this.ctx.createGain();
+      subOsc.type = 'sine';
+      subOsc.frequency.setValueAtTime(140, now);
+      subOsc.frequency.exponentialRampToValueAtTime(36, now + 0.65);
+      subGain.gain.setValueAtTime(0.22, now);
+      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+      subOsc.connect(subGain);
+      subGain.connect(this.sfxGain);
+      subOsc.start(now);
+      subOsc.stop(now + 0.72);
+
+      // Warning siren pulses
+      for (let i = 0; i < 2; i++) {
+        const siren = this.ctx.createOscillator();
+        const sirenGain = this.ctx.createGain();
+        siren.type = 'sawtooth';
+        siren.frequency.setValueAtTime(440, now + i * 0.28);
+        siren.frequency.linearRampToValueAtTime(330, now + i * 0.28 + 0.22);
+        sirenGain.gain.setValueAtTime(0.1, now + i * 0.28);
+        sirenGain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.28 + 0.24);
+        siren.connect(sirenGain);
+        sirenGain.connect(this.sfxGain);
+        siren.start(now + i * 0.28);
+        siren.stop(now + i * 0.28 + 0.25);
+      }
+    } else if (stage === 2) {
+      // Tech telemetry chirp + threat ping
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(580, now);
+      osc.frequency.setValueAtTime(880, now + 0.08);
+      g.gain.setValueAtTime(0.12, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.connect(g);
+      g.connect(this.sfxGain);
+      osc.start(now);
+      osc.stop(now + 0.26);
+    } else {
+      // Heavy engine arrival power chord (low rumbling brass chord)
+      [55, 110, 165].forEach((freq) => {
+        const osc = this.ctx!.createOscillator();
+        const g = this.ctx!.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.value = freq;
+        g.gain.setValueAtTime(0.15, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
+        osc.connect(g);
+        g.connect(this.sfxGain!);
+        osc.start(now);
+        osc.stop(now + 0.9);
+      });
+    }
+  }
+
+  /** Rising strobe charging tone telegraphing boss Rocket Spread Salvo. */
+  public playRocketCharge() {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(260, now);
+    osc.frequency.exponentialRampToValueAtTime(840, now + 0.65);
+
+    // Strobe AM modulation
+    const lfo = this.ctx.createOscillator();
+    const lfoGain = this.ctx.createGain();
+    lfo.frequency.setValueAtTime(8, now);
+    lfo.frequency.linearRampToValueAtTime(24, now + 0.65);
+    lfoGain.gain.value = 0.07;
+    lfo.connect(g.gain);
+
+    g.gain.setValueAtTime(0.08, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+
+    osc.connect(g);
+    g.connect(this.sfxGain);
+
+    lfo.start(now);
+    lfo.stop(now + 0.72);
+    osc.start(now);
+    osc.stop(now + 0.72);
+  }
+
+  /** High-pitched Combat Drone jet/turbine whine flyby sound. */
+  public playDroneFlyby(dist: number = 40) {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const volume = Math.max(0.02, Math.min(0.08, 1.0 - dist / 90));
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(820, now);
+    osc.frequency.linearRampToValueAtTime(640, now + 0.28);
+    g.gain.setValueAtTime(volume, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.32);
+  }
+
+  /** Distinctive 2-round mechanical kinetic pulse 'PA-PA' for Combat Drones. */
+  public playDronePulseFire() {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    for (let i = 0; i < 2; i++) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(420, now + i * 0.09);
+      osc.frequency.exponentialRampToValueAtTime(180, now + i * 0.09 + 0.06);
+      g.gain.setValueAtTime(0.09, now + i * 0.09);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.09 + 0.07);
+      osc.connect(g);
+      g.connect(this.sfxGain);
+      osc.start(now + i * 0.09);
+      osc.stop(now + i * 0.09 + 0.08);
+    }
+  }
+
+  /** Structural collapse audio for Radar Station: impact explosion -> metal groan -> deep thud. */
+  public playRadarDestruction() {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    // Initial blast
+    this.playExplosion(1.4);
+
+    // Deep metallic structural groan
+    const groanOsc = this.ctx.createOscillator();
+    const groanGain = this.ctx.createGain();
+    groanOsc.type = 'sawtooth';
+    groanOsc.frequency.setValueAtTime(95, now + 0.1);
+    groanOsc.frequency.linearRampToValueAtTime(42, now + 0.55);
+    groanGain.gain.setValueAtTime(0.18, now + 0.1);
+    groanGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    groanOsc.connect(groanGain);
+    groanGain.connect(this.sfxGain);
+    groanOsc.start(now + 0.1);
+    groanOsc.stop(now + 0.62);
+
+    // Deep structural collapsing thud
+    const thudOsc = this.ctx.createOscillator();
+    const thudGain = this.ctx.createGain();
+    thudOsc.type = 'sine';
+    thudOsc.frequency.setValueAtTime(75, now + 0.35);
+    thudOsc.frequency.exponentialRampToValueAtTime(25, now + 0.85);
+    thudGain.gain.setValueAtTime(0.25, now + 0.35);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    thudOsc.connect(thudGain);
+    thudGain.connect(this.sfxGain);
+    thudOsc.start(now + 0.35);
+    thudOsc.stop(now + 0.92);
+  }
+
   public dispose() {
     this.stopMusic();
 

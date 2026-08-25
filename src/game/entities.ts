@@ -3,6 +3,11 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
 import { createBox, createGlowBox, createGlowMaterial, createLowPolyMaterial, disposeObject3D } from "./materials";
 import {
+  EnemyHelicopterModelFactory,
+  type EnemyHelicopterModelResult,
+  type EnemyDamagePoints,
+} from "./enemyHelicopterModels";
+import {
   AttackPattern,
   COLLISION,
   copyPhysicsPos,
@@ -15,7 +20,11 @@ import {
   ObjectiveType,
   PowerUpType,
   type StatusEffectKind,
+  DroneCombatState,
+  TankCombatState,
+  AttackSector,
 } from "./types";
+import { CombatDirector } from "./combatDirector";
 import {
   BOSS_TELEGRAPH_DURATION,
   BURN_DPS,
@@ -24,11 +33,14 @@ import {
   bossPhaseForRatio,
   bossVolleyConfig,
   objectiveConfig,
+  enemySpeedScale,
 } from "./logic";
 import { ENEMY_VARIANTS } from "./logic";
 import type { CityBlock } from "./types";
 import type { CityEnvironment } from "./city";
 import type { GPUParticleSystem } from "./particles";
+
+const _projPos = new THREE.Vector3();
 import {
   SAM_DETECTION_RANGE,
   SAM_MAX_PITCH,
@@ -1656,14 +1668,36 @@ export class Enemy extends Entity {
   lastDecisionTime: number = 0;
   movementClass: EnemyMovementClass = EnemyMovementClass.GROUND;
   turretYawPivot: THREE.Group | null = null;
+  gunYawPivot: THREE.Group | null = null;
   cannonPitchPivot: THREE.Group | null = null;
   muzzlePoint: THREE.Object3D | null = null;
   tankTelegraphMesh: THREE.Mesh | null = null;
+  droneTelegraphMesh: THREE.Mesh | null = null;
   tankAimTimer: number = 0;
   tankState: 'MOVE' | 'STOP' | 'AIM' | 'REPOSITION' = 'MOVE';
   tankStateTimer: number = 0;
+  tankCombatState: TankCombatState = TankCombatState.MOVE_TO_LANE;
+  tankChosenLaneX: number = 0;
+  tankChosenLaneZ: number = 0;
+
+  // Drone 3-Layer Combat State Machine
+  droneState: DroneCombatState = DroneCombatState.SPAWN_ENTRY;
+  droneStateTimer: number = 0;
+  assignedSectorAngle: number = 0;
+  attackVectorX: number = 0;
+  attackVectorZ: number = 0;
+  attackRunDuration: number = 0;
+  attackBurstTimer: number = 0;
+  attackBurstShotsFired: number = 0;
+  attackTelegraphTimer: number = 0;
+  stuckCheckTimer: number = 0;
+  lastStuckCheckPos: { x: number; z: number } = { x: 0, z: 0 };
+
+  // Infantry Squad Burst Stagger
   infantryBurstRemaining: number = 0;
   infantryBurstTimer: number = 0;
+  infantryBurstStagger: number = Math.random() * 0.35;
+
   smoothVelX: number = 0;
   smoothVelY: number = 0;
   smoothVelZ: number = 0;
@@ -1673,8 +1707,20 @@ export class Enemy extends Entity {
   lastObstacleCheckTime: number = 0;
   cachedSafeAltitude: number = 18;
   bossReinforcementTriggeredPhases = new Set<number>();
+  heliModelData: EnemyHelicopterModelResult | null = null;
+  damagePoints: EnemyDamagePoints | null = null;
+  targetPoint: THREE.Object3D | null = null;
+  coreGlowMesh: THREE.Mesh | null = null;
   enemyRotor: THREE.Group | null = null;
   enemyTailRotor: THREE.Group | null = null;
+  isDying: boolean = false;
+  deathSpiralTimer: number = 0;
+  deathSpiralMaxTime: number = 2.2;
+  deathSpiralYawRate: number = 0;
+  deathSpiralRollRate: number = 0;
+  deathSpiralVelY: number = 0;
+  readyForRemoval: boolean = false;
+  bossDamageFxTimer: number = 0;
 
   constructor(
     scene: THREE.Scene,
@@ -1783,145 +1829,39 @@ export class Enemy extends Entity {
     }
 
     if (type === EnemyType.BOSS) {
-      // "Archon" heavy gunship — layered hull, twin nacelles, broad wings, glow core
-      this.ring = new THREE.Group();
-      this.ring.name = "BossRoot";
-      this.ring.position.y = 0.2;
-      const r = radius;
-
-      // Heavy Fuselage
-      const hull = createBox(r * 1.25, r * 0.55, r * 1.9, coreHex);
-      hull.name = "HeavyFuselage";
-      this.ring.add(hull);
-      const hullTop = createBox(r * 0.9, r * 0.35, r * 1.5, coreHex);
-      hullTop.position.set(0, r * 0.42, -r * 0.1);
-      this.ring.add(hullTop);
-      const belly = createBox(r * 1.05, r * 0.3, r * 1.5, 0x1a1020);
-      belly.position.set(0, -r * 0.45, r * 0.1);
-      this.ring.add(belly);
-
-      // Cockpit + nose sensor + glowing core
-      const glass = createBox(r * 0.55, r * 0.38, r * 0.65, 0x172f3d);
-      glass.name = "Cockpit";
-      glass.position.set(0, r * 0.25, r * 1.1);
-      this.ring.add(glass);
-      const noseSensor = createGlowBox(r * 0.3, r * 0.18, r * 0.3, 0xff3366, 0.9);
-      noseSensor.position.set(0, r * 0.05, r * 1.45);
-      this.ring.add(noseSensor);
-      const core = createGlowBox(r * 0.5, r * 0.5, r * 0.24, 0xff2266, 0.95);
-      core.position.set(0, 0, r * 0.85);
-      this.ring.add(core);
-
-      // Twin engine nacelles
-      const engine01 = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
-      engine01.name = "Engine01";
-      engine01.position.set(-r * 1.0, r * 0.15, r * 0.35);
-      this.ring.add(engine01);
-      const intake01 = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
-      intake01.position.set(-r * 1.0, r * 0.15, r * 0.92);
-      this.ring.add(intake01);
-
-      const engine02 = createBox(r * 0.45, r * 0.5, r * 1.1, accentHex);
-      engine02.name = "Engine02";
-      engine02.position.set(r * 1.0, r * 0.15, r * 0.35);
-      this.ring.add(engine02);
-      const intake02 = createGlowBox(r * 0.5, r * 0.4, r * 0.18, 0xff8833, 0.85);
-      intake02.position.set(r * 1.0, r * 0.15, r * 0.92);
-      this.ring.add(intake02);
-
-      // Left & Right Wings
-      const leftWing = createBox(r * 1.5, r * 0.18, r * 0.8, coreHex);
-      leftWing.name = "LeftWing";
-      leftWing.position.set(-r * 0.75, 0, r * 0.2);
-      this.ring.add(leftWing);
-
-      const rightWing = createBox(r * 1.5, r * 0.18, r * 0.8, coreHex);
-      rightWing.name = "RightWing";
-      rightWing.position.set(r * 0.75, 0, r * 0.2);
-      this.ring.add(rightWing);
-
-      // Heavy Cannon Mount
-      const cannonMount = createBox(r * 0.35, r * 0.28, r * 0.95, 0x111111);
-      cannonMount.name = "CannonMount";
-      cannonMount.position.set(0, -r * 0.52, r * 0.85);
-      this.ring.add(cannonMount);
-
-      // Rocket Pods Left & Right
-      const rocketPodLeft = createBox(r * 0.32, r * 0.32, r * 0.75, 0x222222);
-      rocketPodLeft.name = "RocketPodLeft";
-      rocketPodLeft.position.set(-r * 1.38, -r * 0.18, r * 0.2);
-      this.ring.add(rocketPodLeft);
-
-      const rocketPodRight = createBox(r * 0.32, r * 0.32, r * 0.75, 0x222222);
-      rocketPodRight.name = "RocketPodRight";
-      rocketPodRight.position.set(r * 1.38, -r * 0.18, r * 0.2);
-      this.ring.add(rocketPodRight);
-
-      // Damage Details
-      const damageDetails = new THREE.Group();
-      damageDetails.name = "DamageDetails";
-      const ventPlate = createBox(r * 0.6, r * 0.08, r * 0.5, 0x332233);
-      ventPlate.position.set(0, r * 0.52, -r * 0.2);
-      damageDetails.add(ventPlate);
-      this.ring.add(damageDetails);
-
-      // Target Point
-      const targetPoint = new THREE.Object3D();
-      targetPoint.name = "TargetPoint";
-      targetPoint.position.set(0, 0, 0);
-      this.ring.add(targetPoint);
-
-      [-1, 1].forEach((s) => {
-        const tipLight = createGlowBox(r * 0.16, r * 0.16, r * 0.16, s < 0 ? 0x33ff66 : 0xff4433, 0.9);
-        tipLight.position.set(s * r * 1.55, 0, r * 0.2);
-        this.ring.add(tipLight);
+      const bossModel = EnemyHelicopterModelFactory.create({
+        family: "boss",
+        isElite: this.isElite,
+        coreColor: coreHex,
+        accentColor: accentHex,
       });
+      this.heliModelData = bossModel;
+      this.ring = bossModel.visualRoot;
+      this.enemyRotor = bossModel.mainRotorPivot;
+      this.enemyTailRotor = bossModel.tailRotorPivot;
+      this.gunYawPivot = bossModel.gunYawPivot;
+      this.cannonPitchPivot = bossModel.gunPitchPivot;
+      this.muzzlePoint = bossModel.muzzlePoint;
+      this.targetPoint = bossModel.targetPoint;
+      this.damagePoints = bossModel.damagePoints;
+      this.coreGlowMesh = bossModel.coreGlowMesh ?? null;
 
-      // Twin tail booms + fins + stabilizer
-      [-1, 1].forEach((s) => {
-        const boom = createBox(r * 0.22, r * 0.28, r * 1.9, coreHex);
-        boom.position.set(s * r * 0.55, r * 0.1, -r * 1.55);
-        this.ring.add(boom);
-        const fin = createBox(r * 0.12, r * 0.85, r * 0.4, accentHex);
-        fin.position.set(s * r * 0.55, r * 0.5, -r * 2.3);
-        this.ring.add(fin);
+      // Telegraph beam volley geometry
+      const telegraphGeo = new THREE.CylinderGeometry(0.3, 0.3, 70, 6);
+      telegraphGeo.rotateX(Math.PI / 2);
+      telegraphGeo.translate(0, 0, 35);
+      const telegraphMat = new THREE.MeshBasicMaterial({
+        color: 0xff2255,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
       });
-      const stab = createBox(r * 1.4, r * 0.1, r * 0.7, coreHex);
-      stab.position.set(0, r * 0.15, -r * 2.2);
-      this.ring.add(stab);
+      this.telegraphMesh = new THREE.Mesh(telegraphGeo, telegraphMat);
+      this.telegraphMesh.visible = false;
+      this.ring.add(this.telegraphMesh);
 
-      // Dorsal spine
-      const spine = createBox(r * 0.12, r * 0.5, r * 0.9, accentHex);
-      spine.position.set(0, r * 0.75, -r * 0.3);
-      this.ring.add(spine);
-
-      // Main rotor on a raised mast
-      const mast = createBox(r * 0.14, r * 0.5, r * 0.14, 0x333333);
-      mast.position.set(0, r * 0.6, -r * 0.2);
-      this.ring.add(mast);
-      const rotorGroup = new THREE.Group();
-      rotorGroup.position.set(0, r * 0.9, -r * 0.2);
-      for (let i = 0; i < 4; i++) {
-        const blade = createBox(r * 0.12, r * 0.03, r * 1.6, 0x111111);
-        blade.rotation.y = (i * Math.PI) / 2;
-        blade.position.z = r * 0.75;
-        rotorGroup.add(blade);
-      }
-      this.ring.add(rotorGroup);
-      this.enemyRotor = rotorGroup;
-
-      // Tail rotor
-      const tailRotorGroup = new THREE.Group();
-      tailRotorGroup.position.set(0, r * 0.45, -r * 2.35);
-      for (let i = 0; i < 2; i++) {
-        const blade = createBox(r * 0.03, r * 0.08, r * 0.5, 0x111111);
-        blade.rotation.x = (i * Math.PI) / 2;
-        tailRotorGroup.add(blade);
-      }
-      this.ring.add(tailRotorGroup);
-      this.enemyTailRotor = tailRotorGroup;
-
-      baseGroup.add(this.ring);
+      baseGroup.add(bossModel.root);
 
     } else if (type === EnemyType.TANK) {
       // Tank — tracked chassis + independent TurretYawPivot + CannonPitchPivot
@@ -2030,96 +1970,32 @@ export class Enemy extends Entity {
 
     } else if (type === EnemyType.DRONE) {
       this.movementClass = EnemyMovementClass.FLYING;
-      // Combat Drone (Mobile Aerial Harasser) — aggressive stealth silhouette with hostile red accents
-      this.ring = new THREE.Group();
-      this.ring.name = "CombatDroneRoot";
+      // Light Attack Helicopter
+      const lightModel = EnemyHelicopterModelFactory.create({
+        family: "light",
+        variant: this.droneCosmeticVariant,
+        isElite: this.isElite,
+        coreColor: coreHex,
+        accentColor: accentHex,
+      });
+      this.heliModelData = lightModel;
+      this.ring = lightModel.visualRoot;
+      this.enemyRotor = lightModel.mainRotorPivot;
+      this.enemyTailRotor = lightModel.tailRotorPivot;
+      this.gunYawPivot = lightModel.gunYawPivot;
+      this.cannonPitchPivot = lightModel.gunPitchPivot;
+      this.muzzlePoint = lightModel.muzzlePoint;
+      this.targetPoint = lightModel.targetPoint;
+      this.damagePoints = lightModel.damagePoints;
 
-      // Central Body (Chiseled composite fuselage)
-      const centralBody = createBox(1.4, 0.45, 1.6, coreHex);
-      centralBody.name = "CentralBody";
-      this.ring.add(centralBody);
+      // Attack warning telegraph glow
+      const noseTelegraph = createGlowBox(0.4, 0.4, 0.4, 0xff3344, 0.0);
+      noseTelegraph.position.set(0, -0.1, 1.8);
+      noseTelegraph.visible = false;
+      this.ring.add(noseTelegraph);
+      this.droneTelegraphMesh = noseTelegraph;
 
-      const noseCone = createBox(0.75, 0.26, 0.85, accentHex);
-      noseCone.position.set(0, -0.04, 0.95);
-      this.ring.add(noseCone);
-
-      const dorsalSpine = createBox(0.3, 0.2, 1.1, 0x1a1e24);
-      dorsalSpine.position.set(0, 0.28, -0.1);
-      this.ring.add(dorsalSpine);
-
-      // Wings (Cosmetic variation: delta swept vs forward-swept)
-      const leftWing = new THREE.Group();
-      leftWing.name = "LeftWing";
-      const rightWing = new THREE.Group();
-      rightWing.name = "RightWing";
-
-      if (this.droneCosmeticVariant === 1) {
-        // Forward-swept assault wings
-        const lWingMesh = createBox(1.5, 0.08, 0.7, coreHex);
-        lWingMesh.position.set(-1.0, 0, 0.1);
-        lWingMesh.rotation.y = -0.25;
-        leftWing.add(lWingMesh);
-
-        const rWingMesh = createBox(1.5, 0.08, 0.7, coreHex);
-        rWingMesh.position.set(1.0, 0, 0.1);
-        rWingMesh.rotation.y = 0.25;
-        rightWing.add(rWingMesh);
-      } else {
-        // Delta swept wings
-        const lWingMesh = createBox(1.6, 0.08, 0.9, coreHex);
-        lWingMesh.position.set(-1.1, 0, -0.15);
-        lWingMesh.rotation.y = 0.22;
-        leftWing.add(lWingMesh);
-
-        const rWingMesh = createBox(1.6, 0.08, 0.9, coreHex);
-        rWingMesh.position.set(1.1, 0, -0.15);
-        rWingMesh.rotation.y = -0.22;
-        rightWing.add(rWingMesh);
-      }
-      this.ring.add(leftWing);
-      this.ring.add(rightWing);
-
-      // Twin Engine Nacelles with glow exhausts
-      const engine01 = createBox(0.4, 0.4, 1.1, 0x1f2429);
-      engine01.name = "Engine01";
-      engine01.position.set(-0.55, 0.05, -0.5);
-      const exhaust01 = createGlowBox(0.3, 0.3, 0.15, 0xff4422, 0.9);
-      exhaust01.position.set(0, 0, -0.58);
-      engine01.add(exhaust01);
-      this.ring.add(engine01);
-
-      const engine02 = createBox(0.4, 0.4, 1.1, 0x1f2429);
-      engine02.name = "Engine02";
-      engine02.position.set(0.55, 0.05, -0.5);
-      const exhaust02 = createGlowBox(0.3, 0.3, 0.15, 0xff4422, 0.9);
-      exhaust02.position.set(0, 0, -0.58);
-      engine02.add(exhaust02);
-      this.ring.add(engine02);
-
-      // Gun Mount (underbelly autocannon)
-      const gunMount = new THREE.Group();
-      gunMount.name = "GunMount";
-      const gunBody = createBox(0.24, 0.18, 0.7, 0x111111);
-      gunBody.position.set(0, -0.28, 0.3);
-      gunMount.add(gunBody);
-      const barrel = createBox(0.08, 0.08, 0.35, 0x333333);
-      barrel.position.set(0, -0.28, 0.72);
-      gunMount.add(barrel);
-      this.ring.add(gunMount);
-
-      // Navigation Light (Hostile red strobe)
-      const navLight = createGlowBox(0.18, 0.18, 0.18, 0xff2233, 0.95);
-      navLight.name = "NavigationLight";
-      navLight.position.set(0, 0.28, -0.6);
-      this.ring.add(navLight);
-
-      // Target Point
-      const targetPoint = new THREE.Object3D();
-      targetPoint.name = "TargetPoint";
-      targetPoint.position.set(0, 0, 0);
-      this.ring.add(targetPoint);
-
-      baseGroup.add(this.ring);
+      baseGroup.add(lightModel.root);
 
     } else if (type === EnemyType.BASIC) {
       // INFANTRY CLUSTER — 4 visible low-poly soldiers in tactical formation
@@ -2181,54 +2057,26 @@ export class Enemy extends Entity {
       baseGroup.add(this.ring);
 
     } else {
-      // SHOOTER gunship
+      // SHOOTER / Medium Attack Gunship
       this.movementClass = EnemyMovementClass.FLYING;
-      this.ring = new THREE.Group();
-      const r = radius;
-
-      // Fuselage + nose
-      const fuselage = createBox(r * 0.75, r * 0.6, r * 2.4, coreHex);
-      this.ring.add(fuselage);
-      const nose = createBox(r * 0.45, r * 0.45, r * 0.9, coreHex);
-      nose.position.set(0, -r * 0.05, r * 1.5);
-      this.ring.add(nose);
-      const noseCone = createBox(r * 0.22, r * 0.22, r * 0.5, accentHex);
-      noseCone.position.set(0, -r * 0.05, r * 2.1);
-      this.ring.add(noseCone);
-      const cockpit = createBox(r * 0.5, r * 0.4, r * 0.7, 0x172f3d);
-      cockpit.position.set(0, r * 0.35, r * 0.5);
-      this.ring.add(cockpit);
-
-      // Gunship: twin engine pods, chin cannon, wing hardpoints
-      [-1, 1].forEach((s) => {
-        const enginePod = createBox(r * 0.4, r * 0.45, r * 1.0, accentHex);
-        enginePod.position.set(s * r * 0.85, 0, -r * 0.4);
-        this.ring.add(enginePod);
-        const intake = createGlowBox(r * 0.3, r * 0.3, r * 0.16, 0xff8833, 0.85);
-        intake.position.set(s * r * 0.85, 0, -r * 0.95);
-        this.ring.add(intake);
+      const mediumModel = EnemyHelicopterModelFactory.create({
+        family: "medium",
+        variant: Math.abs(Math.round(x + z)) % 4,
+        isElite: this.isElite,
+        coreColor: coreHex,
+        accentColor: accentHex,
       });
-      const wing = createBox(r * 2.6, r * 0.14, r * 0.7, coreHex);
-      wing.position.set(0, 0, -r * 0.3);
-      this.ring.add(wing);
-      [-1, 1].forEach((s) => {
-        const missile = createBox(r * 0.14, r * 0.14, r * 0.7, 0x444444);
-        missile.position.set(s * r * 1.15, -r * 0.2, -r * 0.3);
-        this.ring.add(missile);
-      });
-      const cannon = createBox(r * 0.14, r * 0.14, r * 1.2, 0x333333);
-      cannon.position.set(0, -r * 0.35, r * 1.4);
-      this.ring.add(cannon);
-      const cannonMuzzle = createGlowBox(r * 0.22, r * 0.22, r * 0.2, 0xff3344, 0.9);
-      cannonMuzzle.position.set(0, -r * 0.35, r * 2.05);
-      this.ring.add(cannonMuzzle);
-      [-1, 1].forEach((s) => {
-        const fin = createBox(r * 0.08, r * 0.6, r * 0.4, accentHex);
-        fin.position.set(s * r * 0.45, r * 0.4, -r * 1.2);
-        this.ring.add(fin);
-      });
+      this.heliModelData = mediumModel;
+      this.ring = mediumModel.visualRoot;
+      this.enemyRotor = mediumModel.mainRotorPivot;
+      this.enemyTailRotor = mediumModel.tailRotorPivot;
+      this.gunYawPivot = mediumModel.gunYawPivot;
+      this.cannonPitchPivot = mediumModel.gunPitchPivot;
+      this.muzzlePoint = mediumModel.muzzlePoint;
+      this.targetPoint = mediumModel.targetPoint;
+      this.damagePoints = mediumModel.damagePoints;
 
-      baseGroup.add(this.ring);
+      baseGroup.add(mediumModel.root);
     }
 
     this.mesh = baseGroup;
@@ -2555,6 +2403,15 @@ export class Enemy extends Entity {
           this.hp -= overkill;
         }
         if (this.hp <= 0) {
+          if (this.type === EnemyType.DRONE && !this.isDying) {
+            this.isDying = true;
+            this.active = false;
+            this.deathSpiralYawRate = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 3.5);
+            this.deathSpiralRollRate = (Math.random() > 0.5 ? 1 : -1) * (4.5 + Math.random() * 3.0);
+            this.deathSpiralVelY = -2.0;
+            this.deathSpiralTimer = 0;
+            return "destroyed";
+          }
           this.active = false;
           return "destroyed";
         }
@@ -2565,10 +2422,69 @@ export class Enemy extends Entity {
     }
     this.hp -= amt;
     if (this.hp <= 0) {
+      if (this.type === EnemyType.DRONE && !this.isDying) {
+        this.isDying = true;
+        this.active = false;
+        this.deathSpiralYawRate = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 3.5);
+        this.deathSpiralRollRate = (Math.random() > 0.5 ? 1 : -1) * (4.5 + Math.random() * 3.0);
+        this.deathSpiralVelY = -2.0;
+        this.deathSpiralTimer = 0;
+        return "destroyed";
+      }
       this.active = false;
       return "destroyed";
     }
     return "hit";
+  }
+
+  /**
+   * Controlled physics-free death spiral for Combat Drones.
+   * Pitches down, rotates yaw & roll, descends into terrain/roof, and triggers crash blast.
+   */
+  updateDeathSpiral(
+    delta: number,
+    city: { getHeightAt(x: number, z: number, r?: number): number } | null | undefined,
+    time: number,
+    particles?: GPUParticleSystem | null,
+  ): boolean {
+    this.deathSpiralTimer += delta;
+    this.deathSpiralVelY -= 22.0 * delta;
+
+    this.body.position.y += this.deathSpiralVelY * delta;
+    this.body.position.x += this.smoothVelX * 0.6 * delta;
+    this.body.position.z += this.smoothVelZ * 0.6 * delta;
+
+    this.mesh.rotation.y += this.deathSpiralYawRate * delta;
+    this.mesh.rotation.x = Math.min(0.85, this.mesh.rotation.x + delta * 1.8);
+    this.ring.rotation.z += this.deathSpiralRollRate * delta;
+    this.ring.rotation.y = this.mesh.rotation.y;
+    this.ring.rotation.x = this.mesh.rotation.x;
+
+    copyPhysicsPos(this.mesh, this.body.position);
+    this.ring.position.copy(this.mesh.position);
+
+    if (particles) {
+      let smokeX = this.body.position.x;
+      let smokeY = this.body.position.y;
+      let smokeZ = this.body.position.z;
+      if (this.damagePoints?.engineLeft) {
+        this.damagePoints.engineLeft.getWorldPosition(_projPos);
+        smokeX = _projPos.x;
+        smokeY = _projPos.y;
+        smokeZ = _projPos.z;
+      }
+      particles.spawnSmoke(smokeX, smokeY, smokeZ, time);
+      if (Math.random() < 0.35) {
+        particles.spawnSparks(smokeX, smokeY, smokeZ, time, 2, 9);
+      }
+    }
+
+    const floor = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 0.8) : 0;
+    if (this.body.position.y <= floor + 0.6 || this.deathSpiralTimer >= this.deathSpiralMaxTime) {
+      this.readyForRemoval = true;
+      return true;
+    }
+    return false;
   }
 
   /** B1: apply a status effect. Bosses shrug off EMP (volleys are telegraphed). */
@@ -3196,9 +3112,9 @@ export class Enemy extends Entity {
   }
 
   /** Advance rotor/support visuals for variants. */
-  private updateVariantVisuals(time: number) {
-    if (this.enemyRotor) this.enemyRotor.rotation.y = time * 26;
-    if (this.enemyTailRotor) this.enemyTailRotor.rotation.x = time * 30;
+  private updateVariantVisuals(time: number, delta: number = 0.016) {
+    if (this.enemyRotor) this.enemyRotor.rotation.y += 30 * delta;
+    if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 36 * delta;
     this.ring.rotation.x = Math.sin(time * 4 + this.personalityOffset) * 0.08;
     // Siege barrel aims at the player while deployed
     if (this.variant === EnemyVariant.SIEGE_TANK && this.variantPhase >= 1) {
@@ -3444,8 +3360,19 @@ export class Enemy extends Entity {
     delta: number = 0.016,
     playerBody: CANNON.Body | null = null,
     targetVel: CANNON.Vec3 | null = null,
+    combatDirector?: CombatDirector | null,
+    currentWave: number = 1,
+    threatLevel: number = 1,
+    isOverdrive: boolean = false,
+    overdriveMultiplier: number = 1.0,
+    isBossActive: boolean = false,
   ) {
-    if (!this.active) return false;
+    if (!this.active) {
+      if (this.isDying) {
+        this.updateDeathSpiral(delta, city, time);
+      }
+      return false;
+    }
 
     this.updateHitFlash(delta);
 
@@ -3587,8 +3514,8 @@ export class Enemy extends Entity {
           this.telegraphMesh.rotation.y = Math.atan2(dirX, dirZ);
         }
       }
-      if (this.enemyRotor) this.enemyRotor.rotation.y = time * 24.0;
-      if (this.enemyTailRotor) this.enemyTailRotor.rotation.x = time * 28.0;
+      if (this.enemyRotor) this.enemyRotor.rotation.y += 22.0 * delta;
+      if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 32.0 * delta;
       return fired;
     }
 
@@ -3617,7 +3544,7 @@ export class Enemy extends Entity {
       copyPhysicsPos(this.mesh, this.body.position);
       this.mesh.rotation.y = Math.atan2(dirX, dirZ);
       this.ring.rotation.y = Math.atan2(dirX, dirZ);
-      this.updateVariantVisuals(time);
+      this.updateVariantVisuals(time, delta);
       return vFired;
     }
 
@@ -3643,104 +3570,295 @@ export class Enemy extends Entity {
     }
 
     // =====================================================================
-    // DRONE — COMBAT DRONE: Real 3D Flight Physics, Altitude & Banking
+    // DRONE — COMBAT DRONE: 3-Layer Combat State Machine & Dogfight Passes
     // =====================================================================
     if (this.type === EnemyType.DRONE) {
-      // 1. Altitude calculation & safe height / building avoidance (Step 3 & 4)
+      // 1. Altitude calculation & safe height / building avoidance
       const roleAltitudeOffset = this.altitudeOffset || 0;
       let desiredAltitude = targetPos.y + roleAltitudeOffset;
 
-      // Periodic building / obstacle height check (every 0.2s - Step 35)
-      if (time - this.lastObstacleCheckTime > 0.2) {
+      if (time - this.lastObstacleCheckTime > 0.18) {
         this.lastObstacleCheckTime = time;
-        const aheadX = this.body.position.x + (this.smoothVelX || dirX * 10) * 0.5;
-        const aheadZ = this.body.position.z + (this.smoothVelZ || dirZ * 10) * 0.5;
-        const groundHere = city.getHeightAt(this.body.position.x, this.body.position.z, 2.0);
-        const groundAhead = city.getHeightAt(aheadX, aheadZ, 2.0);
-        this.cachedSafeAltitude = Math.max(groundHere, groundAhead) + 6.0;
+        const forwardSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+        const lookAheadDist = Math.max(12, forwardSpeed * 0.6);
+        const heading = this.mesh.rotation.y;
+        const aheadX = this.body.position.x + Math.sin(heading) * lookAheadDist;
+        const aheadZ = this.body.position.z + Math.cos(heading) * lookAheadDist;
+        const groundHere = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 2.0) : 0;
+        const groundAhead = city ? city.getHeightAt(aheadX, aheadZ, 2.0) : 0;
+        this.cachedSafeAltitude = Math.max(groundHere, groundAhead) + 5.5;
       }
       if (desiredAltitude < this.cachedSafeAltitude) {
         desiredAltitude = this.cachedSafeAltitude;
       }
 
-      // Vertical acceleration & physics (Step 2)
+      // Vertical smoothing
       const altitudeDiff = desiredAltitude - this.body.position.y;
-      const desiredVerticalVel = THREE.MathUtils.clamp(altitudeDiff * 3.2, -14, 16);
-      this.smoothVelY = THREE.MathUtils.lerp(this.smoothVelY, desiredVerticalVel, Math.min(1, delta * 4.5));
+      const desiredVerticalVel = THREE.MathUtils.clamp(altitudeDiff * 3.4, -16, 18);
+      this.smoothVelY = THREE.MathUtils.lerp(this.smoothVelY, desiredVerticalVel, Math.min(1, delta * 5.0));
       this.body.position.y += this.smoothVelY * delta;
 
-      // 2. Horizontal tactical state & preferred combat radius 35-55m (Step 7 & 8)
-      const cruiseSpeed = 32;
-      const tangentX = -dirZ * this.flankDir;
-      const tangentZ = dirX * this.flankDir;
+      // 2. Drone State Machine & Predictive Interception
+      this.droneStateTimer += delta;
       let desiredHorizontalX = 0;
       let desiredHorizontalZ = 0;
+      let targetCruiseSpeed = 34;
+      let smoothTurnRate = 7.0;
 
-      if (dist > 55) {
-        // APPROACH
-        desiredHorizontalX = dirX * cruiseSpeed + repelForceX * 0.8 + avoidForceX;
-        desiredHorizontalZ = dirZ * cruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
-      } else if (dist < 28) {
-        // REPOSITION / BACK OFF
-        desiredHorizontalX = (-dirX * 0.8 + tangentX * 0.6) * cruiseSpeed + repelForceX * 1.2 + avoidForceX;
-        desiredHorizontalZ = (-dirZ * 0.8 + tangentZ * 0.6) * cruiseSpeed + repelForceZ * 1.2 + avoidForceZ;
-      } else {
-        // CIRCLE / STRAFE
-        const weave = Math.sin(time * 2.5 + this.personalityOffset) * 4;
-        desiredHorizontalX = (tangentX * 0.95 + dirX * 0.15) * cruiseSpeed + weave * dirZ + repelForceX + avoidForceX;
-        desiredHorizontalZ = (tangentZ * 0.95 + dirZ * 0.15) * cruiseSpeed - weave * dirX + repelForceZ + avoidForceZ;
+      // Predictive interception coordinates
+      const predTime = THREE.MathUtils.clamp(dist / 42.0, 0.35, 1.25);
+      const predPlayerX = targetPos.x + (targetVel ? targetVel.x * predTime * 0.65 : 0);
+      const predPlayerZ = targetPos.z + (targetVel ? targetVel.z * predTime * 0.65 : 0);
+      const predDx = predPlayerX - this.body.position.x;
+      const predDz = predPlayerZ - this.body.position.z;
+      const predDist = Math.max(1, Math.hypot(predDx, predDz));
+      const predDirX = predDx / predDist;
+      const predDirZ = predDz / predDist;
+
+      // Stuck detection safety net
+      this.stuckCheckTimer += delta;
+      if (this.stuckCheckTimer > 2.5) {
+        this.stuckCheckTimer = 0;
+        const movedDist = Math.hypot(this.body.position.x - this.lastStuckCheckPos.x, this.body.position.z - this.lastStuckCheckPos.z);
+        if (movedDist < 3.5 && this.droneState !== DroneCombatState.SPAWN_ENTRY) {
+          if (combatDirector) {
+            this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+          }
+          this.droneState = DroneCombatState.BREAK_AWAY;
+          this.droneStateTimer = 0;
+        }
+        this.lastStuckCheckPos = { x: this.body.position.x, z: this.body.position.z };
       }
 
-      // Air Separation (Step 9) - apply smoothed horizontal velocity
-      this.applySmoothMovement(desiredHorizontalX, desiredHorizontalZ, delta, 7.5);
+      switch (this.droneState) {
+        case DroneCombatState.SPAWN_ENTRY: {
+          targetCruiseSpeed = 38;
+          desiredHorizontalX = dirX * targetCruiseSpeed + repelForceX * 0.8 + avoidForceX;
+          desiredHorizontalZ = dirZ * targetCruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+          if (dist <= 75 || this.droneStateTimer > 4.0) {
+            if (combatDirector) {
+              this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+            } else {
+              this.assignedSectorAngle = Math.atan2(dirX, dirZ) + (this.flankDir * 0.6);
+            }
+            this.droneState = DroneCombatState.APPROACH;
+            this.droneStateTimer = 0;
+          }
+          break;
+        }
 
-      // 3. Body orientation & Aerial Banking (Step 5 & 10)
+        case DroneCombatState.APPROACH: {
+          targetCruiseSpeed = 36;
+          const targetStandOff = 48.0;
+          const targetWaypointX = predPlayerX + Math.sin(this.assignedSectorAngle) * targetStandOff;
+          const targetWaypointZ = predPlayerZ + Math.cos(this.assignedSectorAngle) * targetStandOff;
+          const wpDx = targetWaypointX - this.body.position.x;
+          const wpDz = targetWaypointZ - this.body.position.z;
+          const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
+
+          desiredHorizontalX = (wpDx / wpDist) * targetCruiseSpeed + repelForceX * 0.8 + avoidForceX;
+          desiredHorizontalZ = (wpDz / wpDist) * targetCruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+
+          if (wpDist < 16.0 || (dist < 62.0 && this.hasLineOfSight(city, targetPos)) || this.droneStateTimer > 3.8) {
+            this.droneState = DroneCombatState.ATTACK_SETUP;
+            this.droneStateTimer = 0;
+          }
+          break;
+        }
+
+        case DroneCombatState.ATTACK_SETUP: {
+          targetCruiseSpeed = 30;
+          const tangentX = -dirZ * this.flankDir;
+          const tangentZ = dirX * this.flankDir;
+          desiredHorizontalX = (predDirX * 0.45 + tangentX * 0.65) * targetCruiseSpeed + repelForceX + avoidForceX;
+          desiredHorizontalZ = (predDirZ * 0.45 + tangentZ * 0.65) * targetCruiseSpeed + repelForceZ + avoidForceZ;
+
+          const hasLOS = this.hasLineOfSight(city, targetPos);
+          const inRange = dist < 70 && dist > 18;
+
+          // Request attack slot from CombatDirector
+          const canAttack = combatDirector
+            ? combatDirector.requestAirAttackSlot(this.id, time, currentWave, threatLevel, isOverdrive, overdriveMultiplier, isBossActive)
+            : time - this.lastShotTime > 2.0;
+
+          if (canAttack && hasLOS && inRange) {
+            this.droneState = DroneCombatState.ATTACK_RUN;
+            this.droneStateTimer = 0;
+            this.attackRunDuration = 1.35;
+            this.attackTelegraphTimer = 0.24;
+            this.attackBurstTimer = 0;
+            this.attackBurstShotsFired = 0;
+            this.attackVectorX = predDirX;
+            this.attackVectorZ = predDirZ;
+          } else if (this.droneStateTimer > 4.5) {
+            if (combatDirector) combatDirector.releaseAirAttackSlot(this.id, time, 1.5);
+            this.droneState = DroneCombatState.REPOSITION;
+            this.droneStateTimer = 0;
+          }
+          break;
+        }
+
+        case DroneCombatState.ATTACK_RUN: {
+          targetCruiseSpeed = 50; // Fast strafing attack pass!
+          smoothTurnRate = 2.4; // Committed steering - reduced agility allows player dodge
+
+          desiredHorizontalX = this.attackVectorX * targetCruiseSpeed + repelForceX * 0.4 + avoidForceX * 0.8;
+          desiredHorizontalZ = this.attackVectorZ * targetCruiseSpeed + repelForceZ * 0.4 + avoidForceZ * 0.8;
+
+          // Telegraph muzzle/nose glow
+          if (this.attackTelegraphTimer > 0) {
+            this.attackTelegraphTimer -= delta;
+            if (this.droneTelegraphMesh) {
+              this.droneTelegraphMesh.visible = true;
+              (this.droneTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.9;
+            }
+          } else {
+            if (this.droneTelegraphMesh) {
+              this.droneTelegraphMesh.visible = false;
+            }
+
+            // Fire 2-round pulse burst (PA-PA)
+            this.attackBurstTimer -= delta;
+            if (this.attackBurstShotsFired < 2 && this.attackBurstTimer <= 0) {
+              this.attackBurstTimer = 0.09; // 90ms gap
+              this.attackBurstShotsFired++;
+              this.lastShotTime = time;
+
+              const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 160), dist);
+              let muzzleX = this.body.position.x - 0.4 * Math.cos(this.mesh.rotation.y);
+              let muzzleY = this.body.position.y - 0.2;
+              let muzzleZ = this.body.position.z + 0.4 * Math.sin(this.mesh.rotation.y);
+              if (this.muzzlePoint) {
+                this.muzzlePoint.getWorldPosition(_projPos);
+                muzzleX = _projPos.x;
+                muzzleY = _projPos.y;
+                muzzleZ = _projPos.z;
+              }
+              enemyProjectilePool.spawn(
+                muzzleX,
+                muzzleY,
+                muzzleZ,
+                aim.x,
+                aim.z,
+                time,
+                160 * this.projSpeedMult,
+                4,
+                0,
+                0xff3b22,
+                null,
+                0,
+                (aim.y ?? 0) * 160,
+                0,
+                this.waveDamageMult,
+              );
+              fired = true;
+            }
+          }
+
+          this.attackRunDuration -= delta;
+          const dotWithPlayer = (this.body.position.x - targetPos.x) * this.attackVectorX + (this.body.position.z - targetPos.z) * this.attackVectorZ;
+          if (this.attackRunDuration <= 0 || (dist < 18 && dotWithPlayer > 0)) {
+            if (combatDirector) {
+              combatDirector.releaseAirAttackSlot(this.id, time, 2.6 + Math.random() * 0.8);
+            }
+            this.droneState = DroneCombatState.BREAK_AWAY;
+            this.droneStateTimer = 0;
+            this.flankDir = Math.random() > 0.5 ? 1 : -1;
+          }
+          break;
+        }
+
+        case DroneCombatState.BREAK_AWAY: {
+          targetCruiseSpeed = 40; // High speed breakaway
+          smoothTurnRate = 8.5; // Agile bank away
+
+          if (this.droneTelegraphMesh) this.droneTelegraphMesh.visible = false;
+
+          const awayX = -dirX * 0.85 + (-dirZ * this.flankDir) * 0.95;
+          const awayZ = -dirZ * 0.85 + (dirX * this.flankDir) * 0.95;
+          const awayLen = Math.max(1, Math.hypot(awayX, awayZ));
+
+          desiredHorizontalX = (awayX / awayLen) * targetCruiseSpeed + repelForceX + avoidForceX;
+          desiredHorizontalZ = (awayZ / awayLen) * targetCruiseSpeed + repelForceZ + avoidForceZ;
+
+          if (dist > 45 || this.droneStateTimer > 1.2) {
+            this.droneState = DroneCombatState.REPOSITION;
+            this.droneStateTimer = 0;
+            if (combatDirector) {
+              this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+            }
+          }
+          break;
+        }
+
+        case DroneCombatState.REPOSITION: {
+          targetCruiseSpeed = 32;
+          const targetStandOff = 50.0;
+          const targetWaypointX = targetPos.x + Math.sin(this.assignedSectorAngle) * targetStandOff;
+          const targetWaypointZ = targetPos.z + Math.cos(this.assignedSectorAngle) * targetStandOff;
+          const wpDx = targetWaypointX - this.body.position.x;
+          const wpDz = targetWaypointZ - this.body.position.z;
+          const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
+
+          desiredHorizontalX = (wpDx / wpDist) * targetCruiseSpeed + repelForceX * 0.9 + avoidForceX;
+          desiredHorizontalZ = (wpDz / wpDist) * targetCruiseSpeed + repelForceZ * 0.9 + avoidForceZ;
+
+          if (wpDist < 18.0 || this.droneStateTimer > 2.8) {
+            this.droneState = DroneCombatState.ATTACK_SETUP;
+            this.droneStateTimer = 0;
+          }
+          break;
+        }
+      }
+
+      // Apply horizontal smoothed movement
+      this.applySmoothMovement(desiredHorizontalX, desiredHorizontalZ, delta, smoothTurnRate);
+
+      // Orientation & Aerial Banking
       const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
       if (horizSpeed > 0.5) {
         const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
-        // Smooth yaw facing movement velocity
-        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
+        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, smoothTurnRate, delta);
         this.ring.rotation.y = this.mesh.rotation.y;
 
-        // Turn rate / lateral banking: bank 8-18 deg (0.14 - 0.31 rad)
         const currentHeading = this.mesh.rotation.y;
         const targetHeading = Math.atan2(desiredHorizontalX, desiredHorizontalZ);
         const headingDiff = shortestAngleDelta(currentHeading, targetHeading);
-        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.85, -0.31, 0.31);
-        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 8.0));
+        const maxBank = this.droneState === DroneCombatState.BREAK_AWAY ? 0.38 : 0.28;
+        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.9, -maxBank, maxBank);
+        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 9.0));
         this.ring.rotation.z = this.airBankAngle;
 
-        // Slight forward pitch on acceleration
-        const targetPitch = THREE.MathUtils.clamp((horizSpeed / cruiseSpeed) * 0.12, -0.15, 0.15);
-        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 5.0));
+        const pitchMult = this.droneState === DroneCombatState.ATTACK_RUN ? 0.16 : 0.10;
+        const targetPitch = THREE.MathUtils.clamp((horizSpeed / 40) * pitchMult, -0.2, 0.2);
+        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 6.0));
       } else {
         this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
         this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
       }
 
-      // 4. Attack: pulse bursts in medium combat range (Step 7)
-      if (dist < 65 && dist > 15 && time - this.lastShotTime > 1.1 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
-        this.lastShotTime = time;
-        const aim = this.leadAim(targetPos, targetVel, 160);
-        enemyProjectilePool.spawn(
-          this.body.position.x - 0.4 * Math.cos(this.mesh.rotation.y),
-          this.body.position.y - 0.2,
-          this.body.position.z + 0.4 * Math.sin(this.mesh.rotation.y),
-          aim.x,
-          aim.z,
-          time,
-          155 * this.projSpeedMult,
-          4,
-          0,
-          0xff4433,
-          null,
-          0,
-          0,
-          0,
-          this.waveDamageMult,
-        );
-        fired = true;
+      // Independent chin gun tracking
+      if (this.gunYawPivot) {
+        const dAimX = targetPos.x - this.body.position.x;
+        const dAimY = targetPos.y - this.body.position.y;
+        const dAimZ = targetPos.z - this.body.position.z;
+        const dHoriz = Math.max(1, Math.hypot(dAimX, dAimZ));
+        const dPlayerYaw = Math.atan2(dAimX, dAimZ);
+        const dBodyYaw = this.mesh.rotation.y;
+        let dRelYaw = dPlayerYaw - dBodyYaw;
+        while (dRelYaw < -Math.PI) dRelYaw += Math.PI * 2;
+        while (dRelYaw > Math.PI) dRelYaw -= Math.PI * 2;
+        dRelYaw = THREE.MathUtils.clamp(dRelYaw, -1.05, 1.05);
+        this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, dRelYaw, 5.0, delta);
+
+        if (this.cannonPitchPivot) {
+          const dPitch = THREE.MathUtils.clamp(-Math.atan2(dAimY, dHoriz), -0.6, 0.4);
+          this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, dPitch, 4.0, delta);
+        }
       }
+
+      if (this.enemyRotor) this.enemyRotor.rotation.y += 34.0 * delta;
+      if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 38.0 * delta;
 
       copyPhysicsPos(this.mesh, this.body.position);
       return fired;
@@ -3768,11 +3886,9 @@ export class Enemy extends Entity {
     let desiredX: number;
     let desiredZ: number;
     if (this.pattern === AttackPattern.CIRCLE) {
-      // Circle-strafing runs: orbit the player, always strafing
       desiredX = tangentX * speed * 1.25 + dirX * 0.12 * speed + repelForceX + avoidForceX;
       desiredZ = tangentZ * speed * 1.25 + dirZ * 0.12 * speed + repelForceZ + avoidForceZ;
     } else if (this.pattern === AttackPattern.ARTILLERY) {
-      // Artillery: hold range, only fire lobbed shells
       if (dist < 95) {
         desiredX = (-dirX + tangentX * 0.6) * speed * 0.8 + repelForceX + avoidForceX;
         desiredZ = (-dirZ + tangentZ * 0.6) * speed * 0.8 + repelForceZ + avoidForceZ;
@@ -3781,18 +3897,16 @@ export class Enemy extends Entity {
         desiredZ = (tangentZ + dirZ * 0.15) * speed * 0.5 + repelForceZ + avoidForceZ;
       }
     } else if (dist > 45) {
-      // Approach directly
       desiredX = dirX * speed + repelForceX + avoidForceX;
       desiredZ = dirZ * speed + repelForceZ + avoidForceZ;
     } else if (dist < 20 || isEvading) {
-      // Evade / back away and strafe
       desiredX = (-dirX + tangentX * 1.5) * speed * 0.7 + repelForceX + avoidForceX;
       desiredZ = (-dirZ + tangentZ * 1.5) * speed * 0.7 + repelForceZ + avoidForceZ;
     } else {
-      // Orbit (strafe)
       desiredX = (tangentX + dirX * 0.2) * speed * 0.6 + repelForceX + avoidForceX;
       desiredZ = (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ + avoidForceZ;
     }
+
     this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
 
     // --- Ground Unit Terrain Clamping ---
@@ -3810,10 +3924,9 @@ export class Enemy extends Entity {
       const dz = targetPos.z - this.body.position.z;
       const horizDist = Math.max(1, Math.hypot(dx, dz));
 
-      // 1. Chassis rotation faces movement velocity (or holds)
-      if (Math.hypot(this.smoothVelX, this.smoothVelZ) > 0.4) {
-        this.mesh.rotation.y = Math.atan2(this.smoothVelX, this.smoothVelZ);
-      }
+      // 1. Chassis rotation faces movement heading
+      const moveHeading = Math.atan2(this.smoothVelX || desiredX, this.smoothVelZ || desiredZ);
+      this.mesh.rotation.y = moveHeading;
 
       // 2. Turret yaw pivot smoothly tracks player
       if (this.turretYawPivot) {
@@ -3831,51 +3944,99 @@ export class Enemy extends Entity {
         this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, targetPitch, 2.4, delta);
       }
 
-      // 4. Telegraphed Heavy Cannon Shot
-      if (this.tankAimTimer > 0) {
-        this.tankAimTimer -= delta;
-        if (this.tankTelegraphMesh) {
-          (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
+      // 4. Tank Tactical State Machine (MOVE_TO_LANE -> AIM -> FIRE -> REPOSITION)
+      const hasLOS = this.hasLineOfSight(city, targetPos);
+      let tankSpeed = 13;
+
+      if (this.tankCombatState === TankCombatState.MOVE_TO_LANE) {
+        desiredX = dirX * tankSpeed + repelForceX * 1.2 + avoidForceX;
+        desiredZ = dirZ * tankSpeed + repelForceZ * 1.2 + avoidForceZ;
+
+        if (hasLOS && dist < 85 && dist > 20) {
+          this.tankCombatState = TankCombatState.AIM;
+          this.tankStateTimer = 0;
         }
-        if (this.tankAimTimer <= 0) {
+      } else if (this.tankCombatState === TankCombatState.AIM) {
+        tankSpeed = 4;
+        desiredX = dirX * tankSpeed + repelForceX + avoidForceX;
+        desiredZ = dirZ * tankSpeed + repelForceZ + avoidForceZ;
+
+        const canShoot = combatDirector
+          ? combatDirector.requestHeavyAttackSlot(this.id, "TANK", time, currentWave, isBossActive, 1.8) &&
+            combatDirector.requestGroundAttackSlot(this.id, time, currentWave, isBossActive)
+          : time - this.lastShotTime > 3.4 * fireRateMult;
+
+        if (canShoot && hasLOS && time - this.lastShotTime > 3.0 * fireRateMult) {
+          this.tankCombatState = TankCombatState.FIRE;
+          this.tankAimTimer = 0.35; // Muzzle telegraph
+        } else if (!hasLOS || dist > 95) {
+          this.tankCombatState = TankCombatState.MOVE_TO_LANE;
+        }
+      } else if (this.tankCombatState === TankCombatState.FIRE) {
+        desiredX = 0;
+        desiredZ = 0;
+
+        if (this.tankAimTimer > 0) {
+          this.tankAimTimer -= delta;
           if (this.tankTelegraphMesh) {
-            (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.0;
+            (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
           }
-          let muzzleX = this.body.position.x;
-          let muzzleY = this.body.position.y + 1.8;
-          let muzzleZ = this.body.position.z;
-          if (this.muzzlePoint) {
-            this.muzzlePoint.getWorldPosition(_projPos);
-            muzzleX = _projPos.x;
-            muzzleY = _projPos.y;
-            muzzleZ = _projPos.z;
+          if (this.tankAimTimer <= 0) {
+            if (this.tankTelegraphMesh) {
+              (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.0;
+            }
+            let muzzleX = this.body.position.x;
+            let muzzleY = this.body.position.y + 1.8;
+            let muzzleZ = this.body.position.z;
+            if (this.muzzlePoint) {
+              this.muzzlePoint.getWorldPosition(_projPos);
+              muzzleX = _projPos.x;
+              muzzleY = _projPos.y;
+              muzzleZ = _projPos.z;
+            }
+            const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 110), dist);
+            enemyProjectilePool.spawn(
+              muzzleX,
+              muzzleY,
+              muzzleZ,
+              aim.x,
+              aim.z,
+              time,
+              110 * this.projSpeedMult,
+              18,
+              0,
+              0xff8833,
+              null,
+              0,
+              (aim.y ?? 0) * 110,
+              0,
+              this.waveDamageMult,
+            );
+            this.lastShotTime = time;
+            fired = true;
+
+            if (combatDirector) {
+              combatDirector.releaseGroundAttackSlot(this.id, time, 3.2);
+              combatDirector.releaseHeavyAttackSlot(this.id, time, 3.2);
+            }
+            this.tankCombatState = TankCombatState.REPOSITION;
+            this.tankStateTimer = 0;
           }
-          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 110), dist);
-          enemyProjectilePool.spawn(
-            muzzleX,
-            muzzleY,
-            muzzleZ,
-            aim.x,
-            aim.z,
-            time,
-            110 * this.projSpeedMult,
-            18,
-            0,
-            0xff8833,
-            null,
-            0,
-            (aim.y ?? 0) * 110,
-            0,
-            this.waveDamageMult,
-          );
-          this.lastShotTime = time;
-          fired = true;
         }
-      } else if (dist < 90 && time - this.lastShotTime > 3.4 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
-        this.tankAimTimer = 0.35; // Telegraph muzzle glow before blast
+      } else if (this.tankCombatState === TankCombatState.REPOSITION) {
+        const tangentX = -dirZ * this.flankDir;
+        const tangentZ = dirX * this.flankDir;
+        desiredX = (tangentX * 1.1 + dirX * 0.2) * tankSpeed + repelForceX + avoidForceX;
+        desiredZ = (tangentZ * 1.1 + dirZ * 0.2) * tankSpeed + repelForceZ + avoidForceZ;
+
+        if (this.droneStateTimer > 2.0 || time - this.lastShotTime > 3.0) {
+          this.tankCombatState = TankCombatState.AIM;
+        }
       }
+
+      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
     } else if (this.type === EnemyType.BASIC) {
-      // INFANTRY CLUSTER: Face movement, fire 3-round rapid light bursts
+      // INFANTRY CLUSTER: Face movement, staggered 3-round rapid light bursts
       if (Math.hypot(this.smoothVelX, this.smoothVelZ) > 0.3) {
         this.mesh.rotation.y = Math.atan2(this.smoothVelX, this.smoothVelZ);
       }
@@ -3905,12 +4066,14 @@ export class Enemy extends Entity {
           this.infantryBurstTimer = 0.12;
           fired = true;
         }
-      } else if (dist < 65 && time - this.lastShotTime > 2.5 * fireRateMult && this.hasLineOfSight(city, targetPos)) {
+      } else if (dist < 65 && time - this.lastShotTime > (2.5 + this.infantryBurstStagger) * fireRateMult && this.hasLineOfSight(city, targetPos)) {
         this.lastShotTime = time;
         this.infantryBurstRemaining = 3;
         this.infantryBurstTimer = 0;
       }
+      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
     } else {
+      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
       // Flying Gunships / Shooters
       const fireRange = 75;
       const fireRate = 2.0;
@@ -3919,10 +4082,19 @@ export class Enemy extends Entity {
         if (this.hasLineOfSight(city, targetPos)) {
           this.lastShotTime = time + Math.random() * 0.35;
           const aim = this.applyAimError(this.leadAim(targetPos, targetVel, projectileSpeed), dist);
+          let muzzleX = this.body.position.x;
+          let muzzleY = this.body.position.y + 0.35;
+          let muzzleZ = this.body.position.z;
+          if (this.muzzlePoint) {
+            this.muzzlePoint.getWorldPosition(_projPos);
+            muzzleX = _projPos.x;
+            muzzleY = _projPos.y;
+            muzzleZ = _projPos.z;
+          }
           enemyProjectilePool.spawn(
-            this.body.position.x,
-            this.body.position.y + 0.35,
-            this.body.position.z,
+            muzzleX,
+            muzzleY,
+            muzzleZ,
             aim.x,
             aim.z,
             time,
@@ -3940,17 +4112,55 @@ export class Enemy extends Entity {
         }
       }
 
-      this.mesh.rotation.y = Math.atan2(dirX, dirZ);
+      // Smooth heading and banking for shooter
+      const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+      if (horizSpeed > 0.4) {
+        const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
+        this.ring.rotation.y = this.mesh.rotation.y;
+        const targetHeading = Math.atan2(desiredX, desiredZ);
+        const headingDiff = shortestAngleDelta(this.mesh.rotation.y, targetHeading);
+        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.75, -0.28, 0.28);
+        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 7.0));
+        this.ring.rotation.z = this.airBankAngle;
+        const targetPitch = THREE.MathUtils.clamp((horizSpeed / 20) * 0.1, -0.15, 0.15);
+        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 5.0));
+      } else {
+        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, Math.atan2(dirX, dirZ), 3.0, delta);
+        this.ring.rotation.y = this.mesh.rotation.y;
+        this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
+        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
+      }
+
+      // Independent chin/nose gun tracking for shooter
+      if (this.gunYawPivot) {
+        const sAimX = targetPos.x - this.body.position.x;
+        const sAimY = targetPos.y - this.body.position.y;
+        const sAimZ = targetPos.z - this.body.position.z;
+        const sHoriz = Math.max(1, Math.hypot(sAimX, sAimZ));
+        const sPlayerYaw = Math.atan2(sAimX, sAimZ);
+        const sBodyYaw = this.mesh.rotation.y;
+        let sRelYaw = sPlayerYaw - sBodyYaw;
+        while (sRelYaw < -Math.PI) sRelYaw += Math.PI * 2;
+        while (sRelYaw > Math.PI) sRelYaw -= Math.PI * 2;
+        sRelYaw = THREE.MathUtils.clamp(sRelYaw, -0.95, 0.95);
+        this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, sRelYaw, 4.5, delta);
+
+        if (this.cannonPitchPivot) {
+          const sPitch = THREE.MathUtils.clamp(-Math.atan2(sAimY, sHoriz), -0.6, 0.4);
+          this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, sPitch, 3.5, delta);
+        }
+      }
     }
 
     copyPhysicsPos(this.mesh, this.body.position);
     this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.04;
 
     if (this.enemyRotor) {
-      this.enemyRotor.rotation.y = time * 24.0;
+      this.enemyRotor.rotation.y += 28.0 * delta;
     }
     if (this.enemyTailRotor) {
-      this.enemyTailRotor.rotation.x = time * 28.0;
+      this.enemyTailRotor.rotation.x += 36.0 * delta;
     }
 
     return fired;
@@ -3997,6 +4207,59 @@ export class Enemy extends Entity {
     }
     this.applySmoothMovement(desiredX, desiredZ, delta, 6);
 
+    // Boss banking & independent gun aiming & reactor core pulse
+    if (this.coreGlowMesh) {
+      this.coreGlowMesh.scale.setScalar(1 + Math.sin(time * 6) * 0.08);
+    }
+
+    const bHorizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (bHorizSpeed > 0.4) {
+      const bMoveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, bMoveHeading, 3.5, delta);
+      this.ring.rotation.y = this.mesh.rotation.y;
+      const bTargetHeading = Math.atan2(desiredX, desiredZ);
+      const bHeadingDiff = shortestAngleDelta(this.mesh.rotation.y, bTargetHeading);
+      const bTargetBank = THREE.MathUtils.clamp(-bHeadingDiff * 0.5, -0.22, 0.22);
+      this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, bTargetBank, Math.min(1, delta * 5.0));
+      this.ring.rotation.z = this.airBankAngle;
+      const bTargetPitch = THREE.MathUtils.clamp((bHorizSpeed / 10) * 0.08, -0.12, 0.12);
+      this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, bTargetPitch, Math.min(1, delta * 4.0));
+    } else {
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, Math.atan2(dirX, dirZ), 2.5, delta);
+      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 3.0);
+      this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 3.0);
+    }
+
+    if (this.gunYawPivot) {
+      const bdx = targetPos.x - this.body.position.x;
+      const bdy = targetPos.y - this.body.position.y;
+      const bdz = targetPos.z - this.body.position.z;
+      const bHorizDist = Math.max(1, Math.hypot(bdx, bdz));
+      const bPlayerYaw = Math.atan2(bdx, bdz);
+      const bBodyYaw = this.mesh.rotation.y;
+      let bRelYaw = bPlayerYaw - bBodyYaw;
+      while (bRelYaw < -Math.PI) bRelYaw += Math.PI * 2;
+      while (bRelYaw > Math.PI) bRelYaw -= Math.PI * 2;
+      bRelYaw = THREE.MathUtils.clamp(bRelYaw, -0.95, 0.95);
+      this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, bRelYaw, 3.2, delta);
+
+      if (this.cannonPitchPivot) {
+        const bPitch = THREE.MathUtils.clamp(-Math.atan2(bdy, bHorizDist), -0.55, 0.35);
+        this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, bPitch, 2.5, delta);
+      }
+    }
+
+    let muzzleX = this.body.position.x;
+    let muzzleY = this.body.position.y + 0.35;
+    let muzzleZ = this.body.position.z;
+    if (this.muzzlePoint) {
+      this.muzzlePoint.getWorldPosition(_projPos);
+      muzzleX = _projPos.x;
+      muzzleY = _projPos.y;
+      muzzleZ = _projPos.z;
+    }
+
     let fired = false;
 
     // Telegraph attack (phase 1/2): beam warns the player, then fires
@@ -4014,9 +4277,9 @@ export class Enemy extends Entity {
           const cos = Math.cos(angle);
           const sin = Math.sin(angle);
           enemyProjectilePool.spawn(
-            this.body.position.x,
-            this.body.position.y + 0.35,
-            this.body.position.z,
+            muzzleX,
+            muzzleY,
+            muzzleZ,
             dirX * cos - dirZ * sin,
             dirX * sin + dirZ * cos,
             time,
@@ -4051,9 +4314,9 @@ export class Enemy extends Entity {
         const cos = Math.cos(angle);
         const sin = Math.sin(angle);
         enemyProjectilePool.spawn(
-          this.body.position.x,
-          this.body.position.y + 0.35,
-          this.body.position.z,
+          muzzleX,
+          muzzleY,
+          muzzleZ,
           dirX * cos - dirZ * sin,
           dirX * sin + dirZ * cos,
           time,
@@ -4074,9 +4337,9 @@ export class Enemy extends Entity {
         for (let i = 0; i < ringCount; i++) {
           const angle = (i / ringCount) * Math.PI * 2;
           enemyProjectilePool.spawn(
-            this.body.position.x,
-            this.body.position.y + 0.35,
-            this.body.position.z,
+            muzzleX,
+            muzzleY,
+            muzzleZ,
             Math.sin(angle),
             Math.cos(angle),
             time,
@@ -4144,7 +4407,6 @@ function getProjectileFinsGeometry(): THREE.BufferGeometry {
 
 const _projEuler = new THREE.Euler();
 const _projQuat = new THREE.Quaternion();
-const _projPos = new THREE.Vector3();
 const _projScale = new THREE.Vector3();
 const _projMatrix = new THREE.Matrix4();
 const _projHiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
