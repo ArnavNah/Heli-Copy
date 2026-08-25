@@ -2547,9 +2547,72 @@ export class Enemy extends Entity {
    * Variant combat behaviors — every non-standard enemy routes through here so
    * each role owns its movement, fire and telegraphs. Support drones (shield /
    * repair) recompute their targets from `allEnemies` every frame, so killing
-   * them removes the effect immediately with zero stale references.
+   * Specialized support, kamikaze, tank, infantry, and aerial combat methods.
    */
-  private updateVariant(
+  private updateKamikazeDroneAI(
+    targetPos: CANNON.Vec3,
+    time: number,
+    dist: number,
+    dirX: number,
+    dirZ: number,
+    repelForceX: number,
+    repelForceZ: number,
+    avoidForceX: number,
+    avoidForceZ: number,
+    delta: number,
+    targetVel: CANNON.Vec3 | null,
+  ): boolean {
+    const kamikazeSpeed = this.type === EnemyType.TANK ? 42 : 72;
+    this.variantTimer -= delta;
+
+    let desiredX = 0;
+    let desiredZ = 0;
+    let turnRate = 8.0;
+
+    if (this.variantPhase === 0) {
+      // Approach phase: curve toward player
+      desiredX = dirX * 35 + repelForceX + avoidForceX;
+      desiredZ = dirZ * 35 + repelForceZ + avoidForceZ;
+      if (dist < 110 && dist > 14) {
+        this.variantPhase = 1;
+        this.variantTimer = 0.65;
+      }
+    } else if (this.variantPhase === 1) {
+      // Telegraph phase: lock in place and warn player with bright red glow
+      desiredX = 0;
+      desiredZ = 0;
+      turnRate = 4.0;
+      if (this.variantTimer <= 0) {
+        this.variantPhase = 2;
+        this.variantTimer = 2.0;
+      }
+    } else {
+      // Dive phase: high-speed committed ramming run
+      turnRate = 3.2; // Reduced steering so dodge causes miss
+      desiredX = dirX * kamikazeSpeed + avoidForceX;
+      desiredZ = dirZ * kamikazeSpeed + avoidForceZ;
+      if (this.variantTimer <= 0 || dist < 6) {
+        this.variantPhase = 0;
+      }
+    }
+
+    this.applySmoothMovement(desiredX, desiredZ, delta, turnRate);
+
+    const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (horizSpeed > 0.5) {
+      const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, turnRate, delta);
+      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.z = Math.sin(time * 6) * 0.08;
+      this.ring.rotation.x = Math.min(0.25, (horizSpeed / kamikazeSpeed) * 0.2);
+    }
+
+    this.showTelegraph(time, this.variantPhase === 1, 0xff2244);
+    copyPhysicsPos(this.mesh, this.body.position);
+    return false;
+  }
+
+  private updateSupportDroneAI(
     targetPos: CANNON.Vec3,
     time: number,
     dist: number,
@@ -2560,37 +2623,30 @@ export class Enemy extends Entity {
     repelForceZ: number,
     avoidForceX: number,
     avoidForceZ: number,
-    fireRateMult: number,
     delta: number,
     allEnemies: Enemy[],
     playerBody: CANNON.Body | null,
     city: CityEnvironment,
-    targetVel: CANNON.Vec3 | null,
   ): boolean {
     const v = ENEMY_VARIANTS[this.variant];
 
-    // ---- SHIELD DRONE: damage-reduction aura on nearby allies ----
     if (this.variant === EnemyVariant.SHIELD_DRONE) {
-      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 60);
+      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 55);
       let support: Enemy | null = null;
       for (const ally of allEnemies) {
         if (ally === this || !ally.active || ally.variant === EnemyVariant.SHIELD_DRONE) continue;
         const ax = ally.body.position.x - this.body.position.x;
         const az = ally.body.position.z - this.body.position.z;
         if (ax * ax + az * az < 110 * 110) {
-          ally.incomingDamageMult = 0.55; // 45% damage reduction while shielded
+          ally.incomingDamageMult = 0.55;
           if (!support) support = ally;
         }
       }
       this.supportTarget = support;
       this.supportLineColor = 0x55eeff;
       this.pulseSupport(time, 0x55eeff);
-      return false;
-    }
-
-    // ---- REPAIR DRONE: slow hull repair on the nearest damaged ally ----
-    if (this.variant === EnemyVariant.REPAIR_DRONE) {
-      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 70);
+    } else if (this.variant === EnemyVariant.REPAIR_DRONE) {
+      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 65);
       let best: Enemy | null = null;
       let bestDist = Infinity;
       for (const ally of allEnemies) {
@@ -2607,309 +2663,11 @@ export class Enemy extends Entity {
       this.supportTarget = best;
       this.supportLineColor = 0x55ff99;
       this.pulseSupport(time, 0x55ff99);
-      return false;
-    }
-
-    // ---- KAMIKAZE DRONE: red pulse → hold → high-speed dive ----
-    if (this.variant === EnemyVariant.KAMIKAZE_DRONE) {
+    } else if (this.variant === EnemyVariant.MINELAYER) {
+      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 110);
       this.variantTimer -= delta;
-      if (this.variantPhase === 0) {
-        this.applySmoothMovement(dirX * 30 + repelForceX + avoidForceX, dirZ * 30 + repelForceZ + avoidForceZ, delta, 10);
-        if (dist < 130 && dist > 12) {
-          this.variantPhase = 1;
-          this.variantTimer = 0.75;
-        }
-      } else if (this.variantPhase === 1) {
-        this.applySmoothMovement(0, 0, delta, 6); // lock in place, warn the player
-        if (this.variantTimer <= 0) {
-          this.variantPhase = 2;
-          this.variantTimer = 2.2;
-        }
-      } else {
-        // Dive — the engine's proximity ram check handles the impact explosion.
-        this.applySmoothMovement(dirX * 95 + avoidForceX, dirZ * 95 + avoidForceZ, delta, 30);
-        if (this.variantTimer <= 0 || dist < 8) this.variantPhase = 0;
-      }
-      this.showTelegraph(time, this.variantPhase === 1, 0xff2244);
-      return false;
-    }
-
-    // ---- GUNSHIPS (attack / rocket / heavy): strafe + telegraphed bursts ----
-    if (
-      this.variant === EnemyVariant.ATTACK_GUNSHIP ||
-      this.variant === EnemyVariant.ROCKET_GUNSHIP ||
-      this.variant === EnemyVariant.HEAVY_GUNSHIP
-    ) {
-      const isRocket = this.variant === EnemyVariant.ROCKET_GUNSHIP;
-      const isHeavy = this.variant === EnemyVariant.HEAVY_GUNSHIP;
-      const speed = 20 * v.speedMult;
-      const holdRange = isRocket ? 110 : isHeavy ? 85 : 60;
-      const tangentX = -dirZ * this.flankDir;
-      const tangentZ = dirX * this.flankDir;
-      let mx: number;
-      let mz: number;
-      if (dist < holdRange - 15) {
-        mx = (-dirX + tangentX * 0.8) * speed;
-        mz = (-dirZ + tangentZ * 0.8) * speed;
-      } else if (dist > holdRange + 35) {
-        mx = dirX * speed;
-        mz = dirZ * speed;
-      } else {
-        mx = (tangentX + dirX * 0.15) * speed;
-        mz = (tangentZ + dirZ * 0.15) * speed;
-      }
-      this.applySmoothMovement(mx + repelForceX + avoidForceX, mz + repelForceZ + avoidForceZ, delta, this.smoothRate());
-
-      // Attack cycle: cooldown → telegraph (rockets) → burst → cooldown
-      const fireRange = isRocket ? 150 : isHeavy ? 120 : 95;
-      const burst = isRocket ? 3 : isHeavy ? 3 : 2;
-      const interval = isRocket ? 0.26 : isHeavy ? 0.17 : 0.12;
-      const cooldown = isRocket ? 3.4 : isHeavy ? 2.6 : 2.0;
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < fireRange && this.hasLineOfSight(city, targetPos)) {
-        const useRockets = isRocket || (isHeavy && Math.random() < 0.45);
-        this.burstIsRockets = useRockets;
-        if (useRockets) {
-          this.variantPhase = 1;
-          this.variantTimer = 0.8;
-          this.lockAnnounced = false;
-        } else {
-          this.variantPhase = 2;
-          this.variantTimer = 0;
-          this.burstShotCount = 0;
-        }
-      }
-      if (this.variantPhase === 1) {
-        if (this.variantTimer <= 0) {
-          this.variantPhase = 2;
-          this.variantTimer = 0;
-          this.burstShotCount = 0;
-        }
-      } else if (this.variantPhase === 2) {
-        if (this.variantTimer <= 0) {
-          const rockets = isRocket || (isHeavy && this.burstIsRockets);
-          const aim = this.leadAim(targetPos, targetVel, rockets ? 95 : 130);
-          pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 0.4,
-            this.body.position.z,
-            aim.x,
-            aim.z,
-            time,
-            rockets ? 95 : 130,
-            Math.round((rockets ? 10 : 6) * v.damageMult * this.waveDamageMult),
-            rockets ? 5 : 0,
-            rockets ? 0xffaa33 : isHeavy ? 0xff6677 : 0xff5544,
-          );
-          this.burstShotCount++;
-          if (this.burstShotCount >= burst) {
-            this.variantPhase = 0;
-            this.variantTimer = cooldown;
-          } else {
-            this.variantTimer = interval;
-          }
-        }
-      }
-      this.showTelegraph(time, this.variantPhase === 1, 0xffaa33);
-      return false;
-    }
-
-    // ---- FLAK TANK: rapid tracking burst ----
-    if (this.variant === EnemyVariant.FLAK_TANK) {
-      const speed = 15 * v.speedMult;
-      this.applySmoothMovement(dirX * speed + repelForceX + avoidForceX, dirZ * speed + repelForceZ + avoidForceZ, delta, this.smoothRate());
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 150 && this.hasLineOfSight(city, targetPos)) {
-        this.variantPhase = 2;
-        this.variantTimer = 0;
-        this.burstShotCount = 0;
-      } else if (this.variantPhase === 2) {
-        if (this.variantTimer <= 0) {
-          const aim = this.leadAim(targetPos, targetVel, 150);
-          pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 1.4,
-            this.body.position.z,
-            aim.x,
-            aim.z,
-            time,
-            150,
-            Math.round(3 * v.damageMult * this.waveDamageMult),
-            0,
-            0xffaa33,
-          );
-          this.burstShotCount++;
-          if (this.burstShotCount >= 5) {
-            this.variantPhase = 0;
-            this.variantTimer = 2.3;
-          } else {
-            this.variantTimer = 0.11;
-          }
-        }
-      }
-      this.showTelegraph(time, this.variantPhase === 2, 0xff8833);
-      return false;
-    }
-
-    // ---- MISSILE CARRIER: amber lock → telegraphed homing missile ----
-    if (this.variant === EnemyVariant.MISSILE_CARRIER) {
-      const speed = 12 * v.speedMult;
-      const mx2 = dist > 170 ? dirX * speed : -dirX * speed * 0.5;
-      const mz2 = dist > 170 ? dirZ * speed : -dirZ * speed * 0.5;
-      this.applySmoothMovement(mx2 + repelForceX + avoidForceX, mz2 + repelForceZ + avoidForceZ, delta, this.smoothRate());
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 200) {
+      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 220) {
         this.variantPhase = 1;
-        this.variantTimer = 0.9;
-        this.lockAnnounced = false;
-      } else if (this.variantPhase === 1) {
-        if (this.variantTimer <= 0) {
-          this.variantPhase = 2;
-          this.variantTimer = 4.2;
-          pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 2.1,
-            this.body.position.z,
-            dirX,
-            dirZ,
-            time,
-            130 * this.projSpeedMult,
-            Math.round(12 * v.damageMult * this.waveDamageMult),
-            6,
-            0xffc23f,
-            playerBody ? { body: playerBody, active: true } : null,
-            2.5 * this.homingMult,
-            0,
-            0,
-            this.waveDamageMult,
-          );
-        }
-      } else {
-        if (this.variantTimer <= 0) this.variantPhase = 0;
-      }
-      this.showTelegraph(time, this.variantPhase === 1, 0xffc23f);
-      return false;
-    }
-
-    // ---- SIEGE TANK: deploy → ground marker → lobbed artillery → reposition ----
-    if (this.variant === EnemyVariant.SIEGE_TANK) {
-      const speed = 11 * v.speedMult;
-      if (this.variantPhase === 0) {
-        const mx2 = dist > 170 ? dirX * speed : this.tangentX(dirX, dirZ, speed);
-        const mz2 = dist > 170 ? dirZ * speed : this.tangentZ(dirX, dirZ, speed);
-        this.applySmoothMovement(mx2 + repelForceX + avoidForceX, mz2 + repelForceZ + avoidForceZ, delta, this.smoothRate());
-        if (dist < 175) {
-          this.variantPhase = 1;
-          this.variantTimer = 1.1;
-        }
-      } else if (this.variantPhase === 1) {
-        // Deploy — stop and brace
-        this.applySmoothMovement(0, 0, delta, 6);
-        if (this.variantTimer <= 0) {
-          this.variantPhase = 2;
-          this.variantTimer = 1.0;
-          this.placeSiegeMarker(dirX, dirZ);
-        }
-      } else if (this.variantPhase === 2) {
-        this.applySmoothMovement(0, 0, delta, 6);
-        if (this.variantTimer <= 0) {
-          // Fire the lobbed shell at the marker location
-          pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 1.2,
-            this.body.position.z,
-            dirX,
-            dirZ,
-            time,
-            150,
-            Math.round(16 * v.damageMult * this.waveDamageMult),
-            8,
-            0xff7744,
-            null,
-            0,
-            46,
-            95,
-            this.waveDamageMult,
-          );
-          this.hideSiegeMarker();
-          this.variantPhase = 3;
-          this.variantTimer = 3.0;
-        }
-      } else {
-        // Reposition — sidestep away from the last shot
-        this.applySmoothMovement(
-          this.tangentX(dirX, dirZ, speed * 1.3) + repelForceX + avoidForceX,
-          this.tangentZ(dirX, dirZ, speed * 1.3) + repelForceZ + avoidForceZ,
-          delta,
-          this.smoothRate(),
-        );
-        if (this.variantTimer <= 0) this.variantPhase = 0;
-      }
-      this.showTelegraph(time, this.variantPhase === 2, 0xff7744);
-      return false;
-    }
-
-    // ---- INTERCEPTOR: fast approach → strafe-through burst → peel off ----
-    if (this.variant === EnemyVariant.INTERCEPTOR) {
-      const speed = 62 * v.speedMult;
-      const tangentX = -dirZ * this.flankDir;
-      const tangentZ = dirX * this.flankDir;
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0) {
-        // Approach — fast and direct
-        this.applySmoothMovement(dirX * speed + repelForceX + avoidForceX, dirZ * speed + repelForceZ + avoidForceZ, delta, 14);
-        if (dist < 95 && this.hasLineOfSight(city, targetPos)) {
-          this.variantPhase = 1;
-          this.burstShotCount = 0;
-          this.variantTimer = 0;
-        }
-      } else if (this.variantPhase === 1) {
-        // Strafe-through: keep speed, arc past the target while bursting
-        this.applySmoothMovement(
-          (dirX * 0.35 + tangentX) * speed + avoidForceX,
-          (dirZ * 0.35 + tangentZ) * speed + avoidForceZ,
-          delta, 10,
-        );
-        if (this.variantTimer <= 0 && this.burstShotCount < 3) {
-          const aim = this.leadAim(targetPos, targetVel, 175);
-          pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 0.2,
-            this.body.position.z,
-            aim.x,
-            aim.z,
-            time,
-            175,
-            Math.round(4 * v.damageMult * this.waveDamageMult),
-            0,
-            0x55aaff,
-          );
-          this.burstShotCount++;
-          this.variantTimer = 0.09;
-        }
-        if (this.burstShotCount >= 3) {
-          this.variantPhase = 2;
-          this.variantTimer = 1.7;
-        }
-      } else {
-        // Peel off — swing wide before lining up the next pass
-        this.applySmoothMovement(
-          (-dirX * 0.5 + tangentX) * speed * 0.8 + avoidForceX,
-          (-dirZ * 0.5 + tangentZ) * speed * 0.8 + avoidForceZ,
-          delta, 8,
-        );
-        if (this.variantTimer <= 0) this.variantPhase = 0;
-      }
-      this.showTelegraph(time, this.variantPhase === 1, 0x55aaff);
-      return false;
-    }
-
-    // ---- MINELAYER: keeps its distance and seeds slow homing mines ----
-    if (this.variant === EnemyVariant.MINELAYER) {
-      this.hoverBehindGroup(dirX, dirZ, dist, repelForceX, repelForceZ, avoidForceX, avoidForceZ, delta, 130);
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 240) {
-        this.variantPhase = 1; // arming telegraph
         this.variantTimer = 0.8;
       } else if (this.variantPhase === 1 && this.variantTimer <= 0) {
         this.variantPhase = 2;
@@ -2924,12 +2682,12 @@ export class Enemy extends Entity {
             dirX,
             dirZ,
             time,
-            13, // slow drift — the mine is the trap, not the bullet
-            Math.round(12 * v.damageMult * this.waveDamageMult),
-            11, // proximity blast radius
+            14,
+            Math.round(12 * (v?.damageMult ?? 1) * this.waveDamageMult),
+            10,
             0xff44aa,
             playerBody ? { body: playerBody, active: true } : null,
-            1.1 * this.homingMult, // gentle homing
+            1.1 * this.homingMult,
             0,
             0,
             this.waveDamageMult,
@@ -2939,70 +2697,805 @@ export class Enemy extends Entity {
         }
         if (this.burstShotCount >= 3) {
           this.variantPhase = 0;
-          this.variantTimer = 4.2;
+          this.variantTimer = 4.0;
         }
       }
       this.showTelegraph(time, this.variantPhase === 1, 0xff44aa);
-      return false;
     }
 
-    // ---- GATLING HEAVY: telegraphed wind-up, then a tracking shell stream ----
-    if (this.variant === EnemyVariant.GATLING_HEAVY) {
-      const speed = 13 * v.speedMult;
-      const tangentX = -dirZ * this.flankDir;
-      const tangentZ = dirX * this.flankDir;
-      let mx: number;
-      let mz: number;
-      if (dist < 75) {
-        mx = (-dirX + tangentX * 0.6) * speed;
-        mz = (-dirZ + tangentZ * 0.6) * speed;
-      } else if (dist > 130) {
-        mx = dirX * speed;
-        mz = dirZ * speed;
-      } else {
-        mx = (tangentX + dirX * 0.1) * speed;
-        mz = (tangentZ + dirZ * 0.1) * speed;
-      }
-      this.applySmoothMovement(mx + repelForceX + avoidForceX, mz + repelForceZ + avoidForceZ, delta, this.smoothRate());
+    const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (horizSpeed > 0.4) {
+      const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
+      this.ring.rotation.y = this.mesh.rotation.y;
+    }
+    if (this.enemyRotor) this.enemyRotor.rotation.y += 30 * delta;
+    if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 36 * delta;
 
-      this.variantTimer -= delta;
-      if (this.variantPhase === 0 && this.variantTimer <= 0 && dist < 165 && this.hasLineOfSight(city, targetPos)) {
-        this.variantPhase = 1; // spin-up telegraph — the tell for the stream
-        this.variantTimer = 0.9;
-      } else if (this.variantPhase === 1 && this.variantTimer <= 0) {
-        this.variantPhase = 2;
+    copyPhysicsPos(this.mesh, this.body.position);
+    return false;
+  }
+
+  private updateTankAI(
+    targetPos: CANNON.Vec3,
+    time: number,
+    dist: number,
+    dirX: number,
+    dirZ: number,
+    pool: ProjectilePool,
+    repelForceX: number,
+    repelForceZ: number,
+    avoidForceX: number,
+    avoidForceZ: number,
+    fireRateMult: number,
+    delta: number,
+    city: CityEnvironment,
+    targetVel: CANNON.Vec3 | null,
+    combatDirector?: CombatDirector | null,
+    currentWave: number = 1,
+    isBossActive: boolean = false,
+    playerBody: CANNON.Body | null = null,
+  ): boolean {
+    let fired = false;
+    const v = this.variant !== EnemyVariant.STANDARD ? ENEMY_VARIANTS[this.variant] : null;
+    let tankSpeed = 13 * (v ? v.speedMult : 1.0);
+
+    const isFlak = this.variant === EnemyVariant.FLAK_TANK;
+    const isMissile = this.variant === EnemyVariant.MISSILE_CARRIER;
+    const isSiege = this.variant === EnemyVariant.SIEGE_TANK;
+
+    // Ground clearance clamp
+    const clearance = 2.5;
+    const groundY = city ? city.getHeightAt(this.body.position.x, this.body.position.z, clearance) : 0;
+    this.body.position.y = Math.max(1.2, groundY + 1.2);
+    this.body.velocity.y = 0;
+
+    const dx = targetPos.x - this.body.position.x;
+    const dy = targetPos.y - this.body.position.y;
+    const dz = targetPos.z - this.body.position.z;
+    const horizDist = Math.max(1, Math.hypot(dx, dz));
+    const hasLOS = this.hasLineOfSight(city, targetPos);
+
+    let desiredX = 0;
+    let desiredZ = 0;
+
+    this.tankStateTimer += delta;
+
+    // Tank Tactical State Machine
+    if (this.tankCombatState === TankCombatState.MOVE_TO_LANE) {
+      desiredX = dirX * tankSpeed + repelForceX * 1.2 + avoidForceX;
+      desiredZ = dirZ * tankSpeed + repelForceZ * 1.2 + avoidForceZ;
+
+      const readyRange = isMissile ? 175 : isSiege ? 160 : 85;
+      if (hasLOS && dist < readyRange && dist > 18) {
+        this.tankCombatState = TankCombatState.AIM;
+        this.tankStateTimer = 0;
+      }
+    } else if (this.tankCombatState === TankCombatState.AIM) {
+      tankSpeed = 3;
+      desiredX = dirX * tankSpeed + repelForceX + avoidForceX;
+      desiredZ = dirZ * tankSpeed + repelForceZ + avoidForceZ;
+
+      const canShoot = combatDirector
+        ? combatDirector.requestHeavyAttackSlot(this.id, "TANK", time, currentWave, isBossActive, 2.0) &&
+          combatDirector.requestGroundAttackSlot(this.id, time, currentWave, isBossActive)
+        : time - this.lastShotTime > (isFlak ? 2.4 : isMissile ? 4.0 : 3.2) * fireRateMult;
+
+      if (canShoot && hasLOS && time - this.lastShotTime > 2.5 * fireRateMult) {
+        this.tankCombatState = TankCombatState.FIRE;
+        this.tankAimTimer = isMissile ? 0.9 : isSiege ? 1.0 : 0.35;
+        this.tankStateTimer = 0;
         this.burstShotCount = 0;
-        this.variantTimer = 0;
-      } else if (this.variantPhase === 2) {
-        if (this.variantTimer <= 0 && this.burstShotCount < 14) {
-          const spread = 0.11;
-          const aim = this.leadAim(targetPos, targetVel, 185);
+        if (isSiege) this.placeSiegeMarker(dirX, dirZ);
+      } else if (!hasLOS || dist > 190) {
+        this.tankCombatState = TankCombatState.MOVE_TO_LANE;
+        this.tankStateTimer = 0;
+      }
+    } else if (this.tankCombatState === TankCombatState.FIRE) {
+      desiredX = 0;
+      desiredZ = 0;
+
+      if (this.tankAimTimer > 0) {
+        this.tankAimTimer -= delta;
+        if (this.tankTelegraphMesh) {
+          (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.88;
+        }
+      } else {
+        if (this.tankTelegraphMesh) {
+          (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.0;
+        }
+
+        let muzzleX = this.body.position.x;
+        let muzzleY = this.body.position.y + 1.8;
+        let muzzleZ = this.body.position.z;
+        if (this.muzzlePoint) {
+          this.muzzlePoint.getWorldPosition(_projPos);
+          muzzleX = _projPos.x;
+          muzzleY = _projPos.y;
+          muzzleZ = _projPos.z;
+        }
+
+        if (isFlak) {
+          // Flak burst
+          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 150), dist);
           pool.spawn(
-            this.body.position.x,
-            this.body.position.y + 1.15,
-            this.body.position.z,
-            aim.x + (Math.random() - 0.5) * spread,
-            aim.z + (Math.random() - 0.5) * spread,
+            muzzleX,
+            muzzleY,
+            muzzleZ,
+            aim.x,
+            aim.z,
             time,
-            185,
-            Math.max(2, Math.round(2.5 * v.damageMult * this.waveDamageMult)),
+            150 * this.projSpeedMult,
+            Math.round(3 * (v?.damageMult ?? 1) * this.waveDamageMult),
             0,
-            0xffd92e,
+            0xffaa33,
+            null,
+            0,
+            (aim.y ?? 0) * 150,
+            0,
+            this.waveDamageMult,
           );
           this.burstShotCount++;
-          this.variantTimer = 0.065;
-        }
-        if (this.burstShotCount >= 14) {
-          this.variantPhase = 0;
-          this.variantTimer = 3.4;
+          if (this.burstShotCount >= 5) {
+            this.finishTankShot(time, combatDirector);
+          } else {
+            this.tankAimTimer = 0.11;
+          }
+          fired = true;
+        } else if (isMissile) {
+          // Missile lock fire
+          pool.spawn(
+            muzzleX,
+            muzzleY + 0.3,
+            muzzleZ,
+            dirX,
+            dirZ,
+            time,
+            130 * this.projSpeedMult,
+            Math.round(12 * (v?.damageMult ?? 1) * this.waveDamageMult),
+            6,
+            0xffc23f,
+            playerBody ? { body: playerBody, active: true } : null,
+            2.5 * this.homingMult,
+            0,
+            0,
+            this.waveDamageMult,
+          );
+          this.finishTankShot(time, combatDirector);
+          fired = true;
+        } else if (isSiege) {
+          // Lobbed artillery shell
+          pool.spawn(
+            muzzleX,
+            muzzleY,
+            muzzleZ,
+            dirX,
+            dirZ,
+            time,
+            150,
+            Math.round(16 * (v?.damageMult ?? 1) * this.waveDamageMult),
+            8,
+            0xff7744,
+            null,
+            0,
+            46,
+            95,
+            this.waveDamageMult,
+          );
+          this.hideSiegeMarker();
+          this.finishTankShot(time, combatDirector);
+          fired = true;
+        } else {
+          // Standard Tank Cannon
+          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 110), dist);
+          pool.spawn(
+            muzzleX,
+            muzzleY,
+            muzzleZ,
+            aim.x,
+            aim.z,
+            time,
+            110 * this.projSpeedMult,
+            18 * this.waveDamageMult,
+            0,
+            0xff8833,
+            null,
+            0,
+            (aim.y ?? 0) * 110,
+            0,
+            this.waveDamageMult,
+          );
+          this.finishTankShot(time, combatDirector);
+          fired = true;
         }
       }
-      this.showTelegraph(time, this.variantPhase === 1 || this.variantPhase === 2, 0xffd92e);
-      return false;
+    } else if (this.tankCombatState === TankCombatState.REPOSITION) {
+      const tangentX = -dirZ * this.flankDir;
+      const tangentZ = dirX * this.flankDir;
+      desiredX = (tangentX * 1.1 + dirX * 0.2) * tankSpeed + repelForceX + avoidForceX;
+      desiredZ = (tangentZ * 1.1 + dirZ * 0.2) * tankSpeed + repelForceZ + avoidForceZ;
+
+      if (this.tankStateTimer > 2.2 || time - this.lastShotTime > 3.2) {
+        this.tankCombatState = TankCombatState.AIM;
+        this.tankStateTimer = 0;
+      }
     }
 
-    // Unknown/standard variants should never reach here
-    return false;
+    this.applySmoothMovement(desiredX, desiredZ, delta, 5.0);
+
+    // Chassis faces movement heading
+    const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (horizSpeed > 0.4) {
+      const moveHeading = Math.atan2(this.smoothVelX || desiredX, this.smoothVelZ || desiredZ);
+      this.mesh.rotation.y = moveHeading;
+    }
+
+    // Independent Turret Yaw
+    if (this.turretYawPivot) {
+      const playerYaw = Math.atan2(dx, dz);
+      const chassisYaw = this.mesh.rotation.y;
+      let relYaw = playerYaw - chassisYaw;
+      while (relYaw < -Math.PI) relYaw += Math.PI * 2;
+      while (relYaw > Math.PI) relYaw -= Math.PI * 2;
+      this.turretYawPivot.rotation.y = stepAngle(this.turretYawPivot.rotation.y, relYaw, 3.4, delta);
+    }
+
+    // Independent Cannon Pitch
+    if (this.cannonPitchPivot) {
+      const targetPitch = THREE.MathUtils.clamp(-Math.atan2(dy, horizDist), -0.75, 0.15);
+      this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, targetPitch, 2.6, delta);
+    }
+
+    copyPhysicsPos(this.mesh, this.body.position);
+    return fired;
+  }
+
+  private finishTankShot(time: number, combatDirector?: CombatDirector | null) {
+    this.lastShotTime = time;
+    if (combatDirector) {
+      combatDirector.releaseGroundAttackSlot(this.id, time, 3.2);
+      combatDirector.releaseHeavyAttackSlot(this.id, time, 3.2);
+    }
+    this.tankCombatState = TankCombatState.REPOSITION;
+    this.tankStateTimer = 0;
+  }
+
+  private updateInfantryAI(
+    targetPos: CANNON.Vec3,
+    time: number,
+    dist: number,
+    dirX: number,
+    dirZ: number,
+    pool: ProjectilePool,
+    repelForceX: number,
+    repelForceZ: number,
+    avoidForceX: number,
+    avoidForceZ: number,
+    fireRateMult: number,
+    delta: number,
+    city: CityEnvironment,
+    targetVel: CANNON.Vec3 | null,
+  ): boolean {
+    let fired = false;
+    const speed = 14;
+
+    const tangentX = -dirZ * this.flankDir;
+    const tangentZ = dirX * this.flankDir;
+    let desiredX: number;
+    let desiredZ: number;
+
+    if (dist > 45) {
+      desiredX = dirX * speed + repelForceX + avoidForceX;
+      desiredZ = dirZ * speed + repelForceZ + avoidForceZ;
+    } else if (dist < 18) {
+      desiredX = (-dirX + tangentX * 1.2) * speed * 0.7 + repelForceX + avoidForceX;
+      desiredZ = (-dirZ + tangentZ * 1.2) * speed * 0.7 + repelForceZ + avoidForceZ;
+    } else {
+      desiredX = (tangentX + dirX * 0.2) * speed * 0.6 + repelForceX + avoidForceX;
+      desiredZ = (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ + avoidForceZ;
+    }
+
+    this.applySmoothMovement(desiredX, desiredZ, delta, 6.0);
+
+    const groundY = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 1.0) : 0;
+    this.body.position.y = Math.max(0.6, groundY + 0.6);
+    this.body.velocity.y = 0;
+
+    const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (horizSpeed > 0.3) {
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, Math.atan2(this.smoothVelX, this.smoothVelZ), 5.0, delta);
+    }
+
+    // Staggered 3-round rifle bursts
+    if (this.infantryBurstRemaining > 0) {
+      this.infantryBurstTimer -= delta;
+      if (this.infantryBurstTimer <= 0) {
+        const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 140), dist);
+        pool.spawn(
+          this.body.position.x + (Math.random() - 0.5) * 1.2,
+          this.body.position.y + 0.8,
+          this.body.position.z + (Math.random() - 0.5) * 1.2,
+          aim.x,
+          aim.z,
+          time,
+          140 * this.projSpeedMult,
+          3,
+          0,
+          0xffd92e,
+          null,
+          0,
+          (aim.y ?? 0) * 140,
+          0,
+          this.waveDamageMult,
+        );
+        this.infantryBurstRemaining--;
+        this.infantryBurstTimer = 0.12;
+        fired = true;
+      }
+    } else if (
+      dist < 65 &&
+      time - this.lastShotTime > (2.5 + this.infantryBurstStagger) * fireRateMult &&
+      this.hasLineOfSight(city, targetPos)
+    ) {
+      this.lastShotTime = time;
+      this.infantryBurstRemaining = 3;
+      this.infantryBurstTimer = 0;
+    }
+
+    copyPhysicsPos(this.mesh, this.body.position);
+    return fired;
+  }
+
+  private updateAirCombatAI(
+    targetPos: CANNON.Vec3,
+    time: number,
+    dist: number,
+    dirX: number,
+    dirZ: number,
+    pool: ProjectilePool,
+    repelForceX: number,
+    repelForceZ: number,
+    avoidForceX: number,
+    avoidForceZ: number,
+    fireRateMult: number,
+    delta: number,
+    city: CityEnvironment,
+    targetVel: CANNON.Vec3 | null,
+    combatDirector?: CombatDirector | null,
+    currentWave: number = 1,
+    threatLevel: number = 1,
+    isOverdrive: boolean = false,
+    overdriveMultiplier: number = 1.0,
+    isBossActive: boolean = false,
+  ): boolean {
+    let fired = false;
+    const v = this.variant !== EnemyVariant.STANDARD ? ENEMY_VARIANTS[this.variant] : null;
+
+    // Role profile determination
+    const isInterceptor = this.variant === EnemyVariant.INTERCEPTOR;
+    const isRocket = this.variant === EnemyVariant.ROCKET_GUNSHIP;
+    const isHeavy = this.variant === EnemyVariant.HEAVY_GUNSHIP;
+    const isGatling = this.variant === EnemyVariant.GATLING_HEAVY;
+    const isAttackGunship = this.variant === EnemyVariant.ATTACK_GUNSHIP || this.type === EnemyType.SHOOTER;
+
+    // Standoff & Speed Configuration
+    let approachStandoff = 48.0;
+    let cruiseSpeed = 36;
+    let attackSpeed = 50;
+    let breakawaySpeed = 40;
+    let attackRunDuration = 1.35;
+    let attackTelegraphDuration = 0.22;
+    let smoothTurnRate = 7.5;
+    let attackSteerRate = 2.4;
+    let maxBank = 0.30;
+    let burstTotalShots = 2;
+    let burstShotInterval = 0.09;
+    let bulletSpeed = 160;
+    let bulletDamage = 4;
+    let bulletColor = 0xff3b22;
+    let isRockets = false;
+    let blastRadius = 0;
+    let personalCooldown = 2.6 + Math.random() * 0.8;
+
+    if (isInterceptor) {
+      approachStandoff = 52.0;
+      cruiseSpeed = 42;
+      attackSpeed = 62;
+      breakawaySpeed = 48;
+      attackRunDuration = 1.1;
+      attackTelegraphDuration = 0.18;
+      smoothTurnRate = 9.0;
+      attackSteerRate = 2.2;
+      maxBank = 0.45;
+      burstTotalShots = 3;
+      burstShotInterval = 0.08;
+      bulletSpeed = 175;
+      bulletDamage = 4;
+      bulletColor = 0x55aaff;
+      personalCooldown = 2.0 + Math.random() * 0.6;
+    } else if (isRocket) {
+      approachStandoff = 65.0;
+      cruiseSpeed = 28;
+      attackSpeed = 38;
+      breakawaySpeed = 34;
+      attackRunDuration = 1.6;
+      attackTelegraphDuration = 0.35;
+      smoothTurnRate = 5.0;
+      attackSteerRate = 1.8;
+      maxBank = 0.30;
+      burstTotalShots = 3;
+      burstShotInterval = 0.22;
+      bulletSpeed = 105;
+      bulletDamage = 10;
+      bulletColor = 0xffaa33;
+      isRockets = true;
+      blastRadius = 5;
+      personalCooldown = 3.2 + Math.random() * 0.8;
+    } else if (isHeavy) {
+      approachStandoff = 58.0;
+      cruiseSpeed = 26;
+      attackSpeed = 34;
+      breakawaySpeed = 30;
+      attackRunDuration = 1.8;
+      attackTelegraphDuration = 0.30;
+      smoothTurnRate = 4.2;
+      attackSteerRate = 1.6;
+      maxBank = 0.26;
+      burstTotalShots = 4;
+      burstShotInterval = 0.14;
+      bulletSpeed = 140;
+      bulletDamage = 7;
+      bulletColor = 0xff4455;
+      personalCooldown = 3.4 + Math.random() * 0.8;
+    } else if (isGatling) {
+      approachStandoff = 56.0;
+      cruiseSpeed = 26;
+      attackSpeed = 34;
+      breakawaySpeed = 30;
+      attackRunDuration = 1.8;
+      attackTelegraphDuration = 0.32;
+      smoothTurnRate = 4.2;
+      attackSteerRate = 1.6;
+      maxBank = 0.26;
+      burstTotalShots = 8;
+      burstShotInterval = 0.065;
+      bulletSpeed = 175;
+      bulletDamage = 3;
+      bulletColor = 0xffd92e;
+      personalCooldown = 3.4 + Math.random() * 0.8;
+    } else if (isAttackGunship) {
+      approachStandoff = 54.0;
+      cruiseSpeed = 32;
+      attackSpeed = 44;
+      breakawaySpeed = 36;
+      attackRunDuration = 1.5;
+      attackTelegraphDuration = 0.25;
+      smoothTurnRate = 5.8;
+      attackSteerRate = 2.0;
+      maxBank = 0.32;
+      burstTotalShots = 3;
+      burstShotInterval = 0.12;
+      bulletSpeed = 145;
+      bulletDamage = 5;
+      bulletColor = 0xff5533;
+      personalCooldown = 2.8 + Math.random() * 0.8;
+    }
+
+    if (v) {
+      bulletDamage = Math.round(bulletDamage * v.damageMult);
+      cruiseSpeed *= v.speedMult;
+      attackSpeed *= v.speedMult;
+      breakawaySpeed *= v.speedMult;
+    }
+
+    // 1. Altitude calculation & safe height / building avoidance
+    const roleAltitudeOffset = this.altitudeOffset || 0;
+    let desiredAltitude = targetPos.y + roleAltitudeOffset;
+
+    if (time - this.lastObstacleCheckTime > 0.16) {
+      this.lastObstacleCheckTime = time;
+      const forwardSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+      const lookAheadDist = Math.max(14, forwardSpeed * 0.65);
+      const heading = this.mesh.rotation.y;
+      const aheadX = this.body.position.x + Math.sin(heading) * lookAheadDist;
+      const aheadZ = this.body.position.z + Math.cos(heading) * lookAheadDist;
+      const groundHere = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 2.0) : 0;
+      const groundAhead = city ? city.getHeightAt(aheadX, aheadZ, 2.0) : 0;
+      this.cachedSafeAltitude = Math.max(groundHere, groundAhead) + 5.5;
+    }
+    if (desiredAltitude < this.cachedSafeAltitude) {
+      desiredAltitude = this.cachedSafeAltitude;
+    }
+
+    // Vertical smoothing
+    const altitudeDiff = desiredAltitude - this.body.position.y;
+    const desiredVerticalVel = THREE.MathUtils.clamp(altitudeDiff * 3.5, -16, 18);
+    this.smoothVelY = THREE.MathUtils.lerp(this.smoothVelY, desiredVerticalVel, Math.min(1, delta * 5.0));
+    this.body.position.y += this.smoothVelY * delta;
+    this.body.velocity.y = this.smoothVelY;
+
+    // 2. Predictive interception coordinates
+    const predTime = THREE.MathUtils.clamp(dist / Math.max(1, attackSpeed), 0.3, 1.25);
+    const predPlayerX = targetPos.x + (targetVel ? targetVel.x * predTime * 0.65 : 0);
+    const predPlayerZ = targetPos.z + (targetVel ? targetVel.z * predTime * 0.65 : 0);
+    const predDx = predPlayerX - this.body.position.x;
+    const predDz = predPlayerZ - this.body.position.z;
+    const predDist = Math.max(1, Math.hypot(predDx, predDz));
+    const predDirX = predDx / predDist;
+    const predDirZ = predDz / predDist;
+
+    // 3. Stuck detection safety net
+    this.stuckCheckTimer += delta;
+    if (this.stuckCheckTimer > 2.0) {
+      this.stuckCheckTimer = 0;
+      const movedDist = Math.hypot(
+        this.body.position.x - this.lastStuckCheckPos.x,
+        this.body.position.z - this.lastStuckCheckPos.z,
+      );
+      if (movedDist < 3.0 && this.droneState !== DroneCombatState.SPAWN_ENTRY) {
+        if (combatDirector) {
+          combatDirector.releaseAirAttackSlot(this.id, time, personalCooldown);
+          this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+        }
+        this.droneState = DroneCombatState.BREAK_AWAY;
+        this.droneStateTimer = 0;
+        this.altitudeOffset = (Math.random() - 0.5) * 8;
+      }
+      this.lastStuckCheckPos = { x: this.body.position.x, z: this.body.position.z };
+    }
+
+    // 4. Air Combat State Machine
+    this.droneStateTimer += delta;
+    let desiredHorizontalX = 0;
+    let desiredHorizontalZ = 0;
+    let currentSteerTurnRate = smoothTurnRate;
+
+    switch (this.droneState) {
+      case DroneCombatState.SPAWN_ENTRY: {
+        desiredHorizontalX = dirX * cruiseSpeed + repelForceX * 0.8 + avoidForceX;
+        desiredHorizontalZ = dirZ * cruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+        if (dist <= 75 || this.droneStateTimer > 3.5) {
+          if (combatDirector) {
+            this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+          } else {
+            this.assignedSectorAngle = Math.atan2(dirX, dirZ) + (this.flankDir * 0.6);
+          }
+          this.droneState = DroneCombatState.APPROACH;
+          this.droneStateTimer = 0;
+        }
+        break;
+      }
+
+      case DroneCombatState.APPROACH: {
+        const targetWaypointX = predPlayerX + Math.sin(this.assignedSectorAngle) * approachStandoff;
+        const targetWaypointZ = predPlayerZ + Math.cos(this.assignedSectorAngle) * approachStandoff;
+        const wpDx = targetWaypointX - this.body.position.x;
+        const wpDz = targetWaypointZ - this.body.position.z;
+        const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
+
+        desiredHorizontalX = (wpDx / wpDist) * cruiseSpeed + repelForceX * 0.8 + avoidForceX;
+        desiredHorizontalZ = (wpDz / wpDist) * cruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+
+        if (wpDist < 16.0 || (dist < approachStandoff + 12 && this.hasLineOfSight(city, targetPos)) || this.droneStateTimer > 3.5) {
+          this.droneState = DroneCombatState.ATTACK_SETUP;
+          this.droneStateTimer = 0;
+        }
+        break;
+      }
+
+      case DroneCombatState.ATTACK_SETUP: {
+        const tangentX = -dirZ * this.flankDir;
+        const tangentZ = dirX * this.flankDir;
+        desiredHorizontalX = (predDirX * 0.45 + tangentX * 0.65) * (cruiseSpeed * 0.85) + repelForceX + avoidForceX;
+        desiredHorizontalZ = (predDirZ * 0.45 + tangentZ * 0.65) * (cruiseSpeed * 0.85) + repelForceZ + avoidForceZ;
+
+        const hasLOS = this.hasLineOfSight(city, targetPos);
+        const inRange = dist < approachStandoff + 25 && dist > 18;
+
+        const canAttack = combatDirector
+          ? combatDirector.requestAirAttackSlot(
+              this.id,
+              time,
+              currentWave,
+              threatLevel,
+              isOverdrive,
+              overdriveMultiplier,
+              isBossActive,
+              attackRunDuration + 0.8,
+            )
+          : time - this.lastShotTime > personalCooldown;
+
+        if (canAttack && hasLOS && inRange) {
+          this.droneState = DroneCombatState.ATTACK_RUN;
+          this.droneStateTimer = 0;
+          this.attackRunDuration = attackRunDuration;
+          this.attackTelegraphTimer = attackTelegraphDuration;
+          this.attackBurstTimer = 0;
+          this.attackBurstShotsFired = 0;
+          this.attackVectorX = predDirX;
+          this.attackVectorZ = predDirZ;
+        } else if (this.droneStateTimer > 4.0) {
+          if (combatDirector) combatDirector.releaseAirAttackSlot(this.id, time, 1.5);
+          this.droneState = DroneCombatState.REPOSITION;
+          this.droneStateTimer = 0;
+        }
+        break;
+      }
+
+      case DroneCombatState.ATTACK_RUN: {
+        currentSteerTurnRate = attackSteerRate; // Committed steering - reduced agility allows player dodge!
+
+        desiredHorizontalX = this.attackVectorX * attackSpeed + repelForceX * 0.4 + avoidForceX * 0.8;
+        desiredHorizontalZ = this.attackVectorZ * attackSpeed + repelForceZ * 0.4 + avoidForceZ * 0.8;
+
+        // Attack telegraph (muzzle glow)
+        if (this.attackTelegraphTimer > 0) {
+          this.attackTelegraphTimer -= delta;
+          if (this.droneTelegraphMesh) {
+            this.droneTelegraphMesh.visible = true;
+            (this.droneTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.95;
+          }
+        } else {
+          if (this.droneTelegraphMesh) {
+            this.droneTelegraphMesh.visible = false;
+          }
+
+          // Controlled burst fire along weapon orientation
+          this.attackBurstTimer -= delta;
+          if (this.attackBurstShotsFired < burstTotalShots && this.attackBurstTimer <= 0) {
+            this.attackBurstTimer = burstShotInterval;
+            this.attackBurstShotsFired++;
+            this.lastShotTime = time;
+
+            // Calculate world aim from gun orientation & muzzle
+            const aim = this.applyAimError(this.leadAim(targetPos, targetVel, bulletSpeed), dist);
+
+            let muzzleX = this.body.position.x;
+            let muzzleY = this.body.position.y - 0.2;
+            let muzzleZ = this.body.position.z;
+
+            if (this.muzzlePoint) {
+              this.muzzlePoint.getWorldPosition(_projPos);
+              muzzleX = _projPos.x;
+              muzzleY = _projPos.y;
+              muzzleZ = _projPos.z;
+            }
+
+            // Weapon alignment check: ensure bullet aligns with gun barrel forward
+            const barrelHeading = this.mesh.rotation.y + (this.gunYawPivot ? this.gunYawPivot.rotation.y : 0);
+            const barrelFwdX = Math.sin(barrelHeading);
+            const barrelFwdZ = Math.cos(barrelHeading);
+            const alignmentDot = barrelFwdX * aim.x + barrelFwdZ * aim.z;
+
+            if (alignmentDot > 0.65 || dist < 25) {
+              pool.spawn(
+                muzzleX,
+                muzzleY,
+                muzzleZ,
+                aim.x,
+                aim.z,
+                time,
+                bulletSpeed * this.projSpeedMult,
+                bulletDamage * this.waveDamageMult,
+                blastRadius,
+                bulletColor,
+                null,
+                0,
+                (aim.y ?? 0) * bulletSpeed,
+                0,
+                this.waveDamageMult,
+              );
+              fired = true;
+            }
+          }
+        }
+
+        this.attackRunDuration -= delta;
+        const dotWithPlayer =
+          (this.body.position.x - targetPos.x) * this.attackVectorX +
+          (this.body.position.z - targetPos.z) * this.attackVectorZ;
+
+        if (this.attackRunDuration <= 0 || (dist < 18 && dotWithPlayer > 0)) {
+          if (combatDirector) {
+            combatDirector.releaseAirAttackSlot(this.id, time, personalCooldown);
+          }
+          this.droneState = DroneCombatState.BREAK_AWAY;
+          this.droneStateTimer = 0;
+          this.flankDir = Math.random() > 0.5 ? 1 : -1;
+        }
+        break;
+      }
+
+      case DroneCombatState.BREAK_AWAY: {
+        currentSteerTurnRate = 8.5; // Agile bank away
+
+        if (this.droneTelegraphMesh) this.droneTelegraphMesh.visible = false;
+
+        const awayX = -dirX * 0.85 + (-dirZ * this.flankDir) * 0.95;
+        const awayZ = -dirZ * 0.85 + (dirX * this.flankDir) * 0.95;
+        const awayLen = Math.max(1, Math.hypot(awayX, awayZ));
+
+        desiredHorizontalX = (awayX / awayLen) * breakawaySpeed + repelForceX + avoidForceX;
+        desiredHorizontalZ = (awayZ / awayLen) * breakawaySpeed + repelForceZ + avoidForceZ;
+
+        if (dist > 45 || this.droneStateTimer > 1.3) {
+          this.droneState = DroneCombatState.REPOSITION;
+          this.droneStateTimer = 0;
+          if (combatDirector) {
+            this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
+          }
+        }
+        break;
+      }
+
+      case DroneCombatState.REPOSITION: {
+        const targetWaypointX = targetPos.x + Math.sin(this.assignedSectorAngle) * (approachStandoff + 6);
+        const targetWaypointZ = targetPos.z + Math.cos(this.assignedSectorAngle) * (approachStandoff + 6);
+        const wpDx = targetWaypointX - this.body.position.x;
+        const wpDz = targetWaypointZ - this.body.position.z;
+        const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
+
+        desiredHorizontalX = (wpDx / wpDist) * (cruiseSpeed * 0.9) + repelForceX * 0.9 + avoidForceX;
+        desiredHorizontalZ = (wpDz / wpDist) * (cruiseSpeed * 0.9) + repelForceZ * 0.9 + avoidForceZ;
+
+        if (wpDist < 18.0 || this.droneStateTimer > 2.8) {
+          this.droneState = DroneCombatState.ATTACK_SETUP;
+          this.droneStateTimer = 0;
+        }
+        break;
+      }
+    }
+
+    // 5. Apply horizontal smoothed movement
+    this.applySmoothMovement(desiredHorizontalX, desiredHorizontalZ, delta, currentSteerTurnRate);
+
+    // 6. Orientation & Aerial Banking
+    const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (horizSpeed > 0.5) {
+      const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
+      this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, currentSteerTurnRate, delta);
+      this.ring.rotation.y = this.mesh.rotation.y;
+
+      const currentHeading = this.mesh.rotation.y;
+      const targetHeading = Math.atan2(desiredHorizontalX, desiredHorizontalZ);
+      const headingDiff = shortestAngleDelta(currentHeading, targetHeading);
+      const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.85, -maxBank, maxBank);
+      this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 9.0));
+      this.ring.rotation.z = this.airBankAngle;
+
+      const pitchMult = this.droneState === DroneCombatState.ATTACK_RUN ? 0.15 : 0.09;
+      const targetPitch = THREE.MathUtils.clamp((horizSpeed / attackSpeed) * pitchMult, -0.2, 0.2);
+      this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 6.0));
+    } else {
+      this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
+      this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
+    }
+
+    // 7. Independent chin gun tracking
+    if (this.gunYawPivot) {
+      const dAimX = targetPos.x - this.body.position.x;
+      const dAimY = targetPos.y - this.body.position.y;
+      const dAimZ = targetPos.z - this.body.position.z;
+      const dHoriz = Math.max(1, Math.hypot(dAimX, dAimZ));
+      const dPlayerYaw = Math.atan2(dAimX, dAimZ);
+      const dBodyYaw = this.mesh.rotation.y;
+      let dRelYaw = dPlayerYaw - dBodyYaw;
+      while (dRelYaw < -Math.PI) dRelYaw += Math.PI * 2;
+      while (dRelYaw > Math.PI) dRelYaw -= Math.PI * 2;
+      dRelYaw = THREE.MathUtils.clamp(dRelYaw, -1.15, 1.15);
+      this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, dRelYaw, 5.5, delta);
+
+      if (this.cannonPitchPivot) {
+        const dPitch = THREE.MathUtils.clamp(-Math.atan2(dAimY, dHoriz), -0.65, 0.45);
+        this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, dPitch, 4.5, delta);
+      }
+    }
+
+    if (this.enemyRotor) this.enemyRotor.rotation.y += 34.0 * delta;
+    if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 38.0 * delta;
+
+    copyPhysicsPos(this.mesh, this.body.position);
+    return fired;
   }
 
   /** Hold a support position near the group (behind it, slightly orbiting). */
@@ -3075,7 +3568,6 @@ export class Enemy extends Entity {
     } else if (this.supportLine) {
       this.supportLine.visible = false;
     }
-    // Support aura ring always pulses while alive
     if (this.variantTelegraph) {
       this.variantTelegraph.visible = true;
       const m = this.variantTelegraph.material as THREE.MeshBasicMaterial;
@@ -3100,7 +3592,6 @@ export class Enemy extends Entity {
       this.variantMarker.rotation.x = -Math.PI / 2;
       this.scene.add(this.variantMarker);
     }
-    // Flight time ≈ 2*vy/gravity ≈ 0.97s at 150 u/s → lands ~145 units out.
     const landX = this.body.position.x + dirX * 145;
     const landZ = this.body.position.z + dirZ * 145;
     this.variantMarker.position.set(landX, 0.3, landZ);
@@ -3109,17 +3600,6 @@ export class Enemy extends Entity {
 
   private hideSiegeMarker() {
     if (this.variantMarker) this.variantMarker.visible = false;
-  }
-
-  /** Advance rotor/support visuals for variants. */
-  private updateVariantVisuals(time: number, delta: number = 0.016) {
-    if (this.enemyRotor) this.enemyRotor.rotation.y += 30 * delta;
-    if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 36 * delta;
-    this.ring.rotation.x = Math.sin(time * 4 + this.personalityOffset) * 0.08;
-    // Siege barrel aims at the player while deployed
-    if (this.variant === EnemyVariant.SIEGE_TANK && this.variantPhase >= 1) {
-      this.ring.rotation.y = 0; // hull faces the firing direction already
-    }
   }
 
   override destroy() {
@@ -3383,16 +3863,18 @@ export class Enemy extends Entity {
     // Boids horizontal repulsion force to prevent enemies from stacking
     let repelForceX = 0;
     let repelForceZ = 0;
-    for (const other of allEnemies) {
-      if (other === this || !other.active) continue;
-      const dxOther = this.body.position.x - other.body.position.x;
-      const dzOther = this.body.position.z - other.body.position.z;
-      const distOther = Math.sqrt(dxOther * dxOther + dzOther * dzOther);
-      const minDist = (this.radius + other.radius) * 1.35;
-      if (distOther < minDist && distOther > 0.001) {
-        const force = (1.0 - distOther / minDist) * 16.0;
-        repelForceX += (dxOther / distOther) * force;
-        repelForceZ += (dzOther / distOther) * force;
+    if (Array.isArray(allEnemies)) {
+      for (const other of allEnemies) {
+        if (other === this || !other.active) continue;
+        const dxOther = this.body.position.x - other.body.position.x;
+        const dzOther = this.body.position.z - other.body.position.z;
+        const distOther = Math.sqrt(dxOther * dxOther + dzOther * dzOther);
+        const minDist = (this.radius + other.radius) * 1.35;
+        if (distOther < minDist && distOther > 0.001) {
+          const force = (1.0 - distOther / minDist) * 16.0;
+          repelForceX += (dxOther / distOther) * force;
+          repelForceZ += (dzOther / distOther) * force;
+        }
       }
     }
 
@@ -3401,80 +3883,82 @@ export class Enemy extends Entity {
     let avoidForceX = 0;
     let avoidForceZ = 0;
     const avoidRange = this.radius * 2 + 3;
-    for (const block of city.blocks) {
-      if (block.destroyed) continue;
-      // Flying above the roof? No need to steer around it (mirrors the 3D overlap check).
-      if (this.body.position.y - this.radius * 0.75 > block.height) continue;
-      const bx = this.body.position.x;
-      const bz = this.body.position.z;
-      if (
-        Math.abs(bx - block.x) > block.width / 2 + avoidRange ||
-        Math.abs(bz - block.z) > block.depth / 2 + avoidRange
-      ) {
-        continue;
-      }
-      const closestX = THREE.MathUtils.clamp(bx, block.x - block.width / 2, block.x + block.width / 2);
-      const closestZ = THREE.MathUtils.clamp(bz, block.z - block.depth / 2, block.z + block.depth / 2);
-      const dxA = bx - closestX;
-      const dzA = bz - closestZ;
-      const dA = Math.sqrt(dxA * dxA + dzA * dzA);
-      if (dA < avoidRange && dA > 0.001) {
-        const strength = (1 - dA / avoidRange) * (this.radius * 6);
-        avoidForceX += (dxA / dA) * strength;
-        avoidForceZ += (dzA / dA) * strength;
-      }
-    }
-
-    // AABB Building Collision Resolution
-    for (const block of city.blocks) {
-      if (block.destroyed) continue;
-
-      const dxBlock = this.body.position.x - block.x;
-      const dzBlock = this.body.position.z - block.z;
-      const rangeX = block.width / 2 + this.radius + 5;
-      const rangeZ = block.depth / 2 + this.radius + 5;
-
-      if (Math.abs(dxBlock) > rangeX || Math.abs(dzBlock) > rangeZ) {
-        continue;
+    if (city && Array.isArray(city.blocks)) {
+      for (const block of city.blocks) {
+        if (block.destroyed) continue;
+        // Flying above the roof? No need to steer around it (mirrors the 3D overlap check).
+        if (this.body.position.y - this.radius * 0.75 > block.height) continue;
+        const bx = this.body.position.x;
+        const bz = this.body.position.z;
+        if (
+          Math.abs(bx - block.x) > block.width / 2 + avoidRange ||
+          Math.abs(bz - block.z) > block.depth / 2 + avoidRange
+        ) {
+          continue;
+        }
+        const closestX = THREE.MathUtils.clamp(bx, block.x - block.width / 2, block.x + block.width / 2);
+        const closestZ = THREE.MathUtils.clamp(bz, block.z - block.depth / 2, block.z + block.depth / 2);
+        const dxA = bx - closestX;
+        const dzA = bz - closestZ;
+        const dA = Math.sqrt(dxA * dxA + dzA * dzA);
+        if (dA < avoidRange && dA > 0.001) {
+          const strength = (1 - dA / avoidRange) * (this.radius * 6);
+          avoidForceX += (dxA / dA) * strength;
+          avoidForceZ += (dzA / dA) * strength;
+        }
       }
 
-      const enemyMinX = this.body.position.x - this.radius;
-      const enemyMaxX = this.body.position.x + this.radius;
-      const enemyMinY = this.body.position.y - this.radius * 0.75;
-      const enemyMaxY = this.body.position.y + this.radius * 0.75;
-      const enemyMinZ = this.body.position.z - this.radius;
-      const enemyMaxZ = this.body.position.z + this.radius;
+      // AABB Building Collision Resolution
+      for (const block of city.blocks) {
+        if (block.destroyed) continue;
 
-      const blockMinX = block.x - block.width / 2;
-      const blockMaxX = block.x + block.width / 2;
-      const blockMinY = 0;
-      const blockMaxY = block.height;
-      const blockMinZ = block.z - block.depth / 2;
-      const blockMaxZ = block.z + block.depth / 2;
+        const dxBlock = this.body.position.x - block.x;
+        const dzBlock = this.body.position.z - block.z;
+        const rangeX = block.width / 2 + this.radius + 5;
+        const rangeZ = block.depth / 2 + this.radius + 5;
 
-      const overlapX = Math.min(enemyMaxX, blockMaxX) - Math.max(enemyMinX, blockMinX);
-      const overlapY = Math.min(enemyMaxY, blockMaxY) - Math.max(enemyMinY, blockMinY);
-      const overlapZ = Math.min(enemyMaxZ, blockMaxZ) - Math.max(enemyMinZ, blockMinZ);
+        if (Math.abs(dxBlock) > rangeX || Math.abs(dzBlock) > rangeZ) {
+          continue;
+        }
 
-      if (overlapX > 0 && overlapY > 0 && overlapZ > 0) {
-        // We have an intersection! Find the minimum penetration axis
-        if (overlapY < overlapX && overlapY < overlapZ) {
-          // Push upwards onto the roof
-          this.body.position.y += overlapY;
-          this.body.velocity.y = Math.max(0, this.body.velocity.y);
-        } else if (overlapX < overlapZ) {
-          // Push along X axis and bias the smoothed velocity away so the enemy
-          // doesn't instantly re-stick against the wall.
-          const pushDir = this.body.position.x < block.x ? -1 : 1;
-          this.body.position.x += pushDir * overlapX;
-          this.smoothVelX = pushDir * Math.min(Math.max(Math.abs(this.smoothVelX), 6), 36);
-          this.body.velocity.x = this.smoothVelX;
-        } else {
-          // Push along Z axis and bias the smoothed velocity away
-          const pushDir = this.body.position.z < block.z ? -1 : 1;
-          this.body.position.z += pushDir * overlapZ;
-          this.smoothVelZ = pushDir * Math.min(Math.max(Math.abs(this.smoothVelZ), 6), 36);
-          this.body.velocity.z = this.smoothVelZ;
+        const enemyMinX = this.body.position.x - this.radius;
+        const enemyMaxX = this.body.position.x + this.radius;
+        const enemyMinY = this.body.position.y - this.radius * 0.75;
+        const enemyMaxY = this.body.position.y + this.radius * 0.75;
+        const enemyMinZ = this.body.position.z - this.radius;
+        const enemyMaxZ = this.body.position.z + this.radius;
+
+        const blockMinX = block.x - block.width / 2;
+        const blockMaxX = block.x + block.width / 2;
+        const blockMinY = 0;
+        const blockMaxY = block.height;
+        const blockMinZ = block.z - block.depth / 2;
+        const blockMaxZ = block.z + block.depth / 2;
+
+        const overlapX = Math.min(enemyMaxX, blockMaxX) - Math.max(enemyMinX, blockMinX);
+        const overlapY = Math.min(enemyMaxY, blockMaxY) - Math.max(enemyMinY, blockMinY);
+        const overlapZ = Math.min(enemyMaxZ, blockMaxZ) - Math.max(enemyMinZ, blockMinZ);
+
+        if (overlapX > 0 && overlapY > 0 && overlapZ > 0) {
+          // We have an intersection! Find the minimum penetration axis
+          if (overlapY < overlapX && overlapY < overlapZ) {
+            // Push upwards onto the roof
+            this.body.position.y += overlapY;
+            this.body.velocity.y = Math.max(0, this.body.velocity.y);
+          } else if (overlapX < overlapZ) {
+            // Push along X axis and bias the smoothed velocity away so the enemy
+            // doesn't instantly re-stick against the wall.
+            const pushDir = this.body.position.x < block.x ? -1 : 1;
+            this.body.position.x += pushDir * overlapX;
+            this.smoothVelX = pushDir * Math.min(Math.max(Math.abs(this.smoothVelX), 6), 36);
+            this.body.velocity.x = this.smoothVelX;
+          } else {
+            // Push along Z axis and bias the smoothed velocity away
+            const pushDir = this.body.position.z < block.z ? -1 : 1;
+            this.body.position.z += pushDir * overlapZ;
+            this.smoothVelZ = pushDir * Math.min(Math.max(Math.abs(this.smoothVelZ), 6), 36);
+            this.body.velocity.z = this.smoothVelZ;
+          }
         }
       }
     }
@@ -3500,18 +3984,28 @@ export class Enemy extends Entity {
 
     let fired = false;
 
-    // =====================================================================
-    // BOSS — phased behavior with telegraphed attacks
-    // =====================================================================
+    // 1. BOSS — Phased heavy gunship with telegraphed volleys
     if (this.type === EnemyType.BOSS) {
-      fired = this.updateBoss(targetPos, time, dist, dirX, dirZ, enemyProjectilePool, repelForceX, repelForceZ, fireRateMult, delta, avoidForceX, avoidForceZ);
+      fired = this.updateBoss(
+        targetPos,
+        time,
+        dist,
+        dirX,
+        dirZ,
+        enemyProjectilePool,
+        repelForceX,
+        repelForceZ,
+        fireRateMult,
+        delta,
+        avoidForceX,
+        avoidForceZ,
+      );
       copyPhysicsPos(this.mesh, this.body.position);
       if (this.telegraphMesh) {
         this.telegraphMesh.visible = this.telegraphTimer > 0;
         if (this.telegraphTimer > 0) {
           const pulse = 0.35 + Math.sin(time * 24) * 0.2;
           (this.telegraphMesh.material as THREE.MeshBasicMaterial).opacity = pulse;
-          this.telegraphMesh.rotation.y = Math.atan2(dirX, dirZ);
         }
       }
       if (this.enemyRotor) this.enemyRotor.rotation.y += 22.0 * delta;
@@ -3519,11 +4013,50 @@ export class Enemy extends Entity {
       return fired;
     }
 
-    // =====================================================================
-    // VARIANTS — role-driven combat behaviors (all non-standard roles)
-    // =====================================================================
-    if (this.variant !== EnemyVariant.STANDARD) {
-      const vFired = this.updateVariant(
+    // 2. KAMIKAZE DRONE — High-speed ramming dive
+    if (this.variant === EnemyVariant.KAMIKAZE_DRONE || this.pattern === AttackPattern.KAMIKAZE) {
+      return this.updateKamikazeDroneAI(
+        targetPos,
+        time,
+        dist,
+        dirX,
+        dirZ,
+        repelForceX,
+        repelForceZ,
+        avoidForceX,
+        avoidForceZ,
+        delta,
+        targetVel,
+      );
+    }
+
+    // 3. SUPPORT DRONES & MINELAYERS — Shield, Repair, Proximity Mine support
+    if (
+      this.variant === EnemyVariant.SHIELD_DRONE ||
+      this.variant === EnemyVariant.REPAIR_DRONE ||
+      this.variant === EnemyVariant.MINELAYER
+    ) {
+      return this.updateSupportDroneAI(
+        targetPos,
+        time,
+        dist,
+        dirX,
+        dirZ,
+        enemyProjectilePool,
+        repelForceX,
+        repelForceZ,
+        avoidForceX,
+        avoidForceZ,
+        delta,
+        allEnemies,
+        playerBody,
+        city,
+      );
+    }
+
+    // 4. FLYING COMBAT UNITS — Drones, Shooters, Attack Gunships, Rocket Gunships, Heavy Gunships, Interceptors
+    if (this.movementClass === EnemyMovementClass.FLYING) {
+      return this.updateAirCombatAI(
         targetPos,
         time,
         dist,
@@ -3536,634 +4069,58 @@ export class Enemy extends Entity {
         avoidForceZ,
         fireRateMult,
         delta,
-        allEnemies,
-        playerBody,
+        city,
+        targetVel,
+        combatDirector,
+        currentWave,
+        threatLevel,
+        isOverdrive,
+        overdriveMultiplier,
+        isBossActive,
+      );
+    }
+
+    // 5. INFANTRY CLUSTERS — Ground tactical squads
+    if (this.type === EnemyType.BASIC) {
+      return this.updateInfantryAI(
+        targetPos,
+        time,
+        dist,
+        dirX,
+        dirZ,
+        enemyProjectilePool,
+        repelForceX,
+        repelForceZ,
+        avoidForceX,
+        avoidForceZ,
+        fireRateMult,
+        delta,
         city,
         targetVel,
       );
-      copyPhysicsPos(this.mesh, this.body.position);
-      this.mesh.rotation.y = Math.atan2(dirX, dirZ);
-      this.ring.rotation.y = Math.atan2(dirX, dirZ);
-      this.updateVariantVisuals(time, delta);
-      return vFired;
     }
 
-    // =====================================================================
-    // KAMIKAZE — dive straight at the player (mostly drones)
-    // =====================================================================
-    if (this.pattern === AttackPattern.KAMIKAZE) {
-      const kamikazeSpeed =
-        this.type === EnemyType.TANK ? 42 : this.type === EnemyType.DRONE ? 68 : 55;
-      // Urgent dive, but still eased so the dive arcs instead of teleporting direction
-      this.applySmoothMovement(
-        dirX * kamikazeSpeed + repelForceX + avoidForceX,
-        dirZ * kamikazeSpeed + repelForceZ + avoidForceZ,
-        delta,
-        14,
-      );
-      // No ranged fire — dies by ramming
-      copyPhysicsPos(this.mesh, this.body.position);
-      this.mesh.rotation.y = Math.atan2(dirX, dirZ);
-      this.ring.rotation.y = Math.atan2(dirX, dirZ);
-      this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.1;
-      return false;
-    }
-
-    // =====================================================================
-    // DRONE — COMBAT DRONE: 3-Layer Combat State Machine & Dogfight Passes
-    // =====================================================================
-    if (this.type === EnemyType.DRONE) {
-      // 1. Altitude calculation & safe height / building avoidance
-      const roleAltitudeOffset = this.altitudeOffset || 0;
-      let desiredAltitude = targetPos.y + roleAltitudeOffset;
-
-      if (time - this.lastObstacleCheckTime > 0.18) {
-        this.lastObstacleCheckTime = time;
-        const forwardSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
-        const lookAheadDist = Math.max(12, forwardSpeed * 0.6);
-        const heading = this.mesh.rotation.y;
-        const aheadX = this.body.position.x + Math.sin(heading) * lookAheadDist;
-        const aheadZ = this.body.position.z + Math.cos(heading) * lookAheadDist;
-        const groundHere = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 2.0) : 0;
-        const groundAhead = city ? city.getHeightAt(aheadX, aheadZ, 2.0) : 0;
-        this.cachedSafeAltitude = Math.max(groundHere, groundAhead) + 5.5;
-      }
-      if (desiredAltitude < this.cachedSafeAltitude) {
-        desiredAltitude = this.cachedSafeAltitude;
-      }
-
-      // Vertical smoothing
-      const altitudeDiff = desiredAltitude - this.body.position.y;
-      const desiredVerticalVel = THREE.MathUtils.clamp(altitudeDiff * 3.4, -16, 18);
-      this.smoothVelY = THREE.MathUtils.lerp(this.smoothVelY, desiredVerticalVel, Math.min(1, delta * 5.0));
-      this.body.position.y += this.smoothVelY * delta;
-
-      // 2. Drone State Machine & Predictive Interception
-      this.droneStateTimer += delta;
-      let desiredHorizontalX = 0;
-      let desiredHorizontalZ = 0;
-      let targetCruiseSpeed = 34;
-      let smoothTurnRate = 7.0;
-
-      // Predictive interception coordinates
-      const predTime = THREE.MathUtils.clamp(dist / 42.0, 0.35, 1.25);
-      const predPlayerX = targetPos.x + (targetVel ? targetVel.x * predTime * 0.65 : 0);
-      const predPlayerZ = targetPos.z + (targetVel ? targetVel.z * predTime * 0.65 : 0);
-      const predDx = predPlayerX - this.body.position.x;
-      const predDz = predPlayerZ - this.body.position.z;
-      const predDist = Math.max(1, Math.hypot(predDx, predDz));
-      const predDirX = predDx / predDist;
-      const predDirZ = predDz / predDist;
-
-      // Stuck detection safety net
-      this.stuckCheckTimer += delta;
-      if (this.stuckCheckTimer > 2.5) {
-        this.stuckCheckTimer = 0;
-        const movedDist = Math.hypot(this.body.position.x - this.lastStuckCheckPos.x, this.body.position.z - this.lastStuckCheckPos.z);
-        if (movedDist < 3.5 && this.droneState !== DroneCombatState.SPAWN_ENTRY) {
-          if (combatDirector) {
-            this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
-          }
-          this.droneState = DroneCombatState.BREAK_AWAY;
-          this.droneStateTimer = 0;
-        }
-        this.lastStuckCheckPos = { x: this.body.position.x, z: this.body.position.z };
-      }
-
-      switch (this.droneState) {
-        case DroneCombatState.SPAWN_ENTRY: {
-          targetCruiseSpeed = 38;
-          desiredHorizontalX = dirX * targetCruiseSpeed + repelForceX * 0.8 + avoidForceX;
-          desiredHorizontalZ = dirZ * targetCruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
-          if (dist <= 75 || this.droneStateTimer > 4.0) {
-            if (combatDirector) {
-              this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
-            } else {
-              this.assignedSectorAngle = Math.atan2(dirX, dirZ) + (this.flankDir * 0.6);
-            }
-            this.droneState = DroneCombatState.APPROACH;
-            this.droneStateTimer = 0;
-          }
-          break;
-        }
-
-        case DroneCombatState.APPROACH: {
-          targetCruiseSpeed = 36;
-          const targetStandOff = 48.0;
-          const targetWaypointX = predPlayerX + Math.sin(this.assignedSectorAngle) * targetStandOff;
-          const targetWaypointZ = predPlayerZ + Math.cos(this.assignedSectorAngle) * targetStandOff;
-          const wpDx = targetWaypointX - this.body.position.x;
-          const wpDz = targetWaypointZ - this.body.position.z;
-          const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
-
-          desiredHorizontalX = (wpDx / wpDist) * targetCruiseSpeed + repelForceX * 0.8 + avoidForceX;
-          desiredHorizontalZ = (wpDz / wpDist) * targetCruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
-
-          if (wpDist < 16.0 || (dist < 62.0 && this.hasLineOfSight(city, targetPos)) || this.droneStateTimer > 3.8) {
-            this.droneState = DroneCombatState.ATTACK_SETUP;
-            this.droneStateTimer = 0;
-          }
-          break;
-        }
-
-        case DroneCombatState.ATTACK_SETUP: {
-          targetCruiseSpeed = 30;
-          const tangentX = -dirZ * this.flankDir;
-          const tangentZ = dirX * this.flankDir;
-          desiredHorizontalX = (predDirX * 0.45 + tangentX * 0.65) * targetCruiseSpeed + repelForceX + avoidForceX;
-          desiredHorizontalZ = (predDirZ * 0.45 + tangentZ * 0.65) * targetCruiseSpeed + repelForceZ + avoidForceZ;
-
-          const hasLOS = this.hasLineOfSight(city, targetPos);
-          const inRange = dist < 70 && dist > 18;
-
-          // Request attack slot from CombatDirector
-          const canAttack = combatDirector
-            ? combatDirector.requestAirAttackSlot(this.id, time, currentWave, threatLevel, isOverdrive, overdriveMultiplier, isBossActive)
-            : time - this.lastShotTime > 2.0;
-
-          if (canAttack && hasLOS && inRange) {
-            this.droneState = DroneCombatState.ATTACK_RUN;
-            this.droneStateTimer = 0;
-            this.attackRunDuration = 1.35;
-            this.attackTelegraphTimer = 0.24;
-            this.attackBurstTimer = 0;
-            this.attackBurstShotsFired = 0;
-            this.attackVectorX = predDirX;
-            this.attackVectorZ = predDirZ;
-          } else if (this.droneStateTimer > 4.5) {
-            if (combatDirector) combatDirector.releaseAirAttackSlot(this.id, time, 1.5);
-            this.droneState = DroneCombatState.REPOSITION;
-            this.droneStateTimer = 0;
-          }
-          break;
-        }
-
-        case DroneCombatState.ATTACK_RUN: {
-          targetCruiseSpeed = 50; // Fast strafing attack pass!
-          smoothTurnRate = 2.4; // Committed steering - reduced agility allows player dodge
-
-          desiredHorizontalX = this.attackVectorX * targetCruiseSpeed + repelForceX * 0.4 + avoidForceX * 0.8;
-          desiredHorizontalZ = this.attackVectorZ * targetCruiseSpeed + repelForceZ * 0.4 + avoidForceZ * 0.8;
-
-          // Telegraph muzzle/nose glow
-          if (this.attackTelegraphTimer > 0) {
-            this.attackTelegraphTimer -= delta;
-            if (this.droneTelegraphMesh) {
-              this.droneTelegraphMesh.visible = true;
-              (this.droneTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.9;
-            }
-          } else {
-            if (this.droneTelegraphMesh) {
-              this.droneTelegraphMesh.visible = false;
-            }
-
-            // Fire 2-round pulse burst (PA-PA)
-            this.attackBurstTimer -= delta;
-            if (this.attackBurstShotsFired < 2 && this.attackBurstTimer <= 0) {
-              this.attackBurstTimer = 0.09; // 90ms gap
-              this.attackBurstShotsFired++;
-              this.lastShotTime = time;
-
-              const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 160), dist);
-              let muzzleX = this.body.position.x - 0.4 * Math.cos(this.mesh.rotation.y);
-              let muzzleY = this.body.position.y - 0.2;
-              let muzzleZ = this.body.position.z + 0.4 * Math.sin(this.mesh.rotation.y);
-              if (this.muzzlePoint) {
-                this.muzzlePoint.getWorldPosition(_projPos);
-                muzzleX = _projPos.x;
-                muzzleY = _projPos.y;
-                muzzleZ = _projPos.z;
-              }
-              enemyProjectilePool.spawn(
-                muzzleX,
-                muzzleY,
-                muzzleZ,
-                aim.x,
-                aim.z,
-                time,
-                160 * this.projSpeedMult,
-                4,
-                0,
-                0xff3b22,
-                null,
-                0,
-                (aim.y ?? 0) * 160,
-                0,
-                this.waveDamageMult,
-              );
-              fired = true;
-            }
-          }
-
-          this.attackRunDuration -= delta;
-          const dotWithPlayer = (this.body.position.x - targetPos.x) * this.attackVectorX + (this.body.position.z - targetPos.z) * this.attackVectorZ;
-          if (this.attackRunDuration <= 0 || (dist < 18 && dotWithPlayer > 0)) {
-            if (combatDirector) {
-              combatDirector.releaseAirAttackSlot(this.id, time, 2.6 + Math.random() * 0.8);
-            }
-            this.droneState = DroneCombatState.BREAK_AWAY;
-            this.droneStateTimer = 0;
-            this.flankDir = Math.random() > 0.5 ? 1 : -1;
-          }
-          break;
-        }
-
-        case DroneCombatState.BREAK_AWAY: {
-          targetCruiseSpeed = 40; // High speed breakaway
-          smoothTurnRate = 8.5; // Agile bank away
-
-          if (this.droneTelegraphMesh) this.droneTelegraphMesh.visible = false;
-
-          const awayX = -dirX * 0.85 + (-dirZ * this.flankDir) * 0.95;
-          const awayZ = -dirZ * 0.85 + (dirX * this.flankDir) * 0.95;
-          const awayLen = Math.max(1, Math.hypot(awayX, awayZ));
-
-          desiredHorizontalX = (awayX / awayLen) * targetCruiseSpeed + repelForceX + avoidForceX;
-          desiredHorizontalZ = (awayZ / awayLen) * targetCruiseSpeed + repelForceZ + avoidForceZ;
-
-          if (dist > 45 || this.droneStateTimer > 1.2) {
-            this.droneState = DroneCombatState.REPOSITION;
-            this.droneStateTimer = 0;
-            if (combatDirector) {
-              this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
-            }
-          }
-          break;
-        }
-
-        case DroneCombatState.REPOSITION: {
-          targetCruiseSpeed = 32;
-          const targetStandOff = 50.0;
-          const targetWaypointX = targetPos.x + Math.sin(this.assignedSectorAngle) * targetStandOff;
-          const targetWaypointZ = targetPos.z + Math.cos(this.assignedSectorAngle) * targetStandOff;
-          const wpDx = targetWaypointX - this.body.position.x;
-          const wpDz = targetWaypointZ - this.body.position.z;
-          const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
-
-          desiredHorizontalX = (wpDx / wpDist) * targetCruiseSpeed + repelForceX * 0.9 + avoidForceX;
-          desiredHorizontalZ = (wpDz / wpDist) * targetCruiseSpeed + repelForceZ * 0.9 + avoidForceZ;
-
-          if (wpDist < 18.0 || this.droneStateTimer > 2.8) {
-            this.droneState = DroneCombatState.ATTACK_SETUP;
-            this.droneStateTimer = 0;
-          }
-          break;
-        }
-      }
-
-      // Apply horizontal smoothed movement
-      this.applySmoothMovement(desiredHorizontalX, desiredHorizontalZ, delta, smoothTurnRate);
-
-      // Orientation & Aerial Banking
-      const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
-      if (horizSpeed > 0.5) {
-        const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
-        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, smoothTurnRate, delta);
-        this.ring.rotation.y = this.mesh.rotation.y;
-
-        const currentHeading = this.mesh.rotation.y;
-        const targetHeading = Math.atan2(desiredHorizontalX, desiredHorizontalZ);
-        const headingDiff = shortestAngleDelta(currentHeading, targetHeading);
-        const maxBank = this.droneState === DroneCombatState.BREAK_AWAY ? 0.38 : 0.28;
-        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.9, -maxBank, maxBank);
-        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 9.0));
-        this.ring.rotation.z = this.airBankAngle;
-
-        const pitchMult = this.droneState === DroneCombatState.ATTACK_RUN ? 0.16 : 0.10;
-        const targetPitch = THREE.MathUtils.clamp((horizSpeed / 40) * pitchMult, -0.2, 0.2);
-        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 6.0));
-      } else {
-        this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
-        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
-      }
-
-      // Independent chin gun tracking
-      if (this.gunYawPivot) {
-        const dAimX = targetPos.x - this.body.position.x;
-        const dAimY = targetPos.y - this.body.position.y;
-        const dAimZ = targetPos.z - this.body.position.z;
-        const dHoriz = Math.max(1, Math.hypot(dAimX, dAimZ));
-        const dPlayerYaw = Math.atan2(dAimX, dAimZ);
-        const dBodyYaw = this.mesh.rotation.y;
-        let dRelYaw = dPlayerYaw - dBodyYaw;
-        while (dRelYaw < -Math.PI) dRelYaw += Math.PI * 2;
-        while (dRelYaw > Math.PI) dRelYaw -= Math.PI * 2;
-        dRelYaw = THREE.MathUtils.clamp(dRelYaw, -1.05, 1.05);
-        this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, dRelYaw, 5.0, delta);
-
-        if (this.cannonPitchPivot) {
-          const dPitch = THREE.MathUtils.clamp(-Math.atan2(dAimY, dHoriz), -0.6, 0.4);
-          this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, dPitch, 4.0, delta);
-        }
-      }
-
-      if (this.enemyRotor) this.enemyRotor.rotation.y += 34.0 * delta;
-      if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 38.0 * delta;
-
-      copyPhysicsPos(this.mesh, this.body.position);
-      return fired;
-    }
-
-    let speed = 0;
-    if (this.type === EnemyType.TANK) speed = 12;
-    else if (this.type === EnemyType.SHOOTER) speed = 20;
-    else if (this.type === EnemyType.BASIC) speed = 14;
-
-    // AI Evasive and Flanking logic
-    if (time - this.lastDecisionTime > 2.0 + Math.random() * 2.0) {
-      this.lastDecisionTime = time;
-      if (Math.random() > 0.5) this.flankDir *= -1;
-      
-      if (Math.random() > 0.7) {
-        this.evadeTimer = time + 0.5 + Math.random() * 1.0;
-      }
-    }
-
-    const isEvading = time < this.evadeTimer;
-    const tangentX = -dirZ * this.flankDir;
-    const tangentZ = dirX * this.flankDir;
-
-    let desiredX: number;
-    let desiredZ: number;
-    if (this.pattern === AttackPattern.CIRCLE) {
-      desiredX = tangentX * speed * 1.25 + dirX * 0.12 * speed + repelForceX + avoidForceX;
-      desiredZ = tangentZ * speed * 1.25 + dirZ * 0.12 * speed + repelForceZ + avoidForceZ;
-    } else if (this.pattern === AttackPattern.ARTILLERY) {
-      if (dist < 95) {
-        desiredX = (-dirX + tangentX * 0.6) * speed * 0.8 + repelForceX + avoidForceX;
-        desiredZ = (-dirZ + tangentZ * 0.6) * speed * 0.8 + repelForceZ + avoidForceZ;
-      } else {
-        desiredX = (tangentX + dirX * 0.15) * speed * 0.5 + repelForceX + avoidForceX;
-        desiredZ = (tangentZ + dirZ * 0.15) * speed * 0.5 + repelForceZ + avoidForceZ;
-      }
-    } else if (dist > 45) {
-      desiredX = dirX * speed + repelForceX + avoidForceX;
-      desiredZ = dirZ * speed + repelForceZ + avoidForceZ;
-    } else if (dist < 20 || isEvading) {
-      desiredX = (-dirX + tangentX * 1.5) * speed * 0.7 + repelForceX + avoidForceX;
-      desiredZ = (-dirZ + tangentZ * 1.5) * speed * 0.7 + repelForceZ + avoidForceZ;
-    } else {
-      desiredX = (tangentX + dirX * 0.2) * speed * 0.6 + repelForceX + avoidForceX;
-      desiredZ = (tangentZ + dirZ * 0.2) * speed * 0.6 + repelForceZ + avoidForceZ;
-    }
-
-    this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
-
-    // --- Ground Unit Terrain Clamping ---
-    if (this.movementClass === EnemyMovementClass.GROUND) {
-      const clearance = this.type === EnemyType.TANK ? 2.5 : 1.0;
-      const groundY = city ? city.getHeightAt(this.body.position.x, this.body.position.z, clearance) : 0;
-      this.body.position.y = Math.max(clearance === 2.5 ? 1.2 : 0.6, groundY + (clearance === 2.5 ? 1.2 : 0.6));
-      this.body.velocity.y = 0;
-    }
-
-    // --- Ground Attack & Turret Alignment ---
-    if (this.type === EnemyType.TANK) {
-      const dx = targetPos.x - this.body.position.x;
-      const dy = targetPos.y - this.body.position.y;
-      const dz = targetPos.z - this.body.position.z;
-      const horizDist = Math.max(1, Math.hypot(dx, dz));
-
-      // 1. Chassis rotation faces movement heading
-      const moveHeading = Math.atan2(this.smoothVelX || desiredX, this.smoothVelZ || desiredZ);
-      this.mesh.rotation.y = moveHeading;
-
-      // 2. Turret yaw pivot smoothly tracks player
-      if (this.turretYawPivot) {
-        const playerYaw = Math.atan2(dx, dz);
-        const chassisYaw = this.mesh.rotation.y;
-        let relYaw = playerYaw - chassisYaw;
-        while (relYaw < -Math.PI) relYaw += Math.PI * 2;
-        while (relYaw > Math.PI) relYaw -= Math.PI * 2;
-        this.turretYawPivot.rotation.y = stepAngle(this.turretYawPivot.rotation.y, relYaw, 3.2, delta);
-      }
-
-      // 3. Cannon pitch pivot elevates to point at helicopter
-      if (this.cannonPitchPivot) {
-        const targetPitch = THREE.MathUtils.clamp(-Math.atan2(dy, horizDist), -0.75, 0.15);
-        this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, targetPitch, 2.4, delta);
-      }
-
-      // 4. Tank Tactical State Machine (MOVE_TO_LANE -> AIM -> FIRE -> REPOSITION)
-      const hasLOS = this.hasLineOfSight(city, targetPos);
-      let tankSpeed = 13;
-
-      if (this.tankCombatState === TankCombatState.MOVE_TO_LANE) {
-        desiredX = dirX * tankSpeed + repelForceX * 1.2 + avoidForceX;
-        desiredZ = dirZ * tankSpeed + repelForceZ * 1.2 + avoidForceZ;
-
-        if (hasLOS && dist < 85 && dist > 20) {
-          this.tankCombatState = TankCombatState.AIM;
-          this.tankStateTimer = 0;
-        }
-      } else if (this.tankCombatState === TankCombatState.AIM) {
-        tankSpeed = 4;
-        desiredX = dirX * tankSpeed + repelForceX + avoidForceX;
-        desiredZ = dirZ * tankSpeed + repelForceZ + avoidForceZ;
-
-        const canShoot = combatDirector
-          ? combatDirector.requestHeavyAttackSlot(this.id, "TANK", time, currentWave, isBossActive, 1.8) &&
-            combatDirector.requestGroundAttackSlot(this.id, time, currentWave, isBossActive)
-          : time - this.lastShotTime > 3.4 * fireRateMult;
-
-        if (canShoot && hasLOS && time - this.lastShotTime > 3.0 * fireRateMult) {
-          this.tankCombatState = TankCombatState.FIRE;
-          this.tankAimTimer = 0.35; // Muzzle telegraph
-        } else if (!hasLOS || dist > 95) {
-          this.tankCombatState = TankCombatState.MOVE_TO_LANE;
-        }
-      } else if (this.tankCombatState === TankCombatState.FIRE) {
-        desiredX = 0;
-        desiredZ = 0;
-
-        if (this.tankAimTimer > 0) {
-          this.tankAimTimer -= delta;
-          if (this.tankTelegraphMesh) {
-            (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
-          }
-          if (this.tankAimTimer <= 0) {
-            if (this.tankTelegraphMesh) {
-              (this.tankTelegraphMesh.material as THREE.MeshBasicMaterial).opacity = 0.0;
-            }
-            let muzzleX = this.body.position.x;
-            let muzzleY = this.body.position.y + 1.8;
-            let muzzleZ = this.body.position.z;
-            if (this.muzzlePoint) {
-              this.muzzlePoint.getWorldPosition(_projPos);
-              muzzleX = _projPos.x;
-              muzzleY = _projPos.y;
-              muzzleZ = _projPos.z;
-            }
-            const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 110), dist);
-            enemyProjectilePool.spawn(
-              muzzleX,
-              muzzleY,
-              muzzleZ,
-              aim.x,
-              aim.z,
-              time,
-              110 * this.projSpeedMult,
-              18,
-              0,
-              0xff8833,
-              null,
-              0,
-              (aim.y ?? 0) * 110,
-              0,
-              this.waveDamageMult,
-            );
-            this.lastShotTime = time;
-            fired = true;
-
-            if (combatDirector) {
-              combatDirector.releaseGroundAttackSlot(this.id, time, 3.2);
-              combatDirector.releaseHeavyAttackSlot(this.id, time, 3.2);
-            }
-            this.tankCombatState = TankCombatState.REPOSITION;
-            this.tankStateTimer = 0;
-          }
-        }
-      } else if (this.tankCombatState === TankCombatState.REPOSITION) {
-        const tangentX = -dirZ * this.flankDir;
-        const tangentZ = dirX * this.flankDir;
-        desiredX = (tangentX * 1.1 + dirX * 0.2) * tankSpeed + repelForceX + avoidForceX;
-        desiredZ = (tangentZ * 1.1 + dirZ * 0.2) * tankSpeed + repelForceZ + avoidForceZ;
-
-        if (this.droneStateTimer > 2.0 || time - this.lastShotTime > 3.0) {
-          this.tankCombatState = TankCombatState.AIM;
-        }
-      }
-
-      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
-    } else if (this.type === EnemyType.BASIC) {
-      // INFANTRY CLUSTER: Face movement, staggered 3-round rapid light bursts
-      if (Math.hypot(this.smoothVelX, this.smoothVelZ) > 0.3) {
-        this.mesh.rotation.y = Math.atan2(this.smoothVelX, this.smoothVelZ);
-      }
-
-      if (this.infantryBurstRemaining > 0) {
-        this.infantryBurstTimer -= delta;
-        if (this.infantryBurstTimer <= 0) {
-          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, 140), dist);
-          enemyProjectilePool.spawn(
-            this.body.position.x + (Math.random() - 0.5) * 1.2,
-            this.body.position.y + 0.8,
-            this.body.position.z + (Math.random() - 0.5) * 1.2,
-            aim.x,
-            aim.z,
-            time,
-            140 * this.projSpeedMult,
-            3,
-            0,
-            0xffd92e,
-            null,
-            0,
-            (aim.y ?? 0) * 140,
-            0,
-            this.waveDamageMult,
-          );
-          this.infantryBurstRemaining--;
-          this.infantryBurstTimer = 0.12;
-          fired = true;
-        }
-      } else if (dist < 65 && time - this.lastShotTime > (2.5 + this.infantryBurstStagger) * fireRateMult && this.hasLineOfSight(city, targetPos)) {
-        this.lastShotTime = time;
-        this.infantryBurstRemaining = 3;
-        this.infantryBurstTimer = 0;
-      }
-      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
-    } else {
-      this.applySmoothMovement(desiredX, desiredZ, delta, this.smoothRate());
-      // Flying Gunships / Shooters
-      const fireRange = 75;
-      const fireRate = 2.0;
-      if (dist < fireRange && time - this.lastShotTime > fireRate * fireRateMult) {
-        const projectileSpeed = 130 * this.projSpeedMult;
-        if (this.hasLineOfSight(city, targetPos)) {
-          this.lastShotTime = time + Math.random() * 0.35;
-          const aim = this.applyAimError(this.leadAim(targetPos, targetVel, projectileSpeed), dist);
-          let muzzleX = this.body.position.x;
-          let muzzleY = this.body.position.y + 0.35;
-          let muzzleZ = this.body.position.z;
-          if (this.muzzlePoint) {
-            this.muzzlePoint.getWorldPosition(_projPos);
-            muzzleX = _projPos.x;
-            muzzleY = _projPos.y;
-            muzzleZ = _projPos.z;
-          }
-          enemyProjectilePool.spawn(
-            muzzleX,
-            muzzleY,
-            muzzleZ,
-            aim.x,
-            aim.z,
-            time,
-            projectileSpeed,
-            5,
-            0,
-            0xffd92e,
-            null,
-            0,
-            0,
-            0,
-            this.waveDamageMult,
-          );
-          fired = true;
-        }
-      }
-
-      // Smooth heading and banking for shooter
-      const horizSpeed = Math.hypot(this.smoothVelX, this.smoothVelZ);
-      if (horizSpeed > 0.4) {
-        const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
-        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
-        this.ring.rotation.y = this.mesh.rotation.y;
-        const targetHeading = Math.atan2(desiredX, desiredZ);
-        const headingDiff = shortestAngleDelta(this.mesh.rotation.y, targetHeading);
-        const targetBank = THREE.MathUtils.clamp(-headingDiff * 0.75, -0.28, 0.28);
-        this.airBankAngle = THREE.MathUtils.lerp(this.airBankAngle, targetBank, Math.min(1, delta * 7.0));
-        this.ring.rotation.z = this.airBankAngle;
-        const targetPitch = THREE.MathUtils.clamp((horizSpeed / 20) * 0.1, -0.15, 0.15);
-        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 5.0));
-      } else {
-        this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, Math.atan2(dirX, dirZ), 3.0, delta);
-        this.ring.rotation.y = this.mesh.rotation.y;
-        this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
-        this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
-      }
-
-      // Independent chin/nose gun tracking for shooter
-      if (this.gunYawPivot) {
-        const sAimX = targetPos.x - this.body.position.x;
-        const sAimY = targetPos.y - this.body.position.y;
-        const sAimZ = targetPos.z - this.body.position.z;
-        const sHoriz = Math.max(1, Math.hypot(sAimX, sAimZ));
-        const sPlayerYaw = Math.atan2(sAimX, sAimZ);
-        const sBodyYaw = this.mesh.rotation.y;
-        let sRelYaw = sPlayerYaw - sBodyYaw;
-        while (sRelYaw < -Math.PI) sRelYaw += Math.PI * 2;
-        while (sRelYaw > Math.PI) sRelYaw -= Math.PI * 2;
-        sRelYaw = THREE.MathUtils.clamp(sRelYaw, -0.95, 0.95);
-        this.gunYawPivot.rotation.y = stepAngle(this.gunYawPivot.rotation.y, sRelYaw, 4.5, delta);
-
-        if (this.cannonPitchPivot) {
-          const sPitch = THREE.MathUtils.clamp(-Math.atan2(sAimY, sHoriz), -0.6, 0.4);
-          this.cannonPitchPivot.rotation.x = stepAngle(this.cannonPitchPivot.rotation.x, sPitch, 3.5, delta);
-        }
-      }
-    }
-
-    copyPhysicsPos(this.mesh, this.body.position);
-    this.ring.rotation.x = Math.sin(time * 3 + this.personalityOffset) * 0.04;
-
-    if (this.enemyRotor) {
-      this.enemyRotor.rotation.y += 28.0 * delta;
-    }
-    if (this.enemyTailRotor) {
-      this.enemyTailRotor.rotation.x += 36.0 * delta;
-    }
-
-    return fired;
+    // 6. GROUND ARMOR — Tanks, Flak Tanks, Siege Artillery, Missile Carriers
+    return this.updateTankAI(
+      targetPos,
+      time,
+      dist,
+      dirX,
+      dirZ,
+      enemyProjectilePool,
+      repelForceX,
+      repelForceZ,
+      avoidForceX,
+      avoidForceZ,
+      fireRateMult,
+      delta,
+      city,
+      targetVel,
+      combatDirector,
+      currentWave,
+      isBossActive,
+      playerBody,
+    );
   }
 
   /**

@@ -778,6 +778,24 @@ export class AudioManager {
     osc.stop(now + 0.07);
   }
 
+  /** Subtle tactical blip on menu item hover / navigation focus. */
+  public playHover() {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(620, now);
+    osc.frequency.exponentialRampToValueAtTime(840, now + 0.025);
+    g.gain.setValueAtTime(0.025, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.04);
+  }
+
   /** Coin chime for purchases and credit rewards. */
   public playPurchase() {
     this.resume();

@@ -1,5 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
+import { Helicopter } from './game/entities';
 import {
   EnemyVariant,
   GameEngine,
@@ -38,7 +41,26 @@ import {
   writeWeaponMod,
 } from './game/logic';
 import type { PerkId, PerkRanks, RunRecord } from './game/logic';
-import { Bomb, Cog, Flame, Fuel, Rocket, Shield, Skull, Sparkles, Zap } from 'lucide-react';
+import {
+  Award,
+  Bomb,
+  BookOpen,
+  ChevronRight,
+  Cog,
+  Coins,
+  Crosshair,
+  Flame,
+  Fuel,
+  Play,
+  Rocket,
+  Shield,
+  Skull,
+  Sliders,
+  Sparkles,
+  Trophy,
+  Wrench,
+  Zap,
+} from 'lucide-react';
 import React from 'react';
 
 const STORAGE_KEYS = {
@@ -892,12 +914,227 @@ const DifficultyChip = React.memo(function DifficultyChip({ difficulty }: { diff
       : difficulty === 'hard'
         ? 'border-[#d32f2f] text-[#ff6666] bg-[#3a0d0d]'
         : 'border-[#f5ba2c] text-[#ffd766] bg-[#332205]';
+  const multiplier =
+    difficulty === 'casual' ? '1.0×' : difficulty === 'hard' ? '2.0×' : '1.5×';
   return (
-    <span className={`border px-2 py-0.5 text-[10px] font-military tracking-[0.14em] rounded-[2px] shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)] ${tone}`}>
-      {info.name}
+    <span className={`inline-flex items-center gap-1.5 border px-2.5 py-0.5 text-[10px] font-military tracking-[0.14em] rounded-[3px] shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)] ${tone}`}>
+      {difficulty === 'hard' ? (
+        <Skull size={11} className="text-[#ff6666]" />
+      ) : difficulty === 'casual' ? (
+        <Shield size={11} className="text-[#7de04a]" />
+      ) : (
+        <Crosshair size={11} className="text-[#ffd766]" />
+      )}
+      <span>{info.name}</span>
+      <span className="opacity-80">({multiplier} CR)</span>
     </span>
   );
 });
+
+const HERO_AIRCRAFT_TELEMETRY: Record<
+  HelicopterModel,
+  {
+    designation: string;
+    codename: string;
+    role: string;
+    airframe: string;
+    armament: string;
+    avionics: string;
+    powerplant: string;
+    threatRating: string;
+    accentColor: string;
+  }
+> = {
+  [HelicopterModel.APACHE]: {
+    designation: 'AH-64D',
+    codename: 'LONGBOW',
+    role: 'HEAVY ATTACK GUNSHIP',
+    airframe: 'TITANIUM ARMORED AIRFRAME',
+    armament: '30MM M230 CHAIN GUN · AGM-114 HELLFIRE',
+    avionics: 'AN/APG-78 RADAR · TADS/PNVS',
+    powerplant: 'TWIN T700-GE-701D · 3,780 SHP',
+    threatRating: 'HEAVY ASSAULT CLEARANCE',
+    accentColor: '#ffcc00',
+  },
+  [HelicopterModel.NIGHTHAWK]: {
+    designation: 'AH-1Z',
+    codename: 'VIPER',
+    role: 'TACTICAL PENETRATION STRIKE',
+    airframe: 'COMPOSITE HIGH-G MANEUVER FRAME',
+    armament: '20MM M197 3-BARREL GATLING · AIM-9',
+    avionics: 'TARGET SIGHT SYSTEM (TSS) · DIGITAL COCKPIT',
+    powerplant: 'TWIN T700-GE-401C · 3,600 SHP',
+    threatRating: 'HIGH SPEED INTERCEPT',
+    accentColor: '#50ebff',
+  },
+  [HelicopterModel.WARLOCK]: {
+    designation: 'RAH-66',
+    codename: 'COMANCHE',
+    role: 'STEALTH RECONNAISSANCE ASSAULT',
+    airframe: 'RADAR-ABSORBENT FACETED HULL',
+    armament: '20MM XM301 GATLING · INTERNAL BAY HELLFIRE',
+    avionics: 'HELMET-INTEGRATED COMBAT AVIONICS',
+    powerplant: 'TWIN T800-LHT-801 · 3,128 SHP · FANTAL',
+    threatRating: 'STEALTH PENETRATION',
+    accentColor: '#8df578',
+  },
+};
+
+function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel }) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const mousePosRef = useRef({ x: 0, y: 0 });
+  const telemetry = HERO_AIRCRAFT_TELEMETRY[playerModel] ?? HERO_AIRCRAFT_TELEMETRY[HelicopterModel.APACHE];
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    const width = container.clientWidth || 600;
+    const height = container.clientHeight || 450;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
+    camera.position.set(7.2, 3.6, 10.2);
+    camera.lookAt(0, 0.1, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    container.appendChild(renderer.domElement);
+
+    // Atmospheric lighting
+    const ambientLight = new THREE.AmbientLight(0x2d3a24, 1.5);
+    scene.add(ambientLight);
+
+    const keyLight = new THREE.DirectionalLight(0xfff5dd, 2.5);
+    keyLight.position.set(10, 14, 8);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x50ebff, 2.0);
+    rimLight.position.set(-12, 6, -10);
+    scene.add(rimLight);
+
+    const fillLight = new THREE.DirectionalLight(0x38ef7d, 0.8);
+    fillLight.position.set(0, -5, 10);
+    scene.add(fillLight);
+
+    // Ground landing circle / tactical projection ring
+    const ringGeo = new THREE.RingGeometry(3.8, 3.9, 48);
+    ringGeo.rotateX(-Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x4d6633,
+      transparent: true,
+      opacity: 0.35,
+      side: THREE.DoubleSide,
+    });
+    const groundRing = new THREE.Mesh(ringGeo, ringMat);
+    groundRing.position.y = -1.8;
+    scene.add(groundRing);
+
+    // Dotted inner crosshair reticle
+    const innerRingGeo = new THREE.RingGeometry(1.8, 1.85, 32);
+    innerRingGeo.rotateX(-Math.PI / 2);
+    const innerRingMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc00,
+      transparent: true,
+      opacity: 0.25,
+      side: THREE.DoubleSide,
+    });
+    const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
+    innerRing.position.y = -1.8;
+    scene.add(innerRing);
+
+    // Build the 3D Helicopter
+    const world = new CANNON.World();
+    const heli = new Helicopter(scene, world, playerModel);
+    heli.mesh.position.set(0, 0, 0);
+    heli.mesh.rotation.y = -0.52; // Angled 3/4 front view
+
+    let rafId = 0;
+    const startTime = performance.now();
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+      mousePosRef.current = { x: ndcX, y: ndcY };
+    };
+
+    container.addEventListener('mousemove', handleMouseMove);
+
+    const animate = () => {
+      rafId = requestAnimationFrame(animate);
+      const elapsed = (performance.now() - startTime) * 0.001;
+
+      // Rotor animations
+      if (heli.mainRotor) heli.mainRotor.rotation.y += 0.35;
+      if (heli.tailRotor) heli.tailRotor.rotation.x += 0.48;
+
+      // Gentle idle hovering physics
+      const hoverY = Math.sin(elapsed * 1.6) * 0.16;
+      const hoverRoll = Math.sin(elapsed * 1.2) * 0.035;
+      const hoverPitch = Math.cos(elapsed * 1.0) * 0.025;
+
+      // Mouse parallax damping
+      const mouse = mousePosRef.current;
+      const targetRotY = -0.52 + mouse.x * 0.25;
+      const targetRotX = hoverPitch - mouse.y * 0.12;
+
+      heli.mesh.position.y = hoverY;
+      heli.mesh.rotation.y += (targetRotY - heli.mesh.rotation.y) * 0.08;
+      heli.mesh.rotation.x += (targetRotX - heli.mesh.rotation.x) * 0.08;
+      heli.mesh.rotation.z += (hoverRoll - heli.mesh.rotation.z) * 0.08;
+
+      groundRing.rotation.y = elapsed * 0.08;
+      innerRing.rotation.y = -elapsed * 0.12;
+
+      renderer.render(scene, camera);
+    };
+
+    animate();
+
+    const handleResize = () => {
+      if (!container) return;
+      const w = container.clientWidth || 600;
+      const h = container.clientHeight || 450;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', handleResize);
+      container.removeEventListener('mousemove', handleMouseMove);
+      if (renderer.domElement && container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+      scene.clear();
+    };
+  }, [playerModel]);
+
+  return (
+    <div className="relative w-full h-full min-h-[380px] lg:min-h-[480px] flex items-center justify-center pointer-events-none select-none">
+      {/* 3D WebGL Canvas Container */}
+      <div ref={mountRef} className="absolute inset-0 w-full h-full" />
+
+      {/* Subtle Aircraft Title in Bottom Corner */}
+      <div className="absolute bottom-4 right-6 flex flex-col items-end opacity-70">
+        <span className="text-base sm:text-lg font-display tracking-widest text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)]">
+          {telemetry.designation} {telemetry.codename}
+        </span>
+        <span className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] uppercase">
+          {telemetry.role}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function ThreeDMenu({
   mode,
@@ -910,12 +1147,14 @@ function ThreeDMenu({
   difficulty,
   credits,
   isNewPilot,
+  playerModel = HelicopterModel.APACHE,
   onStart,
   onSettings,
   onHangar,
   onHelp,
   onMenu,
   onUiSound,
+  onUiHover,
 }: {
   mode: GameMode;
   score: number;
@@ -927,16 +1166,106 @@ function ThreeDMenu({
   difficulty: GameSettings['difficulty'];
   credits: number;
   isNewPilot: boolean;
+  playerModel?: HelicopterModel;
   onStart: () => void;
   onSettings: () => void;
   onHangar: () => void;
   onHelp: () => void;
   onMenu: () => void;
   onUiSound: () => void;
+  onUiHover?: () => void;
 }) {
   const isGameOver = mode === 'gameover';
   const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
   const [showDetails, setShowDetails] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+
+  // Keyboard navigation on main menu
+  useEffect(() => {
+    if (isGameOver) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'ArrowUp' || e.key === 'KeyW') {
+        e.preventDefault();
+        setFocusedIndex((prev) => (prev > 0 ? prev - 1 : 3));
+        onUiHover?.();
+      } else if (e.key === 'ArrowDown' || e.key === 'KeyS') {
+        e.preventDefault();
+        setFocusedIndex((prev) => (prev < 3 ? prev + 1 : 0));
+        onUiHover?.();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onUiSound();
+        if (focusedIndex === 0) onStart();
+        else if (focusedIndex === 1) onHangar();
+        else if (focusedIndex === 2) onSettings();
+        else if (focusedIndex === 3) onHelp();
+      } else if (e.key.toLowerCase() === 'h') {
+        e.preventDefault();
+        onUiSound();
+        onHangar();
+      } else if (e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        onUiSound();
+        onSettings();
+      } else if (e.key.toLowerCase() === 'm' || e.key === 'F1') {
+        e.preventDefault();
+        onUiSound();
+        onHelp();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isGameOver, focusedIndex, onStart, onHangar, onSettings, onHelp, onUiSound, onUiHover]);
+
+  // Gamepad polling on menu
+  useEffect(() => {
+    if (isGameOver) return;
+    let prevButtons: boolean[] = [];
+    let raf = 0;
+
+    const pollGamepad = () => {
+      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const gp = gamepads[0] || gamepads[1];
+      if (gp) {
+        const dpadUp = gp.buttons[12]?.pressed || gp.axes[1] < -0.5;
+        const dpadDown = gp.buttons[13]?.pressed || gp.axes[1] > 0.5;
+        const btnA = gp.buttons[0]?.pressed;
+        const btnStart = gp.buttons[9]?.pressed;
+
+        if (dpadUp && !prevButtons[12]) {
+          setFocusedIndex((p) => (p > 0 ? p - 1 : 3));
+          onUiHover?.();
+        } else if (dpadDown && !prevButtons[13]) {
+          setFocusedIndex((p) => (p < 3 ? p + 1 : 0));
+          onUiHover?.();
+        } else if ((btnA && !prevButtons[0]) || (btnStart && !prevButtons[9])) {
+          onUiSound();
+          if (focusedIndex === 0) onStart();
+          else if (focusedIndex === 1) onHangar();
+          else if (focusedIndex === 2) onSettings();
+          else if (focusedIndex === 3) onHelp();
+        }
+
+        prevButtons = [
+          Boolean(btnA),
+          false, false, false, false, false, false, false, false,
+          Boolean(btnStart),
+          false, false,
+          Boolean(dpadUp),
+          Boolean(dpadDown),
+          false,
+          false,
+        ];
+      }
+      raf = requestAnimationFrame(pollGamepad);
+    };
+
+    raf = requestAnimationFrame(pollGamepad);
+    return () => cancelAnimationFrame(raf);
+  }, [isGameOver, focusedIndex, onStart, onHangar, onSettings, onHelp, onUiSound, onUiHover]);
 
   const copyScorecard = async () => {
     const latest = history[0];
@@ -963,71 +1292,89 @@ function ThreeDMenu({
   };
   const missionGrade = isGameOver ? calcGrade(stats, score) : null;
 
+  if (!isGameOver) {
+    const MENU_ITEMS = [
+      { id: 0, title: 'DEPLOY', hotkey: 'ENTER', isPrimary: true },
+      { id: 1, title: 'HANGAR', hotkey: 'H' },
+      { id: 2, title: 'SETTINGS', hotkey: 'O' },
+      { id: 3, title: 'MANUAL', hotkey: 'M' },
+    ];
+
+    return (
+      <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-between overflow-hidden px-8 sm:px-14 lg:px-20 py-8 select-none bg-gradient-to-r from-black/85 via-black/40 to-transparent">
+        {/* Left Column: Minimal Clean Branding & Vertical Menu */}
+        <div className="flex flex-col justify-center gap-10 max-w-md z-10">
+          {/* Title Area */}
+          <div className="flex flex-col gap-1">
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display tracking-wider text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)] leading-none">
+              HELI-STRIKE
+            </h1>
+            <div className="text-[10px] sm:text-xs font-military tracking-[0.28em] text-[#a89d7c] uppercase">
+              Tactical Air Assault
+            </div>
+          </div>
+
+          {/* Clean Vertical Menu */}
+          <div className="flex flex-col gap-3" role="menu" aria-label="Main Menu">
+            {MENU_ITEMS.map((item) => {
+              const isFocused = focusedIndex === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    onUiSound();
+                    if (item.id === 0) onStart();
+                    else if (item.id === 1) onHangar();
+                    else if (item.id === 2) onSettings();
+                    else if (item.id === 3) onHelp();
+                  }}
+                  onMouseEnter={() => {
+                    setFocusedIndex(item.id);
+                    onUiHover?.();
+                  }}
+                  className={`menu-btn-minimal ${item.isPrimary ? 'menu-btn-minimal-primary' : ''} ${isFocused ? 'is-active' : ''}`}
+                >
+                  <span className="tracking-[0.18em]">{item.title}</span>
+                  <span className="text-[9px] font-tech opacity-60">[{item.hotkey}]</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Minimal Stats Row */}
+          <div className="flex items-center gap-4 text-[10px] font-tech text-[#a89d7c] tracking-wider pt-2 opacity-80">
+            <div>HIGH SCORE <span className="text-[#7df9ff] font-bold">{highScore.toLocaleString()}</span></div>
+            <span>·</span>
+            <div>CREDITS <span className="text-[#ffd700] font-bold">{credits.toLocaleString()}</span></div>
+            {wave > 0 && (
+              <>
+                <span>·</span>
+                <div>LAST <span className="text-[#8df578] font-bold">WAVE {wave}</span></div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Right Column: Pure 3D Hero Render */}
+        <div className="hidden md:flex flex-1 h-full items-center justify-center relative">
+          <HeroHelicopterViewport playerModel={playerModel} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/75 px-3 py-4 backdrop-blur-[2px]">
       <div className="menu-perspective">
         <div className="menu-rig">
-          {!isGameOver ? (
-            <div className="menu-card">
-              <span className="mil-rivet mil-rivet-tl" />
-              <span className="mil-rivet mil-rivet-tr" />
-              <span className="mil-rivet mil-rivet-bl" />
-              <span className="mil-rivet mil-rivet-br" />
+          <div className="menu-card">
+            {/* Tactical Corner Brackets */}
+              <span className="mil-bracket mil-bracket-tl" />
+              <span className="mil-bracket mil-bracket-tr" />
+              <span className="mil-bracket mil-bracket-bl" />
+              <span className="mil-bracket mil-bracket-br" />
 
-              <div className="mil-hazard-strip mb-3 rounded-[1px]" />
-
-              <div className="menu-title-slab text-center">
-                <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.26em] text-[#ffcc00] text-center w-full">
-                  <span>★</span>
-                  <span className="text-[#c2b697]">TACTICAL GUNSHIP CORPS</span>
-                  <span>★</span>
-                </div>
-                <h1 className="arcade-title-hero my-1.5 text-center w-full whitespace-nowrap">HELI-STRIKE</h1>
-                <div className="text-[10px] font-military tracking-[0.18em] text-[#a89d7c] text-center w-full">
-                  URBAN FIELD COMMAND · ENDLESS WAVES
-                </div>
-              </div>
-
-              <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                <div className="menu-stat">
-                  <span>HIGH SCORE</span>
-                  <strong>{highScore.toLocaleString()}</strong>
-                </div>
-                <div className="menu-stat">
-                  <span>CREDITS</span>
-                  <strong className="text-[#ffd700]">{credits.toLocaleString()}</strong>
-                </div>
-                <div className="menu-stat">
-                  <span>LAST WAVE</span>
-                  <strong>{wave || '—'}</strong>
-                </div>
-              </div>
-
-              {isNewPilot && (
-                <div className="mt-3 mil-panel px-3 py-2 text-center text-[10px] font-bold uppercase tracking-[0.14em] text-[#9df578] border-[#58a72b]/60">
-                  ★ Starter credits granted — open Hangar to equip your first upgrade
-                </div>
-              )}
-
-              <div className="mt-5 flex flex-col items-center gap-3">
-                <MenuButton size="lg" onClick={() => { onUiSound(); onStart(); }}>
-                  DEPLOY HELICOPTER
-                </MenuButton>
-                <div className="flex items-center gap-2 text-[11px] font-military tracking-[0.14em] text-[#c2b697]">
-                  <span>THREAT RATING</span>
-                  <DifficultyChip difficulty={difficulty} />
-                </div>
-                <div className="flex flex-wrap justify-center gap-2.5 mt-1">
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHangar(); }}>HANGAR & PERKS</MenuButton>
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onSettings(); }}>SETTINGS</MenuButton>
-                  <MenuButton size="sm" secondary onClick={() => { onUiSound(); onHelp(); }}>FIELD MANUAL</MenuButton>
-                </div>
-              </div>
-
-              <div className="mil-hazard-strip mt-5 rounded-[1px]" />
-            </div>
-          ) : (
-            <div className="menu-card">
               <span className="mil-rivet mil-rivet-tl" />
               <span className="mil-rivet mil-rivet-tr" />
               <span className="mil-rivet mil-rivet-bl" />
@@ -1035,7 +1382,7 @@ function ThreeDMenu({
 
               <div className={stats?.status === 'EXTRACTED' ? 'mil-hazard-strip rounded-[1px] mb-3' : 'mil-hazard-strip-danger rounded-[1px] mb-3'} />
 
-              <div className="menu-title-slab text-center">
+              <div className="menu-title-block text-center">
                 <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00] text-center w-full">
                   <span>★</span>
                   <span>AFTER ACTION REPORT</span>
@@ -1085,27 +1432,27 @@ function ThreeDMenu({
               )}
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                <div className="menu-stat">
-                  <span>WAVE</span>
-                  <strong>{stats?.wave ?? wave}</strong>
+                <div className="menu-stat-card">
+                  <span className="menu-stat-label">WAVE</span>
+                  <strong className="menu-stat-val">{stats?.wave ?? wave}</strong>
                 </div>
-                <div className="menu-stat">
-                  <span>COMBAT TIME</span>
-                  <strong>{formatDuration(stats?.time ?? 0)}</strong>
+                <div className="menu-stat-card">
+                  <span className="menu-stat-label">COMBAT TIME</span>
+                  <strong className="menu-stat-val text-sm mt-1">{formatDuration(stats?.time ?? 0)}</strong>
                 </div>
-                <div className="menu-stat">
-                  <span>HOSTILES DOWN</span>
-                  <strong>{stats?.kills ?? 0}</strong>
+                <div className="menu-stat-card">
+                  <span className="menu-stat-label">HOSTILES</span>
+                  <strong className="menu-stat-val">{stats?.kills ?? 0}</strong>
                 </div>
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2 text-center">
-                <div className="menu-stat">
-                  <span>CREDITS</span>
-                  <strong className="text-[#ffd700]">{(stats?.credits ?? credits).toLocaleString()}</strong>
+                <div className="menu-stat-card menu-stat-card-gold">
+                  <span className="menu-stat-label">CREDITS</span>
+                  <strong className="menu-stat-val text-[#ffd700]">{(stats?.credits ?? credits).toLocaleString()}</strong>
                 </div>
-                <div className="menu-stat">
-                  <span>ACCURACY</span>
-                  <strong>{Math.round((stats?.accuracy ?? 0) * 100)}%</strong>
+                <div className="menu-stat-card">
+                  <span className="menu-stat-label">ACCURACY</span>
+                  <strong className="menu-stat-val">{Math.round((stats?.accuracy ?? 0) * 100)}%</strong>
                 </div>
               </div>
 
@@ -1199,7 +1546,6 @@ function ThreeDMenu({
 
               <div className="mil-hazard-strip mt-3 rounded-[1px]" />
             </div>
-          )}
         </div>
       </div>
     </div>
@@ -2314,6 +2660,7 @@ export default function App() {
 
   // UI feedback sounds — routed through the engine's SFX bus.
   const uiClick = () => engineRef.current?.audio.playClick();
+  const uiHover = () => engineRef.current?.audio.playHover();
   const uiError = () => engineRef.current?.audio.playError();
   const uiPurchase = () => engineRef.current?.audio.playPurchase();
 
@@ -3415,28 +3762,34 @@ export default function App() {
         {mode === 'playing' && !touchDevice && <ControlHints runId={hintsKey} />}
       </div>
 
-      {mode === 'playing' && waveMessage && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/20">
-          <h2 className="arcade-title-hero whitespace-pre-line text-center">
+      {/* Wave Transition Banner — active between combat waves; never overlaps opening countdown */}
+      {mode === 'playing' && waveMessage && opening?.phase !== 'countdown' && goFlash <= 0 && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/20 backdrop-blur-[1px]">
+          <h2 className="arcade-title-hero whitespace-pre-line text-center drop-shadow-[0_4px_12px_rgba(0,0,0,0.9)]">
             {waveMessage}
           </h2>
         </div>
       )}
 
-      {/* Opening countdown */}
+      {/* Opening countdown: Single unified, high-readability countdown */}
       {mode === 'playing' && !tutorial?.active && opening?.phase === 'countdown' && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-2">
-          <div className="arcade-title-hero text-center">
+        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-2.5 bg-black/25 backdrop-blur-[1px]">
+          <div className="flex items-center gap-2 text-xs font-military tracking-[0.3em] text-[#ffcc00]">
+            <span>★</span>
+            <span>SORTIE COMMENCING</span>
+            <span>★</span>
+          </div>
+          <div className="arcade-title-hero text-center text-5xl sm:text-6xl text-white drop-shadow-[0_0_24px_rgba(80,235,255,0.7)]">
             GET READY — {opening.count ?? 3}
           </div>
-          <div className="text-xs font-military tracking-[0.24em] text-[#8df578] drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+          <div className="rounded border border-[#8df578]/40 bg-black/70 px-3 py-1 text-xs font-military tracking-[0.24em] text-[#8df578] shadow-lg backdrop-blur-xs">
             INVULNERABILITY SHIELD ACTIVE
           </div>
         </div>
       )}
       {mode === 'playing' && goFlash > 0 && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
-          <div className="arcade-title-hero text-8xl text-[#6ee740]">GO!</div>
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/20">
+          <div className="arcade-title-hero text-8xl text-[#6ee740] drop-shadow-[0_0_30px_#6ee740] animate-ping">GO!</div>
         </div>
       )}
 
@@ -3657,12 +4010,14 @@ export default function App() {
           difficulty={settings.difficulty}
           credits={credits}
           isNewPilot={isNewPilot}
+          playerModel={playerModel}
           onStart={startRun}
           onSettings={() => setShowSettings(true)}
           onHangar={() => setShowHangar(true)}
           onHelp={() => setShowHelp(true)}
           onMenu={quitToMenu}
           onUiSound={uiClick}
+          onUiHover={uiHover}
         />
       )}
 

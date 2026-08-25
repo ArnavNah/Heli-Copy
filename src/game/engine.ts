@@ -540,7 +540,7 @@ export class GameEngine {
   spawnTimer: number = 0;
   waveTransitionTimer: number = 3.0; // Wait 3s before starting wave 1
   waveTimer: number = 0; // Seconds elapsed in the current time-driven wave
-  waveMessage: string = "GET READY";
+  waveMessage: string = "";
   /** Procedural theme ("hand") for the current non-milestone wave, or null on a
    *  milestone (boss/miniboss) wave. Rolls in startNextWave and reshapes the
    *  horde, hulls, cadence, elite chance, weather, and banner. */
@@ -1268,8 +1268,8 @@ export class GameEngine {
     this.totalEnemiesInWave = 0;
     this.spawnTimer = 0;
     this.waveTimer = 0;
-    this.waveTransitionTimer = 2.2;
-    this.waveMessage = "GET READY";
+    this.waveTransitionTimer = 0;
+    this.waveMessage = "";
     this.samSiteAnnouncedThisRun = false;
     this.radarSiteAnnouncedThisRun = false;
     this.airThreatAnnouncedThisRun = false;
@@ -4258,7 +4258,7 @@ export class GameEngine {
           engineHealth: this.helicopter.engineHealth,
           wave: this.currentWave,
           elapsed: this.survivalTime,
-          message: this.waveTransitionTimer > 0 ? this.waveMessage : null,
+          message: (this.waveTransitionTimer > 0 && this.openingPhase !== "countdown" && Boolean(this.waveMessage)) ? this.waveMessage : null,
           playing: this.isPlaying,
           runLevel: this.runLevel,
           runXpProgress: this.runXpProgress(),
@@ -7285,8 +7285,10 @@ export class GameEngine {
     } else {
       this.cameraYaw += this.currentCameraYawVelocity * delta;
 
-      // Soft follow mode: very gentle auto-alignment behind movement when no input for > 2.5s
-      if (this.settings.cameraFollowMode === 'soft' && !this.isMiddleMouseOrbiting) {
+      if (!this.isPlaying && !this.isMiddleMouseOrbiting) {
+        // Menu cinematic background drift
+        this.cameraYaw += 0.032 * delta;
+      } else if (this.settings.cameraFollowMode === 'soft' && !this.isMiddleMouseOrbiting) {
         const timeSinceInput = (performance.now() / 1000) - this.lastCameraInputTime;
         if (timeSinceInput > 2.5 && speed > 8.0) {
           const targetYaw = Math.atan2(-velocity.x, -velocity.z);
