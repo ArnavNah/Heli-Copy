@@ -14,11 +14,6 @@
 | **High-Octane Combat & HUD** | **Colossal Boss Encounters** |
 | ![In-Game Combat](screenshots/combat.jpg) | ![Boss Battle](screenshots/boss.jpg) |
 
-### Responsive HUD & Tactical Systems
-<p align="center">
-  <img src="screenshots/browser-gameplay.png" width="480" alt="Tactical HUD & Missions" />
-</p>
-
 ---
 
 ## ⚡ Core Features
