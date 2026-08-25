@@ -166,7 +166,7 @@ export type MinimapMission = {
 };
 
 export interface MinimapSnapshot {
-  player: { x: number; y: number; z: number; heading: number };
+  player: { x: number; y: number; z: number; heading: number; cameraYaw?: number };
   enemies: MinimapEnemy[];
   delivery: MinimapDelivery | null;
   objectives: MinimapObjective[];
@@ -198,6 +198,8 @@ export type Difficulty = 'casual' | 'normal' | 'hard';
 export type MovementPreset = 'arcade' | 'simulation';
 /** Camera shake strength. 'off' fully disables gameplay impulses. */
 export type ScreenShakeLevel = 'off' | 'low' | 'full';
+/** 360° Camera follow mode: 'free' stays where player rotates, 'soft' slowly realigns, 'fixed' is legacy locked. */
+export type CameraFollowMode = 'free' | 'soft' | 'fixed';
 
 export interface GameSettings {
   invertedY: boolean;
@@ -222,6 +224,10 @@ export interface GameSettings {
   reduceFlash: boolean;
   /** When true the quality governor may step effects down to hold frame rate. */
   adaptiveQuality: boolean;
+  /** Camera orbit sensitivity multiplier (0.5..2.5). */
+  cameraSensitivity?: number;
+  /** Camera follow behavior (free, soft, fixed). */
+  cameraFollowMode?: CameraFollowMode;
 }
 
 export enum EnemyMovementClass {

@@ -251,6 +251,8 @@ function formatDistance(meters: number): string {
 const CONTROL_HINTS: { keys: string; label: string }[] = [
   { keys: 'W A S D', label: 'Move' },
   { keys: 'HOLD LEFT MOUSE', label: 'Fire Machine Gun' },
+  { keys: 'MIDDLE DRAG / LT+R-STICK', label: '360° Camera Orbit' },
+  { keys: 'R3 / T', label: 'Recenter Camera' },
   { keys: 'SPACE / ALT', label: 'Climb / Descend' },
   { keys: 'SHIFT', label: 'Afterburner' },
   { keys: 'C', label: 'Deploy Flares' },
@@ -735,6 +737,25 @@ function drawMinimap(
     ctx.arc(bp.x, bp.y, 6, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 60, 80, 0.9)';
     ctx.fill();
+  }
+
+  // Camera Viewing Cone (tactical radar view frustum)
+  if (snap.player.cameraYaw !== undefined) {
+    const camAngle = snap.player.cameraYaw;
+    const fovHalf = (52 * Math.PI / 180) * 0.5;
+    const coneLen = R * 0.72;
+    const midAngle = -Math.PI / 2 + camAngle;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, coneLen, midAngle - fovHalf, midAngle + fovHalf);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(80, 235, 255, 0.07)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(80, 235, 255, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Player — centered heading arrow (body heading only; gun aim never affects it).
@@ -1531,6 +1552,46 @@ function SettingsPanel({
                     className="slider-arcade w-28"
                     aria-label="Stick sensitivity"
                   />
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">CAMERA ORBIT SPEED</div>
+                  <div className="setting-desc">Middle mouse & LT + Right Stick 360° orbit sensitivity</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="setting-value">{(settings.cameraSensitivity ?? 1.0).toFixed(1)}x</span>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={3.0}
+                    step={0.1}
+                    value={settings.cameraSensitivity ?? 1.0}
+                    onChange={(e) => onChange({ cameraSensitivity: Number(e.target.value) })}
+                    className="slider-arcade w-28"
+                    aria-label="Camera orbit sensitivity"
+                  />
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">CAMERA FOLLOW MODE</div>
+                  <div className="setting-desc">Free = stay where rotated · Soft = slow auto-realign · Fixed = legacy locked</div>
+                </div>
+                <div className="flex gap-1.5">
+                  {(['free', 'soft', 'fixed'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => { onUiSound(); onChange({ cameraFollowMode: mode }); }}
+                      aria-pressed={(settings.cameraFollowMode ?? 'free') === mode}
+                      className={`seg-btn ${(settings.cameraFollowMode ?? 'free') === mode ? 'seg-on' : ''}`}
+                    >
+                      {mode.toUpperCase()}
+                    </button>
+                  ))}
                 </div>
               </div>
 

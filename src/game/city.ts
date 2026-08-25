@@ -1678,8 +1678,9 @@ export class CityEnvironment {
         archetype === 'slab' ||
         archetype === 'resBlock' ||
         archetype === 'comm');
+    const currentTurretsInChunk = this.chunkTurrets.get(chunk.id)?.length ?? 0;
     const turretHere =
-      developed && flatRoof && !skyscraper && height < 38 && turretRoll > 0.45 && Math.abs(x) > 38;
+      developed && flatRoof && !skyscraper && height < 38 && turretRoll > 0.88 && currentTurretsInChunk < 1 && Math.abs(x) > 42;
     const rooftopMeshes =
       seed > 1 - config.rooftopClutter && flatRoof && !skyscraper && Math.abs(x) > 34
         ? this.addRooftopDetail(chunk, config, x, z, height, width, depth, seed, turretHere)

@@ -13,9 +13,12 @@ import {
   enemySpeedScale,
   enemyAimAccuracy,
   calculateSpawnInterval,
+  ENEMY_VARIANTS,
+  AIR_THREAT_COSTS,
+  GROUND_THREAT_COSTS,
 } from "./logic";
 import { CombatDirector, PERFORMANCE_CAPS } from "./combatDirector";
-import { DirectionalPressureMode } from "./types";
+import { DirectionalPressureMode, EnemyVariant } from "./types";
 
 describe("Difficulty & Pressure Scaling Overhaul", () => {
   describe("1. Central Combat Intensity Model", () => {
@@ -111,22 +114,32 @@ describe("Difficulty & Pressure Scaling Overhaul", () => {
       expect(enemyPopulationTarget(50, 5, true, 3.0)).toBeLessThanOrEqual(48);
     });
 
-    it("escalates Ground and Air threats independently", () => {
-      // Ground threat grows across all waves
-      expect(groundThreatTarget(1)).toBe(4.0);
-      expect(groundThreatTarget(3)).toBe(8.0);
-      expect(groundThreatTarget(5)).toBe(11.0);
-      expect(groundThreatTarget(9)).toBe(13.0);
-      expect(groundThreatTarget(10, 1, false, true)).toBe(5.0); // Boss support throttle
+    it("escalates Ground and Air threats independently with Air-First focus", () => {
+      // Ground threat serves as tactical support
+      expect(groundThreatTarget(1)).toBe(1.5);
+      expect(groundThreatTarget(3)).toBe(3.5);
+      expect(groundThreatTarget(5)).toBe(5.5);
+      expect(groundThreatTarget(9)).toBe(11.0);
+      expect(groundThreatTarget(10, 1, false, true)).toBe(3.0); // Boss support throttle
 
-      // Aerial threat is 0 for early waves and introduces progressively from wave 6
-      expect(airThreatTarget(1)).toBe(0);
-      expect(airThreatTarget(3)).toBe(0);
-      expect(airThreatTarget(5)).toBe(0);
-      expect(airThreatTarget(6)).toBe(2.5); // 1-2 Drones
-      expect(airThreatTarget(7)).toBe(4.0); // 2-3 Drones
-      expect(airThreatTarget(9)).toBe(6.5); // 3-4 Drones
-      expect(airThreatTarget(10, 1, false, true)).toBe(2.5); // Boss support throttle
+      // Aerial threat is primary from Wave 1
+      expect(airThreatTarget(1)).toBe(6.0); // Light Helicopters / Combat Drones
+      expect(airThreatTarget(3)).toBe(10.5);
+      expect(airThreatTarget(5)).toBe(14.0);
+      expect(airThreatTarget(6)).toBe(16.0); // Attack Gunships introduced
+      expect(airThreatTarget(7)).toBe(18.0); // Rocket Gunships introduced
+      expect(airThreatTarget(9)).toBe(24.0); // Full aerial pressure
+      expect(airThreatTarget(10, 1, false, true)).toBe(6.0); // Boss support throttle
+
+      // Verify Target Enemy Mix Ratios
+      const earlyAirRatio = airThreatTarget(1) / (airThreatTarget(1) + groundThreatTarget(1));
+      expect(earlyAirRatio).toBeGreaterThanOrEqual(0.70); // 70-80% Air early
+
+      const midAirRatio = airThreatTarget(5) / (airThreatTarget(5) + groundThreatTarget(5));
+      expect(midAirRatio).toBeGreaterThanOrEqual(0.65); // 65-75% Air mid
+
+      const lateAirRatio = airThreatTarget(9) / (airThreatTarget(9) + groundThreatTarget(9));
+      expect(lateAirRatio).toBeGreaterThanOrEqual(0.60); // 60-70% Air late
     });
   });
 
@@ -222,6 +235,37 @@ describe("Difficulty & Pressure Scaling Overhaul", () => {
       expect(earlyCadence).toBeGreaterThan(lateCadence);
       expect(lateCadence).toBeGreaterThanOrEqual(0.14);
       expect(lullCadence).toBe(0.55); // Lull pauses aggressive influx
+    });
+  });
+
+  describe("6. Wave Flow & Variant Progression", () => {
+    it("enforces intended unlock waves for specialized archetypes", () => {
+      // Light attack helis from Wave 1, Scout drones from Wave 2
+      expect(ENEMY_VARIANTS[EnemyVariant.STANDARD].minWave).toBe(1);
+      expect(ENEMY_VARIANTS[EnemyVariant.SCOUT_DRONE].minWave).toBe(2);
+
+      // Tanks appear from Wave 3
+      expect(ENEMY_VARIANTS[EnemyVariant.FLAK_TANK].minWave).toBe(3);
+
+      // Attack Gunships introduced Wave 6
+      expect(ENEMY_VARIANTS[EnemyVariant.ATTACK_GUNSHIP].minWave).toBe(6);
+
+      // Rocket Gunships introduced Wave 7
+      expect(ENEMY_VARIANTS[EnemyVariant.ROCKET_GUNSHIP].minWave).toBe(7);
+
+      // Kamikaze Drones introduced sparingly in Wave 8
+      expect(ENEMY_VARIANTS[EnemyVariant.KAMIKAZE_DRONE].minWave).toBe(8);
+    });
+
+    it("defines proper threat cost ratings", () => {
+      expect(AIR_THREAT_COSTS.COMBAT_DRONE).toBe(1.5);
+      expect(AIR_THREAT_COSTS.ATTACK_GUNSHIP).toBe(3.0);
+      expect(AIR_THREAT_COSTS.ROCKET_GUNSHIP).toBe(3.5);
+      expect(AIR_THREAT_COSTS.KAMIKAZE_DRONE).toBe(1.25);
+
+      expect(GROUND_THREAT_COSTS.INFANTRY).toBe(1.0);
+      expect(GROUND_THREAT_COSTS.TANK).toBe(2.0);
+      expect(GROUND_THREAT_COSTS.SAM).toBe(3.0);
     });
   });
 });

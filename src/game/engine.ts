@@ -310,6 +310,8 @@ export class GameEngine {
     screenShake: 'full',
     reduceFlash: false,
     adaptiveQuality: true,
+    cameraSensitivity: 1.0,
+    cameraFollowMode: 'free',
   };
 
   get difficulty() {
@@ -502,6 +504,22 @@ export class GameEngine {
 
   // Stable camera state. No random or impulse offset is ever composed onto it.
   private baseCamPos = new THREE.Vector3(0, 62, 46);
+
+  // Free 360° Camera Orbit System
+  cameraYaw: number = 0;
+  targetCameraYawVelocity: number = 0;
+  currentCameraYawVelocity: number = 0;
+  isRecenteringCamera: boolean = false;
+  private recenterStartYaw: number = 0;
+  private recenterTargetYaw: number = 0;
+  private recenterTimer: number = 0;
+  readonly recenterDuration: number = 0.35;
+  lastCameraInputTime: number = 0;
+  cameraBoomFraction: number = 1.0;
+  isMiddleMouseOrbiting: boolean = false;
+  lastPointerX: number = 0;
+  lastPointerY: number = 0;
+  private prevR3Pressed: boolean = false;
   lastStatsHealth = -1;
   lastStatsFuel = -1;
   lastUiUpdateTime = -Infinity;
@@ -1188,6 +1206,12 @@ export class GameEngine {
     this.baseCamPos.set(0, 62, 46);
     this.camera.position.copy(this.baseCamPos);
     this.cameraLookAtTarget.set(0, 28, -9);
+    this.cameraYaw = 0;
+    this.targetCameraYawVelocity = 0;
+    this.currentCameraYawVelocity = 0;
+    this.isRecenteringCamera = false;
+    this.cameraBoomFraction = 1.0;
+    this.isMiddleMouseOrbiting = false;
     this.hangarUpgrades = readHangarUpgrades();
     this.resetWeaponsFromHangar();
     this.countermeasures = new CountermeasureState(
@@ -1979,6 +2003,29 @@ export class GameEngine {
     this.updateAutoAim();
   }
 
+  recenterCamera(time?: number) {
+    const velocity = this.helicopter.body.velocity;
+    const speed = Math.hypot(velocity.x, velocity.z);
+    let targetYaw = 0;
+    if (speed > 3.5) {
+      // Align behind flight direction
+      targetYaw = Math.atan2(-velocity.x, -velocity.z);
+    } else if (this.helicopter.mesh) {
+      targetYaw = this.helicopter.mesh.rotation.y + Math.PI;
+    }
+
+    let diff = targetYaw - this.cameraYaw;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+
+    this.recenterStartYaw = this.cameraYaw;
+    this.recenterTargetYaw = this.cameraYaw + diff;
+    this.recenterTimer = 0;
+    this.isRecenteringCamera = true;
+    this.targetCameraYawVelocity = 0;
+    this.currentCameraYawVelocity = 0;
+  }
+
   private updateStickAim() {
     if (!this.rightStick.active) return;
 
@@ -1991,13 +2038,26 @@ export class GameEngine {
     }
 
     const aimDistance = 55;
-    const dirX = this.rightStick.x / mag;
-    const dirZ = this.rightStick.y / mag;
+    const rNormX = this.rightStick.x / mag;
+    const rScreenY = -this.rightStick.y / mag; // Screen UP is -Y on touch stick
+
+    const camFwd = GameEngine._scratchCamFwd;
+    this.camera.getWorldDirection(camFwd);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+    else camFwd.normalize();
+
+    const camRight = GameEngine._scratchCamRight;
+    camRight.crossVectors(camFwd, this.worldUp).normalize();
+
+    const aimWorldX = camRight.x * rNormX + camFwd.x * rScreenY;
+    const aimWorldZ = camRight.z * rNormX + camFwd.z * rScreenY;
+
     const aimHeight = this.helicopter.body.position.y;
     this.aimPoint.set(
-      this.helicopter.body.position.x + dirX * aimDistance,
+      this.helicopter.body.position.x + aimWorldX * aimDistance,
       aimHeight,
-      this.helicopter.body.position.z + dirZ * aimDistance,
+      this.helicopter.body.position.z + aimWorldZ * aimDistance,
     );
     // The chin gun tracks the stick aim — the body flies on course and never
     // swings toward where the player is aiming.
@@ -2009,6 +2069,16 @@ export class GameEngine {
   onPointerMove = (e: PointerEvent) => {
     if (e.target !== this.renderer.domElement) return;
     if (this.settings.touchMode && e.pointerType === 'touch') return;
+    if (this.isMiddleMouseOrbiting) {
+      const deltaX = e.clientX - this.lastPointerX;
+      const sensitivity = (this.settings.cameraSensitivity ?? 1.0) * 0.006;
+      this.cameraYaw -= deltaX * sensitivity;
+      this.lastPointerX = e.clientX;
+      this.lastPointerY = e.clientY;
+      this.lastCameraInputTime = performance.now() / 1000;
+      this.isRecenteringCamera = false;
+      return;
+    }
     this.updateMouseAimFromEvent(e);
   };
 
@@ -2018,6 +2088,16 @@ export class GameEngine {
     if (this.settings.touchMode && e.pointerType === 'touch') return;
     e.preventDefault();
     this.audio.resume();
+
+    if (e.button === 1) {
+      // Middle Click: start camera yaw orbit
+      this.isMiddleMouseOrbiting = true;
+      this.lastPointerX = e.clientX;
+      this.lastPointerY = e.clientY;
+      this.lastCameraInputTime = performance.now() / 1000;
+      this.isRecenteringCamera = false;
+      return;
+    }
 
     if (e.button === 2) {
       this.startPaintingLocks();
@@ -2033,6 +2113,10 @@ export class GameEngine {
   };
 
   onPointerUp = (e: PointerEvent) => {
+    if (e.button === 1) {
+      this.isMiddleMouseOrbiting = false;
+      return;
+    }
     if (e.button === 2 || this.isPaintingLocks) {
       this.releaseSalvo();
     } else {
@@ -4328,7 +4412,13 @@ export class GameEngine {
     window.dispatchEvent(
       new CustomEvent("helistrike:minimap", {
         detail: {
-          player: { x: playerPos.x, y: playerPos.y, z: playerPos.z, heading: this.helicopter.mesh.rotation.y },
+          player: {
+            x: playerPos.x,
+            y: playerPos.y,
+            z: playerPos.z,
+            heading: this.helicopter.mesh.rotation.y,
+            cameraYaw: this.cameraYaw,
+          },
           enemies,
           delivery,
           objectives,
@@ -4737,6 +4827,15 @@ export class GameEngine {
 
   private getSamThreat() {
     const player = this.helicopter.body.position;
+    const camFwd = GameEngine._scratchCamFwd;
+    this.camera.getWorldDirection(camFwd);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+    else camFwd.normalize();
+
+    const camRight = GameEngine._scratchCamRight;
+    camRight.crossVectors(camFwd, this.worldUp).normalize();
+
     let nearestMissile: Projectile | null = null;
     let missileDistance = Infinity;
     for (const projectile of this.enemyProjectiles.pool) {
@@ -4752,11 +4851,15 @@ export class GameEngine {
       }
     }
     if (nearestMissile) {
+      const dx = nearestMissile.pos.x - player.x;
+      const dz = nearestMissile.pos.z - player.z;
+      const screenRelX = camRight.x * dx + camRight.z * dz;
+      const screenRelY = camFwd.x * dx + camFwd.z * dz;
       return {
         state: "INBOUND" as const,
         progress: 1,
         distance: Math.round(missileDistance),
-        bearing: Math.atan2(nearestMissile.pos.x - player.x, -(nearestMissile.pos.z - player.z)) * 180 / Math.PI,
+        bearing: Math.atan2(screenRelX, screenRelY) * 180 / Math.PI,
       };
     }
     let best: Objective | null = null;
@@ -4766,11 +4869,15 @@ export class GameEngine {
       if (!best || objective.samLockProgress > best.samLockProgress) best = objective;
     }
     if (!best) return null;
+    const samDx = best.position.x - player.x;
+    const samDz = best.position.z - player.z;
+    const samScreenRelX = camRight.x * samDx + camRight.z * samDz;
+    const samScreenRelY = camFwd.x * samDx + camFwd.z * samDz;
     return {
       state: best.samState === SamState.LOCKING ? "LOCKING" as const : "TRACKING" as const,
       progress: best.samLockProgress,
       distance: Math.round(best.distanceTo(player.x, player.z)),
-      bearing: Math.atan2(best.position.x - player.x, -(best.position.z - player.z)) * 180 / Math.PI,
+      bearing: Math.atan2(samScreenRelX, samScreenRelY) * 180 / Math.PI,
     };
   }
 
@@ -4796,6 +4903,15 @@ export class GameEngine {
       isDecoyed: boolean;
     }> = [];
 
+    const camFwd = GameEngine._scratchCamFwd;
+    this.camera.getWorldDirection(camFwd);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+    else camFwd.normalize();
+
+    const camRight = GameEngine._scratchCamRight;
+    camRight.crossVectors(camFwd, this.worldUp).normalize();
+
     for (const proj of this.enemyProjectiles.pool) {
       if (!proj.active || proj.homingStrength <= 0) continue;
       const isTargetingPlayer = proj.target?.body === this.helicopter.body;
@@ -4810,7 +4926,10 @@ export class GameEngine {
       const closingSpeed = Math.max(25, proj.vel ? Math.hypot(proj.vel.x, proj.vel.z) : 95);
       const tti = distance / closingSpeed;
       const danger: "YELLOW" | "ORANGE" | "RED" = tti < 1.2 ? "RED" : (tti < 2.5 ? "ORANGE" : "YELLOW");
-      const bearing = Math.atan2(dx, -dz) * 180 / Math.PI;
+
+      const screenRelX = camRight.x * dx + camRight.z * dz;
+      const screenRelY = camFwd.x * dx + camFwd.z * dz;
+      const bearing = Math.atan2(screenRelX, screenRelY) * 180 / Math.PI;
 
       threats.push({
         id: proj.index,
@@ -4830,25 +4949,28 @@ export class GameEngine {
   private spawnObjective(forcedType?: ObjectiveType, nearX?: number, nearZ?: number): Objective | null {
     const player = this.helicopter.body.position;
     const lanes = [-120, -78, -48, -24, 0, 24, 48, 78, 120];
-    const samCap = 1;
+    const samCap = this.currentWave >= 14 ? 2 : 1;
     const radarCap = 1;
     const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
     const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
 
-    let type = forcedType ?? (this.currentWave >= 3 && activeRadars === 0 && Math.random() < 0.55 ? ObjectiveType.RADAR_TOWER : ObjectiveType.SAM_SITE);
-    if (type === ObjectiveType.SAM_SITE && activeSams >= samCap) {
-      if (activeRadars < radarCap && this.currentWave >= 3) {
+    // SAM sites should NEVER spawn before Wave 8 (occasional high-priority threat).
+    // Radar towers appear in Wave 5 (or when forced by mission).
+    let type = forcedType;
+    if (!type) {
+      if (this.currentWave >= 5 && activeRadars === 0 && Math.random() < 0.6) {
         type = ObjectiveType.RADAR_TOWER;
-      } else {
-        return null;
-      }
-    }
-    if (type === ObjectiveType.RADAR_TOWER && activeRadars >= radarCap) {
-      if (activeSams < samCap && this.currentWave >= 4) {
+      } else if (this.currentWave >= 8 && activeSams < samCap && Math.random() < 0.4) {
         type = ObjectiveType.SAM_SITE;
       } else {
         return null;
       }
+    }
+    if (type === ObjectiveType.SAM_SITE && (this.currentWave < 8 || activeSams >= samCap)) {
+      return null;
+    }
+    if (type === ObjectiveType.RADAR_TOWER && activeRadars >= radarCap) {
+      return null;
     }
 
     let laneX = nearX ?? 0;
@@ -4974,19 +5096,37 @@ export class GameEngine {
   spawnEnemy() {
     // --- Two-Budget Director Spawning ---
     // Spawns Combat Drone (DRONE), Tank (TANK), and Infantry Cluster (BASIC)
-    let type = EnemyType.BASIC;
+    let type = EnemyType.DRONE;
+    let variant = EnemyVariant.STANDARD;
     const directorConfig = threatDirectorConfig(this.threatLevel);
     const directorWave = Math.max(this.currentWave, this.threatLevel * 2 - 1) + directorConfig.directorWaveBonus;
     
     if (this.pendingVariantQueue.length > 0) {
       const v = this.pendingVariantQueue.shift()!;
-      type = v === EnemyVariant.SCOUT_DRONE ? EnemyType.DRONE : v === EnemyVariant.FLAK_TANK ? EnemyType.TANK : EnemyType.BASIC;
+      variant = v;
+      if (
+        v === EnemyVariant.ATTACK_GUNSHIP ||
+        v === EnemyVariant.ROCKET_GUNSHIP ||
+        v === EnemyVariant.HEAVY_GUNSHIP ||
+        v === EnemyVariant.MINELAYER
+      ) {
+        type = EnemyType.SHOOTER;
+      } else if (
+        v === EnemyVariant.FLAK_TANK ||
+        v === EnemyVariant.MISSILE_CARRIER ||
+        v === EnemyVariant.SIEGE_TANK ||
+        v === EnemyVariant.GATLING_HEAVY
+      ) {
+        type = EnemyType.TANK;
+      } else if (v === EnemyVariant.STANDARD && directorWave >= 2 && Math.random() < 0.25) {
+        type = EnemyType.BASIC;
+      } else {
+        type = EnemyType.DRONE;
+      }
     } else {
-      const isMixedWave = directorWave >= 6;
-      const mixedComp = isMixedWave ? pickMixedComposition(directorWave) : null;
-
-      if (mixedComp && Math.random() < 0.6) {
-        if (mixedComp.sam > 0) {
+      const mixedComp = pickMixedComposition(directorWave);
+      if (mixedComp) {
+        if (mixedComp.sam > 0 && directorWave >= 8) {
           const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
           if (activeSams === 0) {
             this.spawnObjective(ObjectiveType.SAM_SITE);
@@ -4995,51 +5135,55 @@ export class GameEngine {
         const total = mixedComp.air + mixedComp.tanks + mixedComp.infantry;
         const roll = Math.random() * (total || 1);
         if (roll < mixedComp.air) {
-          type = EnemyType.DRONE;
-        } else if (roll < mixedComp.air + mixedComp.tanks) {
+          // Select Air Archetype according to wave flow
+          if (directorWave >= 8 && Math.random() < 0.12) {
+            variant = EnemyVariant.KAMIKAZE_DRONE;
+            type = EnemyType.DRONE;
+          } else if (directorWave >= 7 && Math.random() < 0.22) {
+            variant = EnemyVariant.ROCKET_GUNSHIP;
+            type = EnemyType.SHOOTER;
+          } else if (directorWave >= 6 && Math.random() < 0.28) {
+            variant = EnemyVariant.ATTACK_GUNSHIP;
+            type = EnemyType.SHOOTER;
+          } else if (Math.random() < 0.40) {
+            variant = EnemyVariant.SCOUT_DRONE;
+            type = EnemyType.DRONE;
+          } else {
+            variant = EnemyVariant.STANDARD;
+            type = EnemyType.DRONE;
+          }
+        } else if (roll < mixedComp.air + mixedComp.tanks && directorWave >= 3) {
+          variant = EnemyVariant.FLAK_TANK;
           type = EnemyType.TANK;
         } else {
+          variant = EnemyVariant.STANDARD;
           type = EnemyType.BASIC;
-        }
-        for (let i = 0; i < mixedComp.air - (type === EnemyType.DRONE ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
-        for (let i = 0; i < mixedComp.tanks - (type === EnemyType.TANK ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
-        for (let i = 0; i < mixedComp.infantry - (type === EnemyType.BASIC ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.STANDARD);
-      } else {
-        const comp = pickGroundComposition(directorWave);
-        if (comp.radar > 0) {
-          const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
-          if (activeRadars === 0) {
-            const radarObj = this.spawnObjective(ObjectiveType.RADAR_TOWER);
-            if (radarObj && comp.sam > 0) {
-              const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
-              if (activeSams === 0) {
-                this.spawnObjective(ObjectiveType.SAM_SITE, radarObj.position.x + 36, radarObj.position.z + 18);
-              }
-            }
-          }
-        } else if (comp.sam > 0) {
-          const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
-          if (activeSams === 0) {
-            this.spawnObjective(ObjectiveType.SAM_SITE);
-          }
         }
 
-        if (comp.tanks > 0 && Math.random() < (comp.tanks / (comp.infantry + comp.tanks || 1))) {
-          type = EnemyType.TANK;
-        } else {
-          type = EnemyType.BASIC;
+        // Queue remaining members of mixed squadron
+        for (let i = 0; i < mixedComp.air - (type === EnemyType.DRONE || type === EnemyType.SHOOTER ? 1 : 0); i++) {
+          if (directorWave >= 7 && Math.random() < 0.2) this.pendingVariantQueue.push(EnemyVariant.ROCKET_GUNSHIP);
+          else if (directorWave >= 6 && Math.random() < 0.25) this.pendingVariantQueue.push(EnemyVariant.ATTACK_GUNSHIP);
+          else if (Math.random() < 0.4) this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
+          else this.pendingVariantQueue.push(EnemyVariant.STANDARD);
         }
-        for (let i = 0; i < comp.infantry - (type === EnemyType.BASIC ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.STANDARD);
-        for (let i = 0; i < comp.tanks - (type === EnemyType.TANK ? 1 : 0); i++) this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
+        for (let i = 0; i < mixedComp.tanks - (type === EnemyType.TANK ? 1 : 0); i++) {
+          this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
+        }
+        for (let i = 0; i < mixedComp.infantry - (type === EnemyType.BASIC ? 1 : 0); i++) {
+          this.pendingVariantQueue.push(EnemyVariant.STANDARD);
+        }
+      } else {
+        type = EnemyType.DRONE;
+        variant = EnemyVariant.STANDARD;
       }
-      if (this.pendingVariantQueue.length > SPAWN_CONFIG.maxQueue) {
-        this.pendingVariantQueue.length = SPAWN_CONFIG.maxQueue;
+      if (this.pendingVariantQueue.length > PERFORMANCE_CAPS.MAX_SPAWN_QUEUE) {
+        this.pendingVariantQueue.length = PERFORMANCE_CAPS.MAX_SPAWN_QUEUE;
       }
     }
 
     const modifier = EnemyModifier.NONE;
     const pattern = AttackPattern.CHASE;
-    const variant = type === EnemyType.DRONE ? EnemyVariant.STANDARD : type === EnemyType.TANK ? EnemyVariant.FLAK_TANK : EnemyVariant.STANDARD;
 
     let spot;
     let attempts = 0;
@@ -5269,7 +5413,7 @@ export class GameEngine {
     let baseX = THREE.MathUtils.clamp(targetX, -170, 170);
     let baseZ = targetZ;
 
-    if (type === EnemyType.DRONE || type === EnemyType.BOSS) {
+    if (type === EnemyType.DRONE || type === EnemyType.BOSS || type === EnemyType.SHOOTER) {
       const minSafeHeight = this.city.getHeightAt(baseX, baseZ, 2.0) + 6.0;
       const desiredY = player.y + (type === EnemyType.BOSS ? 4.0 : (Math.random() - 0.5) * 6.0);
       const y = Math.max(minSafeHeight, Math.max(15, desiredY));
@@ -5396,7 +5540,15 @@ export class GameEngine {
     for (const e of this.enemies) {
       if (e.active) {
         if (e.type === EnemyType.DRONE) {
-          currentAirThreat += AIR_THREAT_COSTS.COMBAT_DRONE;
+          currentAirThreat +=
+            e.variant === EnemyVariant.KAMIKAZE_DRONE
+              ? AIR_THREAT_COSTS.KAMIKAZE_DRONE
+              : AIR_THREAT_COSTS.COMBAT_DRONE;
+        } else if (e.type === EnemyType.SHOOTER) {
+          currentAirThreat +=
+            e.variant === EnemyVariant.ROCKET_GUNSHIP
+              ? AIR_THREAT_COSTS.ROCKET_GUNSHIP
+              : AIR_THREAT_COSTS.ATTACK_GUNSHIP;
         } else if (e.type === EnemyType.TANK) {
           currentGroundThreat += GROUND_THREAT_COSTS.TANK;
         } else if (e.type === EnemyType.BASIC) {
@@ -5620,40 +5772,61 @@ export class GameEngine {
       this.gamepadMove.z = 0;
     }
 
-    // Right stick: weapon aiming & auto-fire (independent from body movement)
+    // LT / L2 Modifier check (gp.buttons[6])
+    const isCameraModifierHeld = Boolean(
+      gp.buttons[6]?.pressed || (gp.buttons[6] && gp.buttons[6].value > 0.2),
+    );
+
+    // Right stick: camera orbit (when LT held) OR weapon aiming & auto-fire (when LT not held)
     const rx = gp.axes[2] ?? 0;
     const ry = gp.axes[3] ?? 0;
     const rMag = Math.hypot(rx, ry);
-    if (rMag > DEADZONE) {
-      this.audio.resume();
-      this.isMouseActive = false;
-      this.mouseAimValid = false;
 
-      const aimDist = 65;
-      const aimHeight = this.helicopter.body.position.y;
+    if (isCameraModifierHeld) {
+      // Camera Orbit Mode: Right stick X rotates camera yaw smoothly
+      const camSensitivity = (this.settings.cameraSensitivity ?? 1.0) * (this.settings.gamepadSensitivity ?? 1.5);
+      if (Math.abs(rx) > DEADZONE) {
+        const normRx = (rx - Math.sign(rx) * DEADZONE) / (1 - DEADZONE);
+        this.targetCameraYawVelocity = -normRx * 2.8 * camSensitivity; // ~160 deg/sec base
+        this.lastCameraInputTime = time;
+      } else {
+        this.targetCameraYawVelocity = 0;
+      }
+    } else {
+      // Normal Mode: Target camera velocity is 0 from controller
+      this.targetCameraYawVelocity = 0;
 
-      const camFwd = GameEngine._scratchCamFwd;
-      this.camera.getWorldDirection(camFwd);
-      camFwd.y = 0;
-      if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
-      else camFwd.normalize();
+      if (rMag > DEADZONE) {
+        this.audio.resume();
+        this.isMouseActive = false;
+        this.mouseAimValid = false;
 
-      const camRight = GameEngine._scratchCamRight;
-      camRight.crossVectors(camFwd, this.worldUp).normalize();
+        const aimDist = 65;
+        const aimHeight = this.helicopter.body.position.y;
 
-      const rNormX = rx / rMag;
-      const rScreenY = this.settings.invertedY ? ry / rMag : -ry / rMag;
+        const camFwd = GameEngine._scratchCamFwd;
+        this.camera.getWorldDirection(camFwd);
+        camFwd.y = 0;
+        if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+        else camFwd.normalize();
 
-      const aimWorldX = camRight.x * rNormX + camFwd.x * rScreenY;
-      const aimWorldZ = camRight.z * rNormX + camFwd.z * rScreenY;
+        const camRight = GameEngine._scratchCamRight;
+        camRight.crossVectors(camFwd, this.worldUp).normalize();
 
-      this.aimPoint.set(
-        this.helicopter.body.position.x + aimWorldX * aimDist,
-        aimHeight,
-        this.helicopter.body.position.z + aimWorldZ * aimDist,
-      );
-      this.helicopter.setGunAim(this.aimPoint.x, aimHeight, this.aimPoint.z, true);
-      this.targetGroup.visible = false;
+        const rNormX = rx / rMag;
+        const rScreenY = this.settings.invertedY ? ry / rMag : -ry / rMag;
+
+        const aimWorldX = camRight.x * rNormX + camFwd.x * rScreenY;
+        const aimWorldZ = camRight.z * rNormX + camFwd.z * rScreenY;
+
+        this.aimPoint.set(
+          this.helicopter.body.position.x + aimWorldX * aimDist,
+          aimHeight,
+          this.helicopter.body.position.z + aimWorldZ * aimDist,
+        );
+        this.helicopter.setGunAim(this.aimPoint.x, aimHeight, this.aimPoint.z, true);
+        this.targetGroup.visible = false;
+      }
     }
 
     // Gamepad buttons
@@ -5662,7 +5835,7 @@ export class GameEngine {
       gp.buttons[7]?.pressed ||
       (gp.buttons[7] && gp.buttons[7].value > 0.1) ||
       gp.buttons[5]?.pressed ||
-      rMag > DEADZONE;
+      (!isCameraModifierHeld && rMag > DEADZONE);
     if (this.isFiringGamepad) {
       this.audio.resume();
     }
@@ -5681,6 +5854,13 @@ export class GameEngine {
     if (gp.buttons[4]?.pressed) {
       this.deployCountermeasure(performance.now() / 1000);
     }
+
+    // R3 (button 11) = Recenter Camera
+    const r3Pressed = Boolean(gp.buttons[11]?.pressed);
+    if (r3Pressed && !this.prevR3Pressed) {
+      this.recenterCamera(time);
+    }
+    this.prevR3Pressed = r3Pressed;
   }
 
   updateKeyboardMovement(delta: number) {
@@ -7081,25 +7261,93 @@ export class GameEngine {
     ) return;
 
     const speed = Math.hypot(velocity.x, velocity.z);
-    // 7c: speed-based camera pullback — at high speed the camera drifts
-    // further back so the player has more forward visibility.
+
+    // 1. Angular Yaw Velocity Integration (Frame-rate independent)
+    const accelRate = 18;
+    const dampingRate = 22;
+    if (Math.abs(this.targetCameraYawVelocity) > 0.001) {
+      this.currentCameraYawVelocity += (this.targetCameraYawVelocity - this.currentCameraYawVelocity) * (1 - Math.exp(-accelRate * delta));
+      this.lastCameraInputTime = performance.now() / 1000;
+      this.isRecenteringCamera = false;
+    } else {
+      this.currentCameraYawVelocity += (0 - this.currentCameraYawVelocity) * (1 - Math.exp(-dampingRate * delta));
+    }
+
+    if (this.isRecenteringCamera) {
+      this.recenterTimer += delta;
+      const t = Math.min(1, this.recenterTimer / this.recenterDuration);
+      const smoothT = t * t * (3 - 2 * t); // Smoothstep
+      this.cameraYaw = this.recenterStartYaw + (this.recenterTargetYaw - this.recenterStartYaw) * smoothT;
+      if (t >= 1) {
+        this.isRecenteringCamera = false;
+        this.cameraYaw = this.recenterTargetYaw;
+      }
+    } else {
+      this.cameraYaw += this.currentCameraYawVelocity * delta;
+
+      // Soft follow mode: very gentle auto-alignment behind movement when no input for > 2.5s
+      if (this.settings.cameraFollowMode === 'soft' && !this.isMiddleMouseOrbiting) {
+        const timeSinceInput = (performance.now() / 1000) - this.lastCameraInputTime;
+        if (timeSinceInput > 2.5 && speed > 8.0) {
+          const targetYaw = Math.atan2(-velocity.x, -velocity.z);
+          let diff = targetYaw - this.cameraYaw;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          this.cameraYaw += Math.sign(diff) * Math.min(Math.abs(diff), 0.45 * delta);
+        }
+      } else if (this.settings.cameraFollowMode === 'fixed') {
+        this.cameraYaw = 0;
+      }
+    }
+
+    // Keep cameraYaw cleanly wrapped in [-PI, PI]
+    while (this.cameraYaw > Math.PI) this.cameraYaw -= Math.PI * 2;
+    while (this.cameraYaw < -Math.PI) this.cameraYaw += Math.PI * 2;
+
+    const sinYaw = Math.sin(this.cameraYaw);
+    const cosYaw = Math.cos(this.cameraYaw);
+
+    // 2. Base Radial Distance & Height (Strictly preserving original camera parameters)
     const pullback = Math.min(speed * 0.12, 9);
-    const camTargetX = heli.x + THREE.MathUtils.clamp(velocity.x * 0.22, -9, 9);
-    const camTargetZ =
-      heli.z + 36 + pullback + this.combatIntensity * 6 + THREE.MathUtils.clamp(velocity.z * 0.16, -8, 8);
+    const baseDistance = 36 + pullback + this.combatIntensity * 6;
+    const baseHeight = 28 + Math.min(speed * 0.08, 6) + this.combatIntensity * 4;
+
+    const leadX = THREE.MathUtils.clamp(velocity.x * 0.22, -9, 9);
+    const leadZ = THREE.MathUtils.clamp(velocity.z * 0.16, -8, 8);
+
+    const offsetX = sinYaw * baseDistance;
+    const offsetZ = cosYaw * baseDistance;
+
+    // 3. Camera Boom Collision Compression (smoothly shorten if camera intersects tall structure)
+    const testCamX = heli.x + offsetX + leadX;
+    const testCamZ = heli.z + offsetZ + leadZ;
+    const buildingHeight = this.city ? this.city.getHeightAt(testCamX, testCamZ, 1.8) : 0;
+    let targetBoom = 1.0;
+    const minCamY = heli.y + baseHeight;
+    if (buildingHeight > minCamY - 3.5) {
+      targetBoom = 0.65;
+    }
+    this.cameraBoomFraction += (targetBoom - this.cameraBoomFraction) * (1 - Math.exp(-8 * delta));
+
+    // 4. Target Camera Position
+    const camTargetX = heli.x + offsetX * this.cameraBoomFraction + leadX;
+    const camTargetY = heli.y + baseHeight * Math.max(0.85, this.cameraBoomFraction);
+    const camTargetZ = heli.z + offsetZ * this.cameraBoomFraction + leadZ;
+
     const camLerp = 1 - Math.exp(-(this.isPlaying ? 10 : 3.5) * delta);
     this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camLerp;
     this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camLerp;
 
-    const baseCamY = heli.y + 28 + Math.min(speed * 0.08, 6) + this.combatIntensity * 4;
     const camYLerp = 1 - Math.exp(-6 * delta);
-    this.baseCamPos.y += (baseCamY - this.baseCamPos.y) * camYLerp;
+    this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camYLerp;
 
+    // 5. FOV (Unchanged)
     const targetFov = 52 + Math.min(speed * 0.07, 6) + this.combatIntensity * 4;
     this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4 * delta));
     this.camera.updateProjectionMatrix();
     this.camera.position.copy(this.baseCamPos);
-    // Settings-gated camera shake: bounded jitter around the base position.
+
+    // 6. Settings-Gated Screen Shake
     if (this.cameraShakeAmp > 0.02) {
       const shakeScale = this.settings.screenShake === 'low' ? 0.45 : 1;
       const amp = this.cameraShakeAmp * shakeScale;
@@ -7109,6 +7357,7 @@ export class GameEngine {
     }
     this.cameraShakeAmp = Math.max(0, this.cameraShakeAmp - delta * (2.5 + this.cameraShakeAmp));
 
+    // 7. 3D Building Occlusion / Ghosting (Calculated from actual 3D orbital camera position)
     this.city.updateOcclusion(
       this.baseCamPos.x,
       this.baseCamPos.y,
@@ -7120,12 +7369,16 @@ export class GameEngine {
       this.isPlaying,
     );
 
-    // 7b: enhanced look-ahead — camera looks further ahead at high speed
-    // so the player sees what's coming, not where they are.
+    // 8. LookAt Target (Forward along yaw direction with speed look-ahead)
+    const lookDist = 9;
+    const lookOffsetX = -sinYaw * lookDist;
+    const lookOffsetZ = -cosYaw * lookDist;
+
     const laScale = 1 + Math.min(speed * 0.008, 0.8);
-    const desiredLookX = heli.x + THREE.MathUtils.clamp(velocity.x * 0.14 * laScale, -6, 6);
+    const desiredLookX = heli.x + lookOffsetX + THREE.MathUtils.clamp(velocity.x * 0.14 * laScale, -6, 6);
     const desiredLookY = Math.max(8, Math.min(70, heli.y + 2));
-    const desiredLookZ = heli.z - 9 + THREE.MathUtils.clamp(velocity.z * 0.16 * laScale, -10, 5);
+    const desiredLookZ = heli.z + lookOffsetZ + THREE.MathUtils.clamp(velocity.z * 0.16 * laScale, -10, 5);
+
     const lookLerp = 1 - Math.exp(-12 * delta);
     this.cameraLookAtTarget.x += (desiredLookX - this.cameraLookAtTarget.x) * lookLerp;
     this.cameraLookAtTarget.y += (desiredLookY - this.cameraLookAtTarget.y) * lookLerp;

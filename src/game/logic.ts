@@ -303,27 +303,28 @@ export function groundThreatTarget(
   isBossActive = false,
 ): number {
   const w = Math.max(1, Math.floor(wave));
-  if (isBossActive) return 5.0;
-  const threatBonus = (threatLevel - 1) * 1.2;
+  if (isBossActive) return 3.0;
+  const threatBonus = (threatLevel - 1) * 0.8;
   if (isOverdrive) {
-    return Math.min(22.0, 14.0 + (w - 10) * 0.8 + threatBonus);
+    return Math.min(18.0, 12.0 + (w - 10) * 0.6 + threatBonus);
   }
   const groundMap: Record<number, number> = {
-    1: 4.0,
-    2: 6.0,
-    3: 8.0,
-    4: 9.5,
-    5: 11.0,
-    6: 8.5,
-    7: 10.0,
-    8: 11.5,
-    9: 13.0,
+    1: 1.5,
+    2: 2.0,
+    3: 3.5,
+    4: 4.5,
+    5: 5.5,
+    6: 6.5,
+    7: 7.5,
+    8: 9.0,
+    9: 11.0,
   };
-  return (groundMap[w] ?? 13.0) + threatBonus;
+  return (groundMap[w] ?? 11.0) + threatBonus;
 }
 
 /**
  * Target aerial threat points per wave.
+ * High priority Air combat from Wave 1 (~70-80% early, ~65-75% mid, ~60-70% late).
  */
 export function airThreatTarget(
   wave: number,
@@ -332,23 +333,23 @@ export function airThreatTarget(
   isBossActive = false,
 ): number {
   const w = Math.max(1, Math.floor(wave));
-  if (isBossActive) return 2.5;
-  const threatBonus = (threatLevel - 1) * 0.8;
+  if (isBossActive) return 6.0;
+  const threatBonus = (threatLevel - 1) * 1.2;
   if (isOverdrive) {
-    return Math.min(14.0, 7.0 + (w - 10) * 0.6 + threatBonus);
+    return Math.min(36.0, 26.0 + (w - 10) * 1.0 + threatBonus);
   }
   const airMap: Record<number, number> = {
-    1: 0,
-    2: 0,
-    3: 0,
-    4: 0,
-    5: 0,
-    6: 2.5,
-    7: 4.0,
-    8: 5.0,
-    9: 6.5,
+    1: 6.0,
+    2: 8.0,
+    3: 10.5,
+    4: 12.0,
+    5: 14.0,
+    6: 16.0,
+    7: 18.0,
+    8: 20.0,
+    9: 24.0,
   };
-  return (airMap[w] ?? 6.5) + threatBonus;
+  return (airMap[w] ?? 24.0) + threatBonus;
 }
 
 /**
@@ -765,7 +766,7 @@ export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
     variant: EnemyVariant.KAMIKAZE_DRONE,
     baseType: EnemyType.DRONE,
     threat: 1.25,
-    minWave: 3,
+    minWave: 8,
     hpMult: 0.9,
     speedMult: 1.9,
     damageMult: 1.4,
@@ -777,7 +778,7 @@ export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
     variant: EnemyVariant.ATTACK_GUNSHIP,
     baseType: EnemyType.SHOOTER,
     threat: 1.75,
-    minWave: 3,
+    minWave: 6,
     hpMult: 1.7,
     speedMult: 1.1,
     damageMult: 1.25,
@@ -789,7 +790,7 @@ export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
     variant: EnemyVariant.ROCKET_GUNSHIP,
     baseType: EnemyType.SHOOTER,
     threat: 2.0,
-    minWave: 5,
+    minWave: 7,
     hpMult: 1.9,
     speedMult: 0.9,
     damageMult: 1.1,
@@ -801,7 +802,7 @@ export const ENEMY_VARIANTS: Record<EnemyVariant, EnemyVariantConfig> = {
     variant: EnemyVariant.FLAK_TANK,
     baseType: EnemyType.TANK,
     threat: 1.5,
-    minWave: 4,
+    minWave: 3,
     hpMult: 1.2,
     speedMult: 1.2,
     damageMult: 0.7,
@@ -946,9 +947,9 @@ export interface SquadTemplate {
 export const SQUAD_TEMPLATES: SquadTemplate[] = [
   { members: [EnemyVariant.SCOUT_DRONE, EnemyVariant.SCOUT_DRONE, EnemyVariant.FLAK_TANK], minWave: 4, weight: 1 }, // Harassment
   { members: [EnemyVariant.SHIELD_DRONE, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 6, weight: 1 }, // Protected shooters
-  { members: [EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 5, weight: 0.8 }, // Missile pressure
+  { members: [EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 6, weight: 0.8 }, // Missile pressure
   { members: [EnemyVariant.REPAIR_DRONE, EnemyVariant.FLAK_TANK, EnemyVariant.FLAK_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD], minWave: 7, weight: 0.8 }, // Repair group
-  { members: [EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 6, weight: 0.6 }, // High pressure
+  { members: [EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.KAMIKAZE_DRONE, EnemyVariant.MISSILE_CARRIER, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.ATTACK_GUNSHIP], minWave: 8, weight: 0.6 }, // High pressure
   { members: [EnemyVariant.HEAVY_GUNSHIP, EnemyVariant.SHIELD_DRONE, EnemyVariant.SCOUT_DRONE, EnemyVariant.SCOUT_DRONE], minWave: 8, weight: 0.5 }, // Heavy assault
   { members: [EnemyVariant.SIEGE_TANK, EnemyVariant.STANDARD, EnemyVariant.STANDARD, EnemyVariant.SCOUT_DRONE], minWave: 9, weight: 0.4 }, // Siege push
   { members: [EnemyVariant.GATLING_HEAVY, EnemyVariant.ATTACK_GUNSHIP, EnemyVariant.SHIELD_DRONE], minWave: 9, weight: 0.6 }, // Gatling guard
@@ -964,6 +965,10 @@ export const GROUND_THREAT_COSTS = {
 
 export const AIR_THREAT_COSTS = {
   COMBAT_DRONE: 1.5,
+  LIGHT_HELI: 1.5,
+  ATTACK_GUNSHIP: 3.0,
+  ROCKET_GUNSHIP: 3.5,
+  KAMIKAZE_DRONE: 1.25,
 } as const;
 
 export interface GroundComposition {
@@ -1024,7 +1029,6 @@ export const MIXED_COMPOSITIONS: MixedComposition[] = [
 ];
 
 export function pickMixedComposition(wave: number, rng: () => number = Math.random): MixedComposition | null {
-  if (wave < 6) return null;
   const eligible = MIXED_COMPOSITIONS.filter((c) => c.minWave <= wave);
   if (eligible.length === 0) return null;
   const totalWeight = eligible.reduce((sum, c) => sum + c.weight, 0);
