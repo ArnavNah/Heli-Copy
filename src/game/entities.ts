@@ -3335,6 +3335,8 @@ export class Enemy extends Entity {
       }
 
       case DroneCombatState.ATTACK_SETUP: {
+        targetWaypointX = predPlayerX;
+        targetWaypointZ = predPlayerZ;
         const tangentX = -dirZ * this.flankDir;
         const tangentZ = dirX * this.flankDir;
         desiredHorizontalX = (predDirX * 0.45 + tangentX * 0.65) * (cruiseSpeed * 0.85) + repelForceX + avoidForceX;
@@ -3374,6 +3376,8 @@ export class Enemy extends Entity {
       }
 
       case DroneCombatState.ATTACK_RUN: {
+        targetWaypointX = targetPos.x;
+        targetWaypointZ = targetPos.z;
         currentSteerTurnRate = attackSteerRate; // Committed steering - reduced agility allows player dodge!
 
         desiredHorizontalX = this.attackVectorX * attackSpeed + repelForceX * 0.4 + avoidForceX * 0.8;
@@ -3480,8 +3484,8 @@ export class Enemy extends Entity {
       }
 
       case DroneCombatState.REPOSITION: {
-        const targetWaypointX = targetPos.x + Math.sin(this.assignedSectorAngle) * (approachStandoff + 6);
-        const targetWaypointZ = targetPos.z + Math.cos(this.assignedSectorAngle) * (approachStandoff + 6);
+        targetWaypointX = targetPos.x + Math.sin(this.assignedSectorAngle) * (approachStandoff + 6);
+        targetWaypointZ = targetPos.z + Math.cos(this.assignedSectorAngle) * (approachStandoff + 6);
         const wpDx = targetWaypointX - this.body.position.x;
         const wpDz = targetWaypointZ - this.body.position.z;
         const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
@@ -3547,6 +3551,18 @@ export class Enemy extends Entity {
     if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 38.0 * delta;
 
     copyPhysicsPos(this.mesh, this.body.position);
+    if (typeof window !== "undefined" && (window as any).__HELI_AI_DEBUG__) {
+      this.updateAiDebug(
+        this.scene,
+        true,
+        desiredHorizontalX,
+        desiredHorizontalZ,
+        targetWaypointX,
+        targetWaypointZ,
+      );
+    } else if (this.aiDebugGroup) {
+      this.updateAiDebug(this.scene, false, 0, 0);
+    }
     return fired;
   }
 

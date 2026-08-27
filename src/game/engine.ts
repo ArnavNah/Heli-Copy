@@ -1080,6 +1080,7 @@ export class GameEngine {
     window.addEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.addEventListener("helistrike:player-model", this.onPlayerModelChanged);
     window.addEventListener("helistrike:env-debug", this.onEnvDebug);
+    window.addEventListener("helistrike:ai-debug", this.onAiDebug);
     window.addEventListener("helistrike:countermeasure", this.onCountermeasureEvent);
     window.addEventListener("helistrike:super", this.onSuperEvent);
 
@@ -1455,6 +1456,7 @@ export class GameEngine {
     window.removeEventListener("helistrike:upgrade-choice", this.onUpgradeChosen);
     window.removeEventListener("helistrike:player-model", this.onPlayerModelChanged);
     window.removeEventListener("helistrike:env-debug", this.onEnvDebug);
+    window.removeEventListener("helistrike:ai-debug", this.onAiDebug);
     window.removeEventListener("helistrike:countermeasure", this.onCountermeasureEvent);
     window.removeEventListener("helistrike:super", this.onSuperEvent);
     this.clearExtraction();
@@ -3204,6 +3206,14 @@ export class GameEngine {
     this.city.setEnvDebug(Boolean(detail?.on));
   };
 
+  /** Toggle the AI debug visualization overlay. */
+  onAiDebug = (e: Event) => {
+    const detail = (e as CustomEvent<{ on?: boolean }>).detail;
+    if (typeof window !== "undefined") {
+      (window as any).__HELI_AI_DEBUG__ = Boolean(detail?.on);
+    }
+  };
+
   /** Development telemetry metrics (Step 67) */
   getDebugMetrics() {
     let infantryCount = 0;
@@ -3298,6 +3308,9 @@ export class GameEngine {
     this.applyRunUpgrade(detail.id);
     this.upgradePaused = false;
     this.isPlaying = true;
+    if (!this.gameOverDispatched && this.health > 0) {
+      this.helicopter.mesh.visible = true;
+    }
     // If a boss gem queued several level-ups, immediately offer the next pick
     this.offerNextLevelUp();
     this.updateUI(performance.now() / 1000);
@@ -6361,11 +6374,13 @@ export class GameEngine {
     if (!this.isPlaying) {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
-      this.helicopter.mesh.visible = this.isPaused;
-      if (this.isPaused) {
+      const isAlive = !this.gameOverDispatched && this.health > 0;
+      const showHeli = (this.isPaused || this.upgradePaused) && isAlive;
+      this.helicopter.mesh.visible = showHeli;
+      if (showHeli) {
         this.helicopter.animateRotors(0, 60, delta);
         this.helicopter.updateNavLights(time);
-        // Hangar/pause idle bob
+        // Hangar/pause/upgrade idle bob
         this.helicopter.mesh.position.y =
           this.helicopter.body.position.y + Math.sin(time * 1.6) * 0.22;
       }
@@ -6374,6 +6389,10 @@ export class GameEngine {
       this.syncBlobShadows();
       this.renderFrame();
       return;
+    }
+
+    if (!this.gameOverDispatched && this.health > 0) {
+      this.helicopter.mesh.visible = true;
     }
 
     this.hasInputThisFrame = false;

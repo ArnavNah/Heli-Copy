@@ -13,6 +13,7 @@ import {
   threatLevelForPoints,
   threatRewardMultiplier,
 } from "./mechanics";
+import { runLevelForXp, pickUpgrades } from "./logic";
 import { EnemyType, ObjectiveType } from "./types";
 
 describe("countermeasures", () => {
@@ -85,5 +86,21 @@ describe("threat economy", () => {
     expect(extreme.eliteChanceBonus).toBeGreaterThan(low.eliteChanceBonus);
     expect(extreme.activeEnemyCapBonus).toBeLessThanOrEqual(8);
     expect(extreme.spawnIntervalMult).toBeGreaterThanOrEqual(0.78);
+  });
+
+  it("calculates level up progression thresholds and guarantees non-empty upgrade offers", () => {
+    // Level 1 at 0 XP
+    expect(runLevelForXp(0)).toBe(1);
+    // Level 2 threshold is 10 XP
+    expect(runLevelForXp(10)).toBe(2);
+    // Level 3 threshold is 25 XP (10 + 15)
+    expect(runLevelForXp(25)).toBe(3);
+
+    const offers = pickUpgrades(3);
+    expect(offers.length).toBe(3);
+    for (const opt of offers) {
+      expect(opt.id).toBeDefined();
+      expect(opt.title).toBeDefined();
+    }
   });
 });
