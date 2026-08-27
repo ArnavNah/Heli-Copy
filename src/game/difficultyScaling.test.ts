@@ -16,6 +16,9 @@ import {
   ENEMY_VARIANTS,
   AIR_THREAT_COSTS,
   GROUND_THREAT_COSTS,
+  PRIORITY_TARGET_WAVE_CHANCE,
+  PRIORITY_TARGET_OVERDRIVE_CHANCE,
+  priorityTargetReward,
 } from "./logic";
 import { CombatDirector, PERFORMANCE_CAPS } from "./combatDirector";
 import { DirectionalPressureMode, EnemyVariant } from "./types";
@@ -266,6 +269,42 @@ describe("Difficulty & Pressure Scaling Overhaul", () => {
       expect(GROUND_THREAT_COSTS.INFANTRY).toBe(1.0);
       expect(GROUND_THREAT_COSTS.TANK).toBe(2.0);
       expect(GROUND_THREAT_COSTS.SAM).toBe(3.0);
+    });
+  });
+
+  describe("7. Priority Target System & Directional Sector Spawning", () => {
+    let director: CombatDirector;
+
+    beforeEach(() => {
+      director = new CombatDirector();
+    });
+
+    it("gates priority targets to wave 4+ and scales rewards per wave", () => {
+      expect(PRIORITY_TARGET_WAVE_CHANCE[1]).toBe(0);
+      expect(PRIORITY_TARGET_WAVE_CHANCE[2]).toBe(0);
+      expect(PRIORITY_TARGET_WAVE_CHANCE[3]).toBe(0);
+      expect(PRIORITY_TARGET_WAVE_CHANCE[4]).toBeGreaterThan(0);
+      expect(PRIORITY_TARGET_WAVE_CHANCE[9]).toBeGreaterThan(PRIORITY_TARGET_WAVE_CHANCE[4]);
+      expect(PRIORITY_TARGET_OVERDRIVE_CHANCE).toBe(0.18);
+
+      const earlyReward = priorityTargetReward(4);
+      const lateReward = priorityTargetReward(9);
+
+      expect(earlyReward.credits).toBeGreaterThanOrEqual(200);
+      expect(lateReward.credits).toBeGreaterThan(earlyReward.credits);
+      expect(lateReward.salvage).toBeGreaterThanOrEqual(earlyReward.salvage);
+    });
+
+    it("generates deterministic sector spawn angles per directional mode", () => {
+      const angle1 = director.getSectorSpawnAngle(101, 1);
+      const angle2 = director.getSectorSpawnAngle(102, 5);
+      const angle3 = director.getSectorSpawnAngle(103, 8);
+      const angleOverdrive = director.getSectorSpawnAngle(104, 12, true);
+
+      expect(Number.isFinite(angle1)).toBe(true);
+      expect(Number.isFinite(angle2)).toBe(true);
+      expect(Number.isFinite(angle3)).toBe(true);
+      expect(Number.isFinite(angleOverdrive)).toBe(true);
     });
   });
 });

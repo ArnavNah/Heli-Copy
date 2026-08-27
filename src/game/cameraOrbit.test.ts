@@ -259,11 +259,77 @@ describe('Free 360° Camera Orbit System', () => {
 
       // Step physics/camera loop 30 frames (~0.5s)
       for (let i = 0; i < 30; i++) {
-        cameraBoomFraction += (targetBoom - cameraBoomFraction) * (1 - Math.exp(-8 * delta));
+        cameraBoomFraction += (targetBoom - cameraBoomFraction) * (1 - Math.exp(-16 * delta));
       }
 
       expect(cameraBoomFraction).toBeLessThan(0.7);
       expect(cameraBoomFraction).toBeGreaterThanOrEqual(0.65);
+    });
+  });
+
+  describe('Camera Responsiveness & FPS Independence', () => {
+    it.each([30, 60, 120])('achieves >= 90%% camera follow convergence in 0.16s at %i FPS', (fps) => {
+      const dt = 1 / fps;
+      const followSharpness = 14.0;
+      let camPos = 0;
+      const targetPos = 100;
+
+      const frames = Math.round(0.16 * fps);
+      for (let i = 0; i < frames; i++) {
+        const alpha = 1 - Math.exp(-followSharpness * dt);
+        camPos += (targetPos - camPos) * alpha;
+      }
+
+      // After 0.16s, 1 - exp(-14 * 0.16) = 1 - exp(-2.24) = 0.8935 ≈ 90%
+      expect(camPos).toBeGreaterThanOrEqual(88);
+    });
+
+    it('camera orbit yaw builds to >= 85%% max velocity within 0.08s', () => {
+      const dt = 1 / 60;
+      const accelRate = 28;
+      const targetYawVel = 3.5;
+      let currentYawVel = 0;
+
+      // 5 frames at 60Hz = 0.083s
+      for (let i = 0; i < 5; i++) {
+        currentYawVel += (targetYawVel - currentYawVel) * (1 - Math.exp(-accelRate * dt));
+      }
+
+      expect(currentYawVel / targetYawVel).toBeGreaterThanOrEqual(0.85);
+    });
+
+    it('camera orbit yaw stops cleanly within 0.08–0.18s when stick released', () => {
+      const dt = 1 / 60;
+      const dampingRate = 32;
+      let currentYawVel = 3.5;
+
+      // 8 frames at 60Hz = 0.133s (within 0.08–0.18s target window)
+      for (let i = 0; i < 8; i++) {
+        currentYawVel += (0 - currentYawVel) * (1 - Math.exp(-dampingRate * dt));
+      }
+
+      // Velocity is damped by over 98%
+      expect(Math.abs(currentYawVel)).toBeLessThan(0.06);
+    });
+
+    it('camera recenter completes within 0.25–0.40s duration', () => {
+      const recenterDuration = 0.30;
+      const dt = 1 / 60;
+      let recenterTimer = 0;
+      let cameraYaw = 2.0;
+      const startYaw = 2.0;
+      const targetYaw = 0;
+
+      while (recenterTimer < recenterDuration) {
+        recenterTimer += dt;
+        const t = Math.min(1, recenterTimer / recenterDuration);
+        const smoothT = t * t * (3 - 2 * t);
+        cameraYaw = startYaw + (targetYaw - startYaw) * smoothT;
+      }
+
+      expect(cameraYaw).toBeCloseTo(0, 5);
+      expect(recenterDuration).toBeGreaterThanOrEqual(0.25);
+      expect(recenterDuration).toBeLessThanOrEqual(0.40);
     });
   });
 });

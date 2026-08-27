@@ -109,36 +109,36 @@ function disableShadowCasting(root: THREE.Object3D) {
 export const MOVEMENT_CONFIG = {
   /** Normal cruise speed cap (u/s). */
   maxHorizontalSpeed: 68,
-  /** Snappy normal acceleration — reaches cruise in ~0.24s. */
-  horizontalAcceleration: 290,
-  /** Strong braking — release-to-hover in ~0.28s from cruise. */
-  horizontalBraking: 250,
-  /** Aggressive counter-steering for responsive 180° combat reversal. */
-  reverseAcceleration: 420,
+  /** Snappy normal acceleration — reaches useful speed in ~0.11s, cruise in ~0.22s. */
+  horizontalAcceleration: 300,
+  /** Strong active braking — release-to-hover in ~0.28s from cruise. */
+  horizontalBraking: 240,
+  /** Aggressive counter-steering for responsive 180° combat reversal (~1.5x normal). */
+  reverseAcceleration: 450,
   /** Directional steering acceleration for curved physical turn transitions. */
-  steeringAcceleration: 310,
-  /** Strong low-speed authority, with natural turning inertia at high speed. */
-  lowSpeedSteeringMultiplier: 1.18,
-  highSpeedSteeringMultiplier: 0.88,
+  steeringAcceleration: 340,
+  /** Strong low-speed authority, maintaining full steering authority at speed. */
+  lowSpeedSteeringMultiplier: 1.20,
+  highSpeedSteeringMultiplier: 1.00,
   /** Analog stick radial deadzone. */
   analogDeadzone: 0.15,
-  /** Body yaw critically-damped spring dynamics (rad/s² and rad/s). */
-  bodyYawSpring: 64.0,
-  bodyYawDamping: 14.5,
-  maxYawSpeed: 4.8, // ~275°/sec max angular velocity
-  maxYawAcceleration: 34.0, // max angular acceleration rate
+  /** Body yaw critically-damped spring dynamics (rad/s² and rad/s, zeta = 1.0). */
+  bodyYawSpring: 120.0,
+  bodyYawDamping: 22.0,
+  maxYawSpeed: 6.28, // ~360°/sec max angular velocity
+  maxYawAcceleration: 48.0, // max angular acceleration rate
   /** Max bank roll and pitch limits (radians). */
   maxRoll: 0.32, // ~18.3°
   maxPitch: 0.16, // ~9.2°
   /** Bank response speeds (/s). */
-  bankResponse: 8.5,
-  bankReturnResponse: 5.0,
-  visualAccelerationSmoothing: 14.0,
+  bankResponse: 14.0,
+  bankReturnResponse: 12.0,
+  visualAccelerationSmoothing: 24.0,
   /** Vertical flight is deliberately a little heavier than horizontal flight. */
   maxVerticalSpeed: 32,
-  verticalAcceleration: 125,
-  verticalBraking: 115,
-  verticalReverseAcceleration: 150,
+  verticalAcceleration: 140,
+  verticalBraking: 130,
+  verticalReverseAcceleration: 180,
   /** Double-tap dash is a short bounded burst, never a velocity multiplier. */
   dashSpeed: 150,
   dashDuration: 0.22,
@@ -815,7 +815,7 @@ export class Helicopter extends Entity {
     const cfg = MOVEMENT_CONFIG;
     this.smoothedHoverFloor +=
       (this.hoverFloor - this.smoothedHoverFloor) *
-      (1 - Math.exp(-(this.hoverFloor > this.smoothedHoverFloor ? 10 : 5) * delta));
+      (1 - Math.exp(-(this.hoverFloor > this.smoothedHoverFloor ? 14 : 10) * delta));
 
     const safetyFloorY = this.smoothedHoverFloor + cfg.hoverClearance;
     const clearance = this.body.position.y - safetyFloorY;
@@ -1168,15 +1168,16 @@ export class Helicopter extends Entity {
 
     // Compute dot product of current velocity and desired velocity to pick acceleration mode
     const dotProduct = vx * desiredVx + vz * desiredVz;
-    const reversing = speedBefore > 2.0 && desiredSpeed > 2.0 && dotProduct < -0.3 * speedBefore * desiredSpeed;
-    const stopping = desiredSpeed < 0.01;
-    const isTurn = speedBefore > 4.0 && desiredSpeed > 4.0 && !reversing;
+    const isReversing = speedBefore > 2.0 && desiredSpeed > 2.0 && dotProduct < 0;
+    const isStopping = desiredSpeed < 0.01;
+    const isTurn = speedBefore > 3.0 && desiredSpeed > 3.0 && !isReversing;
 
     // Pick situation-aware acceleration mode (normal, braking, reversal, turn)
     let baseAcceleration: number = cfg.horizontalAcceleration;
-    if (reversing) {
-      baseAcceleration = cfg.reverseAcceleration;
-    } else if (stopping || desiredSpeed < speedBefore - 4.0) {
+    if (isReversing) {
+      const reverseFactor = Math.min(1, -dotProduct / (speedBefore * desiredSpeed));
+      baseAcceleration = THREE.MathUtils.lerp(cfg.horizontalAcceleration, cfg.reverseAcceleration, reverseFactor);
+    } else if (isStopping || desiredSpeed < speedBefore - 2.0) {
       baseAcceleration = cfg.horizontalBraking;
     } else if (isTurn) {
       baseAcceleration = cfg.steeringAcceleration;
@@ -1210,8 +1211,8 @@ export class Helicopter extends Entity {
       this.body.velocity.z += deltaVz * step;
     }
 
-    if (desiredSpeed === 0 && Math.abs(this.body.velocity.x) < 0.02) this.body.velocity.x = 0;
-    if (desiredSpeed === 0 && Math.abs(this.body.velocity.z) < 0.02) this.body.velocity.z = 0;
+    if (isStopping && Math.abs(this.body.velocity.x) < 0.05) this.body.velocity.x = 0;
+    if (isStopping && Math.abs(this.body.velocity.z) < 0.05) this.body.velocity.z = 0;
 
     // A3: decay external knockback — as it fades, the desired velocity
     // returns to pure input and the controller brakes back to normal flight.
@@ -1582,8 +1583,51 @@ export class Enemy extends Entity {
   modifier: EnemyModifier = EnemyModifier.NONE;
   pattern: AttackPattern = AttackPattern.CHASE;
   isElite: boolean = false;
+  isPriorityTarget: boolean = false;
+  priorityMarkerMesh: THREE.Group | null = null;
   missionTargetId?: string;
   flankDir: number = 1;
+
+  setPriorityTarget(active: boolean) {
+    this.isPriorityTarget = active;
+    if (active) {
+      if (!this.priorityMarkerMesh) {
+        const markerGroup = new THREE.Group();
+        markerGroup.name = "PriorityTargetMarker";
+
+        // Animated golden octahedron / diamond marker
+        const diamondGeo = new THREE.OctahedronGeometry(1.2, 0);
+        const diamondMat = new THREE.MeshBasicMaterial({
+          color: 0xffd43b,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.95,
+        });
+        const diamond = new THREE.Mesh(diamondGeo, diamondMat);
+        diamond.position.y = 3.6;
+        markerGroup.add(diamond);
+
+        // Ground/underneath priority ring
+        const ringGeo = new THREE.RingGeometry(2.2, 2.8, 16);
+        ringGeo.rotateX(-Math.PI / 2);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0xffaa00,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.7,
+        });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.position.y = 0.25;
+        markerGroup.add(ring);
+
+        this.mesh.add(markerGroup);
+        this.priorityMarkerMesh = markerGroup;
+      }
+      this.priorityMarkerMesh.visible = true;
+    } else if (this.priorityMarkerMesh) {
+      this.priorityMarkerMesh.visible = false;
+    }
+  }
 
   // Variant system: role-driven behavior + telegraphs + support effects.
   /** Multiplied into incoming damage; shield drones set this on their allies. */
@@ -1713,6 +1757,7 @@ export class Enemy extends Entity {
   coreGlowMesh: THREE.Mesh | null = null;
   enemyRotor: THREE.Group | null = null;
   enemyTailRotor: THREE.Group | null = null;
+  aiDebugGroup: THREE.Group | null = null;
   isDying: boolean = false;
   deathSpiralTimer: number = 0;
   deathSpiralMaxTime: number = 2.2;
@@ -1721,6 +1766,7 @@ export class Enemy extends Entity {
   deathSpiralVelY: number = 0;
   readyForRemoval: boolean = false;
   bossDamageFxTimer: number = 0;
+  flybyTriggered: boolean = false;
 
   constructor(
     scene: THREE.Scene,
@@ -2457,11 +2503,11 @@ export class Enemy extends Entity {
     this.mesh.rotation.y += this.deathSpiralYawRate * delta;
     this.mesh.rotation.x = Math.min(0.85, this.mesh.rotation.x + delta * 1.8);
     this.ring.rotation.z += this.deathSpiralRollRate * delta;
-    this.ring.rotation.y = this.mesh.rotation.y;
+    this.ring.rotation.y = 0;
     this.ring.rotation.x = this.mesh.rotation.x;
 
     copyPhysicsPos(this.mesh, this.body.position);
-    this.ring.position.copy(this.mesh.position);
+    this.ring.position.set(0, 0, 0);
 
     if (particles) {
       let smokeX = this.body.position.x;
@@ -2481,6 +2527,7 @@ export class Enemy extends Entity {
 
     const floor = city ? city.getHeightAt(this.body.position.x, this.body.position.z, 0.8) : 0;
     if (this.body.position.y <= floor + 0.6 || this.deathSpiralTimer >= this.deathSpiralMaxTime) {
+      this.body.position.y = Math.max(floor, this.body.position.y);
       this.readyForRemoval = true;
       return true;
     }
@@ -2602,7 +2649,7 @@ export class Enemy extends Entity {
     if (horizSpeed > 0.5) {
       const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
       this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, turnRate, delta);
-      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.y = 0;
       this.ring.rotation.z = Math.sin(time * 6) * 0.08;
       this.ring.rotation.x = Math.min(0.25, (horizSpeed / kamikazeSpeed) * 0.2);
     }
@@ -2707,7 +2754,7 @@ export class Enemy extends Entity {
     if (horizSpeed > 0.4) {
       const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
       this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, 5.0, delta);
-      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.y = 0;
     }
     if (this.enemyRotor) this.enemyRotor.rotation.y += 30 * delta;
     if (this.enemyTailRotor) this.enemyTailRotor.rotation.x += 36 * delta;
@@ -3248,12 +3295,16 @@ export class Enemy extends Entity {
     this.droneStateTimer += delta;
     let desiredHorizontalX = 0;
     let desiredHorizontalZ = 0;
+    let targetWaypointX: number | undefined;
+    let targetWaypointZ: number | undefined;
     let currentSteerTurnRate = smoothTurnRate;
 
     switch (this.droneState) {
       case DroneCombatState.SPAWN_ENTRY: {
         desiredHorizontalX = dirX * cruiseSpeed + repelForceX * 0.8 + avoidForceX;
         desiredHorizontalZ = dirZ * cruiseSpeed + repelForceZ * 0.8 + avoidForceZ;
+        targetWaypointX = targetPos.x;
+        targetWaypointZ = targetPos.z;
         if (dist <= 75 || this.droneStateTimer > 3.5) {
           if (combatDirector) {
             this.assignedSectorAngle = combatDirector.getAssignedApproachAngle(this.id, this.personalityOffset);
@@ -3267,8 +3318,8 @@ export class Enemy extends Entity {
       }
 
       case DroneCombatState.APPROACH: {
-        const targetWaypointX = predPlayerX + Math.sin(this.assignedSectorAngle) * approachStandoff;
-        const targetWaypointZ = predPlayerZ + Math.cos(this.assignedSectorAngle) * approachStandoff;
+        targetWaypointX = predPlayerX + Math.sin(this.assignedSectorAngle) * approachStandoff;
+        targetWaypointZ = predPlayerZ + Math.cos(this.assignedSectorAngle) * approachStandoff;
         const wpDx = targetWaypointX - this.body.position.x;
         const wpDz = targetWaypointZ - this.body.position.z;
         const wpDist = Math.max(1, Math.hypot(wpDx, wpDz));
@@ -3454,7 +3505,7 @@ export class Enemy extends Entity {
     if (horizSpeed > 0.5) {
       const moveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
       this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, moveHeading, currentSteerTurnRate, delta);
-      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.y = 0;
 
       const currentHeading = this.mesh.rotation.y;
       const targetHeading = Math.atan2(desiredHorizontalX, desiredHorizontalZ);
@@ -3467,6 +3518,7 @@ export class Enemy extends Entity {
       const targetPitch = THREE.MathUtils.clamp((horizSpeed / attackSpeed) * pitchMult, -0.2, 0.2);
       this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, targetPitch, Math.min(1, delta * 6.0));
     } else {
+      this.ring.rotation.y = 0;
       this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 4.0);
       this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 4.0);
     }
@@ -3616,7 +3668,125 @@ export class Enemy extends Entity {
       (this.variantMarker.material as THREE.Material).dispose();
       this.variantMarker = null;
     }
+    if (this.priorityMarkerMesh) {
+      this.priorityMarkerMesh.parent?.remove(this.priorityMarkerMesh);
+      this.priorityMarkerMesh.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry?.dispose();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m) => m.dispose());
+          } else {
+            child.material?.dispose();
+          }
+        }
+      });
+      this.priorityMarkerMesh = null;
+    }
+    if (this.aiDebugGroup) {
+      this.aiDebugGroup.traverse((child) => {
+        if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+          child.geometry?.dispose();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m) => m.dispose());
+          } else {
+            child.material?.dispose();
+          }
+        }
+      });
+      this.aiDebugGroup.parent?.remove(this.aiDebugGroup);
+      this.aiDebugGroup = null;
+    }
     super.destroy();
+  }
+
+  /** Development-only AI visualization (green: desired, blue: actual, red: aim, yellow: waypoint). */
+  updateAiDebug(
+    scene: THREE.Scene,
+    showDebug: boolean,
+    desiredX: number,
+    desiredZ: number,
+    targetWaypointX?: number,
+    targetWaypointZ?: number,
+  ) {
+    if (!showDebug) {
+      if (this.aiDebugGroup) {
+        this.aiDebugGroup.traverse((c) => {
+          if (c instanceof THREE.Line || c instanceof THREE.Mesh) {
+            c.geometry?.dispose();
+            if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+            else c.material?.dispose();
+          }
+        });
+        scene.remove(this.aiDebugGroup);
+        this.aiDebugGroup = null;
+      }
+      return;
+    }
+
+    if (!this.aiDebugGroup) {
+      this.aiDebugGroup = new THREE.Group();
+      this.aiDebugGroup.name = `AIDebug_${this.id}`;
+      scene.add(this.aiDebugGroup);
+    }
+
+    while (this.aiDebugGroup.children.length > 0) {
+      const child = this.aiDebugGroup.children[0];
+      this.aiDebugGroup.remove(child);
+      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+        child.geometry?.dispose();
+        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+        else child.material?.dispose();
+      }
+    }
+
+    const px = this.body.position.x;
+    const py = this.body.position.y;
+    const pz = this.body.position.z;
+
+    // 1. GREEN = Desired movement vector
+    const desiredLen = Math.hypot(desiredX, desiredZ);
+    if (desiredLen > 0.1) {
+      const gDirX = (desiredX / desiredLen) * Math.min(14, desiredLen * 0.4);
+      const gDirZ = (desiredZ / desiredLen) * Math.min(14, desiredLen * 0.4);
+      const greenGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(px, py, pz),
+        new THREE.Vector3(px + gDirX, py, pz + gDirZ),
+      ]);
+      const greenMat = new THREE.LineBasicMaterial({ color: 0x55ff55 });
+      this.aiDebugGroup.add(new THREE.Line(greenGeo, greenMat));
+    }
+
+    // 2. BLUE = Actual velocity vector
+    const actualLen = Math.hypot(this.smoothVelX, this.smoothVelZ);
+    if (actualLen > 0.1) {
+      const bDirX = (this.smoothVelX / actualLen) * Math.min(14, actualLen * 0.4);
+      const bDirZ = (this.smoothVelZ / actualLen) * Math.min(14, actualLen * 0.4);
+      const blueGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(px, py, pz),
+        new THREE.Vector3(px + bDirX, py, pz + bDirZ),
+      ]);
+      const blueMat = new THREE.LineBasicMaterial({ color: 0x3399ff });
+      this.aiDebugGroup.add(new THREE.Line(blueGeo, blueMat));
+    }
+
+    // 3. RED = Gun aim direction
+    const aimHeading = this.mesh.rotation.y + (this.gunYawPivot ? this.gunYawPivot.rotation.y : 0);
+    const redGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(px, py - 0.2, pz),
+      new THREE.Vector3(px + Math.sin(aimHeading) * 12, py - 0.2, pz + Math.cos(aimHeading) * 12),
+    ]);
+    const redMat = new THREE.LineBasicMaterial({ color: 0xff3333 });
+    this.aiDebugGroup.add(new THREE.Line(redGeo, redMat));
+
+    // 4. YELLOW = Target Waypoint line
+    if (targetWaypointX !== undefined && targetWaypointZ !== undefined) {
+      const yellowGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(px, py, pz),
+        new THREE.Vector3(targetWaypointX, py, targetWaypointZ),
+      ]);
+      const yellowMat = new THREE.LineBasicMaterial({ color: 0xffff33 });
+      this.aiDebugGroup.add(new THREE.Line(yellowGeo, yellowMat));
+    }
   }
 
   /** Tangent (orbit) velocity components around a direction vector. */
@@ -3855,6 +4025,9 @@ export class Enemy extends Entity {
     }
 
     this.updateHitFlash(delta);
+    if (this.priorityMarkerMesh && this.isPriorityTarget) {
+      this.priorityMarkerMesh.rotation.y += delta * 2.2;
+    }
 
     // B1: EMP silences weapons — pinning the shot clock keeps every existing
     // interval gate (time - lastShotTime > rate) closed while suppressed.
@@ -3999,6 +4172,8 @@ export class Enemy extends Entity {
         delta,
         avoidForceX,
         avoidForceZ,
+        combatDirector,
+        currentWave,
       );
       copyPhysicsPos(this.mesh, this.body.position);
       if (this.telegraphMesh) {
@@ -4142,6 +4317,8 @@ export class Enemy extends Entity {
     delta: number = 0.016,
     avoidForceX: number = 0,
     avoidForceZ: number = 0,
+    combatDirector?: CombatDirector | null,
+    currentWave: number = 1,
   ): boolean {
     const ratio = this.hp / this.maxHp;
     const newPhase = bossPhaseForRatio(ratio);
@@ -4173,7 +4350,7 @@ export class Enemy extends Entity {
     if (bHorizSpeed > 0.4) {
       const bMoveHeading = Math.atan2(this.smoothVelX, this.smoothVelZ);
       this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, bMoveHeading, 3.5, delta);
-      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.y = 0;
       const bTargetHeading = Math.atan2(desiredX, desiredZ);
       const bHeadingDiff = shortestAngleDelta(this.mesh.rotation.y, bTargetHeading);
       const bTargetBank = THREE.MathUtils.clamp(-bHeadingDiff * 0.5, -0.22, 0.22);
@@ -4183,7 +4360,7 @@ export class Enemy extends Entity {
       this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, bTargetPitch, Math.min(1, delta * 4.0));
     } else {
       this.mesh.rotation.y = stepAngle(this.mesh.rotation.y, Math.atan2(dirX, dirZ), 2.5, delta);
-      this.ring.rotation.y = this.mesh.rotation.y;
+      this.ring.rotation.y = 0;
       this.ring.rotation.z = THREE.MathUtils.lerp(this.ring.rotation.z, 0, delta * 3.0);
       this.ring.rotation.x = THREE.MathUtils.lerp(this.ring.rotation.x, 0, delta * 3.0);
     }
@@ -4227,6 +4404,9 @@ export class Enemy extends Entity {
       if (time - this.telegraphStartTime >= BOSS_TELEGRAPH_DURATION) {
         this.telegraphActive = false;
         this.lastShotTime = time; // cooldown AFTER the telegraph volley
+        if (combatDirector) {
+          combatDirector.releaseHeavyAttackSlot(this.id, time, 2.0);
+        }
         // Fire the beam volley along the telegraph line
         const cfg = bossVolleyConfig(this.phase);
         for (let i = 0; i < cfg.shots; i++) {
@@ -4256,6 +4436,9 @@ export class Enemy extends Entity {
     } else if (time - this.lastShotTime > (this.phase === 3 ? 2.2 : this.phase === 2 ? 1.7 : 1.2) * fireRateMult) {
       // Start telegraph before firing in phase 1/2 (only when no telegraph is queued)
       if (this.phase <= 2 && time - this.lastShotTime > (this.phase === 2 ? 2.4 : 1.8)) {
+        if (combatDirector && !combatDirector.requestHeavyAttackSlot(this.id, "BOSS", time, currentWave, true, 3.0)) {
+          return false;
+        }
         this.telegraphActive = true;
         this.telegraphStartTime = time;
         return false;
@@ -4395,6 +4578,7 @@ export class Projectile {
   sourceObjective: Objective | null = null;
   acceleration = 0;
   maxSpeed = Infinity;
+  nearMissTriggered = false;
   /** Rendering color; written into the pool's instanceColor on spawn. */
   colorHex: number;
 
@@ -4446,6 +4630,7 @@ export class Projectile {
     this.sourceObjective = null;
     this.acceleration = 0;
     this.maxSpeed = Infinity;
+    this.nearMissTriggered = false;
     this.lifetime = Math.max(1.1, Math.min(2.2, 390 / Math.max(speed, 1)));
 
     if (color !== undefined) this.colorHex = color;
@@ -4582,9 +4767,10 @@ export class PowerUp {
   type: PowerUpType;
   active: boolean = true;
   position: THREE.Vector3;
+  velocity: THREE.Vector3 = new THREE.Vector3();
   spawnTime: number = 0;
-  lifetime: number = 22; // 22 seconds lifetime
-  value: number = 1; // XP amount for XP_GEM pickups
+  lifetime: number = 22; // 22 seconds lifetime standard (12s for SALVAGE_CACHE)
+  value: number = 1; // XP amount for XP_GEM pickups / Salvage amount
   /** Spinning ground ring so the pickup reads clearly from the air. */
   groundRing: THREE.Mesh | null = null;
 
@@ -4598,6 +4784,10 @@ export class PowerUp {
     this.type = type;
     this.position = new THREE.Vector3(x, y, z);
     this.mesh = new THREE.Group();
+    if (type === PowerUpType.SALVAGE_CACHE) {
+      this.lifetime = 12.0; // 12 seconds high-value cache window
+      this.value = 8;
+    }
 
     // Create powerup visual based on type
     const colors: Record<PowerUpType, number> = {
@@ -4611,19 +4801,22 @@ export class PowerUp {
       [PowerUpType.XP_GEM]: 0x56e6ff,
       [PowerUpType.SALVAGE]: 0xffa632,
       [PowerUpType.COUNTERMEASURE]: 0xffdc62,
+      [PowerUpType.SALVAGE_CACHE]: 0xffbb00,
+      [PowerUpType.MAGNET_SURGE]: 0x00e5ff,
+      [PowerUpType.EMP_PULSE]: 0xaa44ff,
     };
 
-    const color = colors[type];
+    const color = colors[type] ?? 0xffffff;
 
     // Classic arcade pickup indicator: a flat ring on the ground that spins
     // around the pickup so it's visible from the air.
-    const isBomb = type === PowerUpType.BOMB;
-    const groundRingGeo = new THREE.RingGeometry(isBomb ? 2.9 : 2.0, isBomb ? 3.7 : 2.5, 28);
+    const isSpecialPayoff = type === PowerUpType.BOMB || type === PowerUpType.SALVAGE_CACHE;
+    const groundRingGeo = new THREE.RingGeometry(isSpecialPayoff ? 3.0 : 2.0, isSpecialPayoff ? 3.8 : 2.5, 28);
     groundRingGeo.rotateX(-Math.PI / 2);
     const groundRingMat = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: isBomb ? 0.9 : 0.6,
+      opacity: isSpecialPayoff ? 0.95 : 0.6,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
@@ -4633,14 +4826,14 @@ export class PowerUp {
     this.groundRing.position.set(x, Math.max(0.12, y - 1.2), z);
     scene.add(this.groundRing);
 
-    // Bombs also get a tall light pillar so the payoff pickup is unmissable
-    if (isBomb) {
+    // Bombs & Salvage Caches get a tall light pillar so the payoff pickup is unmissable
+    if (isSpecialPayoff) {
       const beamGeo = new THREE.CylinderGeometry(0.9, 2.4, 46, 10, 1, true);
       beamGeo.translate(0, 23, 0);
       const beamMat = new THREE.MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.35,
+        opacity: type === PowerUpType.SALVAGE_CACHE ? 0.45 : 0.35,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         side: THREE.DoubleSide,
@@ -4704,7 +4897,75 @@ export class PowerUp {
       return;
     }
 
-    // Floating diamond shape
+    if (type === PowerUpType.SALVAGE_CACHE) {
+      // High-Value Salvage Cache: Heavy reinforced armored crate with glowing gold edges
+      const crate = createBox(1.8, 1.4, 1.8, 0x8b6508);
+      this.mesh.add(crate);
+      const goldTrim = createBox(1.9, 0.3, 1.9, 0xffd700);
+      this.mesh.add(goldTrim);
+      const halo = new THREE.Mesh(new THREE.SphereGeometry(2.6, 12, 8), createGlowMaterial(0xffbb00, 0.35));
+      this.mesh.add(halo);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(2.4, 0.18, 6, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffe600, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      this.mesh.add(ring);
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      disableShadowCasting(this.mesh);
+      return;
+    }
+
+    if (type === PowerUpType.MAGNET_SURGE) {
+      // Electromagnetic Surge: Double orbiting energy toruses around bright cyan spark core
+      const core = new THREE.Mesh(
+        new THREE.OctahedronGeometry(1.2, 1),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, blending: THREE.AdditiveBlending }),
+      );
+      this.mesh.add(core);
+      const halo = new THREE.Mesh(new THREE.SphereGeometry(2.2, 10, 8), createGlowMaterial(0x00e5ff, 0.4));
+      this.mesh.add(halo);
+      const ringA = new THREE.Mesh(
+        new THREE.TorusGeometry(2.0, 0.14, 6, 16),
+        new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending }),
+      );
+      ringA.rotation.x = Math.PI / 3;
+      this.mesh.add(ringA);
+      const ringB = new THREE.Mesh(
+        new THREE.TorusGeometry(2.0, 0.14, 6, 16),
+        new THREE.MeshBasicMaterial({ color: 0x55ffff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending }),
+      );
+      ringB.rotation.y = Math.PI / 3;
+      this.mesh.add(ringB);
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      disableShadowCasting(this.mesh);
+      return;
+    }
+
+    if (type === PowerUpType.EMP_PULSE) {
+      // EMP Pulse Core: Pulsing purple orb with shockwave energy arcs
+      const core = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(1.3, 1),
+        new THREE.MeshBasicMaterial({ color: 0xee88ff, blending: THREE.AdditiveBlending }),
+      );
+      this.mesh.add(core);
+      const halo = new THREE.Mesh(new THREE.SphereGeometry(2.2, 10, 8), createGlowMaterial(0xaa44ff, 0.4));
+      this.mesh.add(halo);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(2.2, 0.16, 6, 16),
+        new THREE.MeshBasicMaterial({ color: 0xaa44ff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      this.mesh.add(ring);
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      disableShadowCasting(this.mesh);
+      return;
+    }
+
+    // Floating diamond shape (Default power-ups: Health, Ammo, Damage, Shield, Fuel, Bomb)
     const geom = new THREE.OctahedronGeometry(1.5, 0);
     const mat = new THREE.MeshBasicMaterial({
       color,
@@ -4771,9 +5032,18 @@ export class PowerUp {
       }
     }
 
-    // Check lifetime
-    if (time - this.spawnTime > this.lifetime) {
+    // Check lifetime and expiry feedback
+    const age = time - this.spawnTime;
+    const timeLeft = this.lifetime - age;
+    if (timeLeft <= 0) {
       this.active = false;
+      return;
+    }
+
+    // High-value salvage cache urgency indicator: flashes faster as time expires
+    if (this.type === PowerUpType.SALVAGE_CACHE && timeLeft < 3.5 && this.groundRing) {
+      const flash = Math.sin(time * 18) > 0;
+      (this.groundRing.material as THREE.MeshBasicMaterial).opacity = flash ? 0.95 : 0.2;
     }
   }
 
@@ -5093,6 +5363,7 @@ export class Objective {
   labelSprite: THREE.Sprite | null = null;
   /** Countdown for the collapse-out animation after destruction. */
   deathTimer: number = 0;
+  isDying: boolean = false;
   /** Light military prop ring around ground objectives (city group child). */
   propGroup: THREE.Object3D | null = null;
   /** Dedicated hostile aim point above the pad, never inside the roof/floor. */
@@ -5456,7 +5727,7 @@ export class Objective {
   }
 
   update(time: number, delta: number = 1 / 60) {
-    if (!this.active) {
+    if (!this.active || this.isDying) {
       // Collapse-out: shrink + fade over ~0.35s, THEN the depot is gone
       if (this.deathTimer > 0) {
         this.deathTimer -= delta;
@@ -5641,6 +5912,7 @@ export class Objective {
       // Defer removal: play the collapse-out animation in update() before the
       // depot truly disappears.
       this.active = false;
+      this.isDying = true;
       this.samStateMachine?.disable(true);
       this.deathTimer = 0.35;
       return true;

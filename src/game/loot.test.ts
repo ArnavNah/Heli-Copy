@@ -3,10 +3,11 @@ import { canUseDepotService, collectSalvage, rollLoot, salvageCreditValue } from
 
 describe("controlled loot", () => {
   it("keeps basic drops sparse and makes elite/boss rewards useful", () => {
-    expect(rollLoot("BASIC", 0.5, 0.2)).toEqual({ salvage: 0, powerup: null, countermeasure: false });
+    expect(rollLoot("BASIC", 0.5, 0.2)).toEqual({ salvage: 0, salvageCache: false, powerup: null, countermeasure: false });
     expect(rollLoot("ELITE", 0.2, 0.1).salvage).toBeGreaterThanOrEqual(2);
     const boss = rollLoot("BOSS", 0.9, 0.7);
     expect(boss.salvage).toBe(6);
+    expect(boss.salvageCache).toBe(true);
     expect(boss.powerup).not.toBeNull();
     expect(boss.countermeasure).toBe(true);
   });

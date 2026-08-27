@@ -661,6 +661,15 @@ function drawMinimap(
       ctx.arc(ex, ey, 9, 0, Math.PI * 2);
       ctx.stroke();
     }
+    if (e.priority) {
+      const pulse = 0.7 + Math.sin(t * 8) * 0.3;
+      ctx.strokeStyle = `rgba(255, 215, 0, ${pulse.toFixed(2)})`;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ex - 7, ey - 7, 14, 14);
+      ctx.beginPath();
+      ctx.arc(ex, ey, 10, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   // Repaint SAMs above normal contacts and reveal the envelope only while engaged.
@@ -989,39 +998,41 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
     const container = mountRef.current;
     if (!container) return;
 
-    const width = container.clientWidth || 600;
-    const height = container.clientHeight || 450;
+    const width = container.clientWidth || 800;
+    const height = container.clientHeight || 600;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
-    camera.position.set(7.2, 3.6, 10.2);
-    camera.lookAt(0, 0.1, 0);
+    // 34-degree FOV for cinematic compression and hero silhouette
+    const camera = new THREE.PerspectiveCamera(34, width / height, 0.1, 100);
+    // Camera placed slightly higher, looking at center-left so helicopter renders on the right (x ≈ 48% → 93%)
+    camera.position.set(7.4, 3.2, 9.8);
+    camera.lookAt(-0.6, -0.1, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
 
-    // Atmospheric lighting
-    const ambientLight = new THREE.AmbientLight(0x2d3a24, 1.5);
+    // Rich tactical multi-point lighting
+    const ambientLight = new THREE.AmbientLight(0x35442b, 1.6);
     scene.add(ambientLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff5dd, 2.5);
-    keyLight.position.set(10, 14, 8);
+    const keyLight = new THREE.DirectionalLight(0xfff5dd, 2.8);
+    keyLight.position.set(12, 16, 10);
     scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x50ebff, 2.0);
-    rimLight.position.set(-12, 6, -10);
+    const rimLight = new THREE.DirectionalLight(0x50ebff, 2.4);
+    rimLight.position.set(-14, 8, -12);
     scene.add(rimLight);
 
-    const fillLight = new THREE.DirectionalLight(0x38ef7d, 0.8);
-    fillLight.position.set(0, -5, 10);
+    const fillLight = new THREE.DirectionalLight(0x40ef80, 0.9);
+    fillLight.position.set(0, -6, 12);
     scene.add(fillLight);
 
-    // Ground landing circle / tactical projection ring
-    const ringGeo = new THREE.RingGeometry(3.8, 3.9, 48);
+    // Tactical ground projection circles
+    const ringGeo = new THREE.RingGeometry(3.6, 3.7, 48);
     ringGeo.rotateX(-Math.PI / 2);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x4d6633,
@@ -1030,11 +1041,10 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
       side: THREE.DoubleSide,
     });
     const groundRing = new THREE.Mesh(ringGeo, ringMat);
-    groundRing.position.y = -1.8;
+    groundRing.position.y = -1.4;
     scene.add(groundRing);
 
-    // Dotted inner crosshair reticle
-    const innerRingGeo = new THREE.RingGeometry(1.8, 1.85, 32);
+    const innerRingGeo = new THREE.RingGeometry(1.6, 1.65, 32);
     innerRingGeo.rotateX(-Math.PI / 2);
     const innerRingMat = new THREE.MeshBasicMaterial({
       color: 0xffcc00,
@@ -1043,14 +1053,18 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
       side: THREE.DoubleSide,
     });
     const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
-    innerRing.position.y = -1.8;
+    innerRing.position.y = -1.4;
     scene.add(innerRing);
 
     // Build the 3D Helicopter
     const world = new CANNON.World();
     const heli = new Helicopter(scene, world, playerModel);
+    // Scale hero visual size down 28% (range 25-35%) as requested
+    heli.mesh.scale.set(0.72, 0.72, 0.72);
     heli.mesh.position.set(0, 0, 0);
-    heli.mesh.rotation.y = -0.52; // Angled 3/4 front view
+    heli.mesh.rotation.y = -0.58; // Dynamic 3/4 combat angle facing left-forward
+    heli.mesh.rotation.z = -0.04;
+    heli.mesh.rotation.x = 0.03;
 
     let rafId = 0;
     const startTime = performance.now();
@@ -1062,30 +1076,31 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
       mousePosRef.current = { x: ndcX, y: ndcY };
     };
 
-    container.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousemove', handleMouseMove);
 
     const animate = () => {
       rafId = requestAnimationFrame(animate);
       const elapsed = (performance.now() - startTime) * 0.001;
 
       // Rotor animations
-      if (heli.mainRotor) heli.mainRotor.rotation.y += 0.35;
-      if (heli.tailRotor) heli.tailRotor.rotation.x += 0.48;
+      if (heli.mainRotor) heli.mainRotor.rotation.y += 0.42;
+      if (heli.tailRotor) heli.tailRotor.rotation.x += 0.58;
 
       // Gentle idle hovering physics
-      const hoverY = Math.sin(elapsed * 1.6) * 0.16;
-      const hoverRoll = Math.sin(elapsed * 1.2) * 0.035;
-      const hoverPitch = Math.cos(elapsed * 1.0) * 0.025;
+      const hoverY = Math.sin(elapsed * 1.5) * 0.14;
+      const hoverRoll = Math.sin(elapsed * 1.1) * 0.025;
+      const hoverPitch = Math.cos(elapsed * 0.9) * 0.02;
 
       // Mouse parallax damping
       const mouse = mousePosRef.current;
-      const targetRotY = -0.52 + mouse.x * 0.25;
-      const targetRotX = hoverPitch - mouse.y * 0.12;
+      const targetRotY = -0.58 + mouse.x * 0.22;
+      const targetRotX = 0.03 + hoverPitch - mouse.y * 0.10;
+      const targetRotZ = -0.04 + hoverRoll + mouse.x * 0.05;
 
       heli.mesh.position.y = hoverY;
       heli.mesh.rotation.y += (targetRotY - heli.mesh.rotation.y) * 0.08;
       heli.mesh.rotation.x += (targetRotX - heli.mesh.rotation.x) * 0.08;
-      heli.mesh.rotation.z += (hoverRoll - heli.mesh.rotation.z) * 0.08;
+      heli.mesh.rotation.z += (targetRotZ - heli.mesh.rotation.z) * 0.08;
 
       groundRing.rotation.y = elapsed * 0.08;
       innerRing.rotation.y = -elapsed * 0.12;
@@ -1097,8 +1112,8 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
 
     const handleResize = () => {
       if (!container) return;
-      const w = container.clientWidth || 600;
-      const h = container.clientHeight || 450;
+      const w = container.clientWidth || 800;
+      const h = container.clientHeight || 600;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
@@ -1109,7 +1124,7 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
     return () => {
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', handleResize);
-      container.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousemove', handleMouseMove);
       if (renderer.domElement && container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
@@ -1119,18 +1134,39 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
   }, [playerModel]);
 
   return (
-    <div className="relative w-full h-full min-h-[380px] lg:min-h-[480px] flex items-center justify-center pointer-events-none select-none">
+    <div className="relative w-full h-full flex items-center justify-center pointer-events-none select-none">
       {/* 3D WebGL Canvas Container */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Subtle Aircraft Title in Bottom Corner */}
-      <div className="absolute bottom-4 right-6 flex flex-col items-end opacity-70">
-        <span className="text-base sm:text-lg font-display tracking-widest text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)]">
-          {telemetry.designation} {telemetry.codename}
-        </span>
-        <span className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] uppercase">
+      {/* Bottom-Right Aircraft Telemetry Card (Hero Zone) */}
+      <div className="aircraft-telemetry-badge">
+        <span className="mil-bracket mil-bracket-tl" />
+        <span className="mil-bracket mil-bracket-tr" />
+        <span className="mil-bracket mil-bracket-bl" />
+        <span className="mil-bracket mil-bracket-br" />
+
+        <div className="flex items-center justify-between gap-3 border-b border-[#3d4a30]/80 pb-1.5 mb-1.5">
+          <div className="flex items-center gap-1.5 text-[9px] font-military tracking-[0.2em] text-[#ffcc00]">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#6ee740] shadow-[0_0_6px_#6ee740] animate-pulse" />
+            <span>PRIMARY CHASSIS</span>
+          </div>
+          <span className="text-[9px] font-tech text-[#a89d7c] tracking-widest">
+            {telemetry.designation}
+          </span>
+        </div>
+
+        <div className="font-display text-xl sm:text-2xl text-white tracking-wider leading-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]">
+          {telemetry.codename}
+        </div>
+        <div className="text-[10px] font-military tracking-[0.16em] text-[#8df578] mt-0.5">
           {telemetry.role}
-        </span>
+        </div>
+
+        <div className="mt-2 pt-1.5 border-t border-[#3d4a30]/60 grid grid-cols-1 gap-0.5 text-[9px] font-tech text-[#a89d7c]">
+          <div><span className="text-[#6d7a62]">ARMAMENT:</span> <span className="text-[#ded6be]">{telemetry.armament}</span></div>
+          <div><span className="text-[#6d7a62]">AIRFRAME:</span> <span className="text-[#ded6be]">{telemetry.airframe}</span></div>
+          <div><span className="text-[#6d7a62]">CLEARANCE:</span> <span className="text-[#ffcc00]">{telemetry.threatRating}</span></div>
+        </div>
       </div>
     </div>
   );
@@ -1293,71 +1329,155 @@ function ThreeDMenu({
   const missionGrade = isGameOver ? calcGrade(stats, score) : null;
 
   if (!isGameOver) {
-    const MENU_ITEMS = [
-      { id: 0, title: 'DEPLOY', hotkey: 'ENTER', isPrimary: true },
-      { id: 1, title: 'HANGAR', hotkey: 'H' },
-      { id: 2, title: 'SETTINGS', hotkey: 'O' },
-      { id: 3, title: 'MANUAL', hotkey: 'M' },
-    ];
-
     return (
-      <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-between overflow-hidden px-8 sm:px-14 lg:px-20 py-8 select-none bg-gradient-to-r from-black/85 via-black/40 to-transparent">
-        {/* Left Column: Minimal Clean Branding & Vertical Menu */}
-        <div className="flex flex-col justify-center gap-10 max-w-md z-10">
-          {/* Title Area */}
+      <div className="pointer-events-auto absolute inset-0 z-40 flex overflow-hidden select-none">
+        {/* Fullscreen Backdrop Split Gradient (Left 30% dark -> Middle haze -> Right visible city) */}
+        <div className="menu-backdrop-split" />
+
+        {/* Left 25–30% Tactical Operations Console */}
+        <div className="menu-left-zone">
+          {/* 1. Header / Logo Block on Grid */}
           <div className="flex flex-col gap-1">
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display tracking-wider text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)] leading-none">
+            <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
+              <Crosshair size={11} className="text-[#ffcc00]" />
+              <span>TACTICAL AIR ASSAULT</span>
+            </div>
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display tracking-wider text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.95)] leading-none my-0.5">
               HELI-STRIKE
             </h1>
-            <div className="text-[10px] sm:text-xs font-military tracking-[0.28em] text-[#a89d7c] uppercase">
-              Tactical Air Assault
+            <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c]">
+              URBAN FIELD COMMAND · AIR WING 07
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[2px] bg-[#142612]/90 border border-[#58a72b]/50 text-[9px] font-tech tracking-wider text-[#8df578]">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#6ee740] shadow-[0_0_6px_#6ee740] animate-pulse" />
+                <span>DEFCON 1 · SYS.ONLINE</span>
+              </span>
             </div>
           </div>
 
-          {/* Clean Vertical Menu */}
-          <div className="flex flex-col gap-3" role="menu" aria-label="Main Menu">
-            {MENU_ITEMS.map((item) => {
-              const isFocused = focusedIndex === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    onUiSound();
-                    if (item.id === 0) onStart();
-                    else if (item.id === 1) onHangar();
-                    else if (item.id === 2) onSettings();
-                    else if (item.id === 3) onHelp();
-                  }}
-                  onMouseEnter={() => {
-                    setFocusedIndex(item.id);
-                    onUiHover?.();
-                  }}
-                  className={`menu-btn-minimal ${item.isPrimary ? 'menu-btn-minimal-primary' : ''} ${isFocused ? 'is-active' : ''}`}
-                >
-                  <span className="tracking-[0.18em]">{item.title}</span>
-                  <span className="text-[9px] font-tech opacity-60">[{item.hotkey}]</span>
-                </button>
-              );
-            })}
+          {/* 2. Vertical Menu Options on Grid */}
+          <div className="flex flex-col gap-2.5 my-auto" role="menu" aria-label="Main Menu">
+            {/* Hero Deploy CTA Button */}
+            <button
+              type="button"
+              onClick={() => { onUiSound(); onStart(); }}
+              onMouseEnter={() => { setFocusedIndex(0); onUiHover?.(); }}
+              className={`mil-btn-hero ${focusedIndex === 0 ? 'is-nav-focused' : ''}`}
+            >
+              <span className="flex items-center gap-2">
+                <Play size={18} className="fill-current text-[#1a1002]" />
+                <span>DEPLOY HELICOPTER</span>
+              </span>
+              <span className="hidden sm:inline-block rounded bg-[#1f1402]/25 px-2 py-0.5 text-[9px] font-tech font-bold text-[#1f1402] border border-[#1f1402]/30">
+                [ENTER]
+              </span>
+            </button>
+
+            {/* Integrated Operational Threat Rating */}
+            <div className="flex items-center justify-between px-3 py-1.5 mil-panel bg-[#151c11]/85 border-[#3d4e2e] text-xs">
+              <span className="font-hud font-bold text-[#a89d7c] tracking-wider text-[10px]">
+                THREAT LEVEL
+              </span>
+              <DifficultyChip difficulty={difficulty} />
+            </div>
+
+            {/* Secondary Navigation Rows */}
+            <button
+              type="button"
+              onClick={() => { onUiSound(); onHangar(); }}
+              onMouseEnter={() => { setFocusedIndex(1); onUiHover?.(); }}
+              className={`menu-row-btn ${focusedIndex === 1 ? 'is-nav-focused' : ''}`}
+            >
+              <div className="flex items-center gap-2 text-xs font-military text-[#ffcc00]">
+                <Wrench size={14} />
+                <span>HANGAR & ARMORY</span>
+                {isNewPilot && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] animate-ping" />
+                )}
+              </div>
+              <span className="text-[9px] font-tech text-[#8c8266]">[H] KEY</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { onUiSound(); onSettings(); }}
+              onMouseEnter={() => { setFocusedIndex(2); onUiHover?.(); }}
+              className={`menu-row-btn ${focusedIndex === 2 ? 'is-nav-focused' : ''}`}
+            >
+              <div className="flex items-center gap-2 text-xs font-military text-[#ded6be]">
+                <Sliders size={14} />
+                <span>SYSTEM SETTINGS</span>
+              </div>
+              <span className="text-[9px] font-tech text-[#8c8266]">[O] KEY</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { onUiSound(); onHelp(); }}
+              onMouseEnter={() => { setFocusedIndex(3); onUiHover?.(); }}
+              className={`menu-row-btn ${focusedIndex === 3 ? 'is-nav-focused' : ''}`}
+            >
+              <div className="flex items-center gap-2 text-xs font-military text-[#ded6be]">
+                <BookOpen size={14} />
+                <span>FIELD MANUAL</span>
+              </div>
+              <span className="text-[9px] font-tech text-[#8c8266]">[M] KEY</span>
+            </button>
           </div>
 
-          {/* Minimal Stats Row */}
-          <div className="flex items-center gap-4 text-[10px] font-tech text-[#a89d7c] tracking-wider pt-2 opacity-80">
-            <div>HIGH SCORE <span className="text-[#7df9ff] font-bold">{highScore.toLocaleString()}</span></div>
-            <span>·</span>
-            <div>CREDITS <span className="text-[#ffd700] font-bold">{credits.toLocaleString()}</span></div>
-            {wave > 0 && (
-              <>
-                <span>·</span>
-                <div>LAST <span className="text-[#8df578] font-bold">WAVE {wave}</span></div>
-              </>
+          {/* 3. Stats & Guidance on Grid */}
+          <div className="flex flex-col gap-2.5">
+            {isNewPilot && (
+              <div className="mil-panel px-3 py-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#9df578] border-[#58a72b]/60 bg-[#142612]/90 shadow-[0_0_10px_rgba(88,167,43,0.2)]">
+                <Sparkles size={12} className="text-[#ffcc00] shrink-0 animate-spin" />
+                <span>Starter credits granted — open Hangar to equip upgrades</span>
+              </div>
             )}
+
+            {/* High Score / Credits / Sortie Micro Grid */}
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="menu-stat-card menu-stat-card-blue !p-1.5">
+                <div className="menu-stat-label !text-[9px]">
+                  <Trophy size={10} className="text-[#00b4d8]" />
+                  <span>BEST</span>
+                </div>
+                <strong className="menu-stat-val !text-sm text-[#7df9ff]">
+                  {highScore.toLocaleString()}
+                </strong>
+              </div>
+
+              <div className="menu-stat-card menu-stat-card-gold !p-1.5">
+                <div className="menu-stat-label !text-[9px]">
+                  <Coins size={10} className="text-[#ffd700]" />
+                  <span>CREDITS</span>
+                </div>
+                <strong className="menu-stat-val !text-sm text-[#ffd700]">
+                  {credits.toLocaleString()}
+                </strong>
+              </div>
+
+              <div className="menu-stat-card menu-stat-card-green !p-1.5">
+                <div className="menu-stat-label !text-[9px]">
+                  <Crosshair size={10} className="text-[#7de04a]" />
+                  <span>SORTIE</span>
+                </div>
+                <strong className="menu-stat-val !text-sm text-[#8df578]">
+                  {wave > 0 ? `WAVE ${wave}` : '—'}
+                </strong>
+              </div>
+            </div>
+
+            {/* Footer Navigation Hints */}
+            <div className="flex items-center justify-between text-[9px] font-tech text-[#8c8266] tracking-wider pt-1 border-t border-[#28331e]">
+              <span>HELI-STRIKE v1.4.0 · STEAM EDITION</span>
+              <span className="hidden sm:inline">🎮 [W/S/↑/↓] NAVIGATE</span>
+            </div>
           </div>
         </div>
 
-        {/* Right Column: Pure 3D Hero Render */}
-        <div className="hidden md:flex flex-1 h-full items-center justify-center relative">
+        {/* Hero Helicopter 3D Zone (Taking Right 58vw) */}
+        <div className="absolute top-0 bottom-0 right-0 w-[58vw] pointer-events-none">
           <HeroHelicopterViewport playerModel={playerModel} />
         </div>
       </div>
@@ -3518,7 +3638,7 @@ export default function App() {
             </div>
             {threat.danger === 'RED' && canFlare && (
               <div className="mt-1 rounded bg-[#ff3344] px-1.5 py-0.5 text-[9px] font-military font-bold text-white shadow-[0_0_8px_#ff3344] animate-bounce">
-                [Q] FLARES
+                [C] FLARES
               </div>
             )}
           </div>
@@ -3542,10 +3662,10 @@ export default function App() {
                       health > maxHealth * 0.5
                         ? 'bg-gradient-to-r from-[#2b5614] to-[#58a72b] shadow-[0_0_8px_rgba(88,167,43,0.6)]'
                         : health > maxHealth * 0.25
-                        ? 'bg-gradient-to-r from-[#8a5410] to-[#ffaa00] shadow-[0_0_8px_rgba(255,170,0,0.6)]'
-                        : 'bg-gradient-to-r from-[#7f1d1d] to-[#d32f2f] shadow-[0_0_10px_rgba(211,47,47,0.9)] animate-pulse'
+                        ? 'bg-gradient-to-r from-[#8a6a12] to-[#d89a22] shadow-[0_0_8px_rgba(216,154,34,0.6)]'
+                        : 'bg-gradient-to-r from-[#6b1e1a] to-[#d6453d] shadow-[0_0_8px_rgba(214,69,61,0.8)] animate-pulse'
                     }`}
-                    style={{ width: `${clampPercent((health / Math.max(1, maxHealth)) * 100)}%` }}
+                    style={{ width: `${clampPercent((health / maxHealth) * 100)}%` }}
                   />
                 </div>
                 {health <= maxHealth * 0.25 && (
@@ -3555,27 +3675,27 @@ export default function App() {
                 )}
               </div>
 
-              {/* Fuel Capacity (Secondary Thinner Bar) */}
+              {/* Fuel Level */}
               <div>
                 <div className="flex justify-between items-center font-hud">
-                  <span className="font-bold text-xs text-[#a89d7c] tracking-wide">FUEL CAPACITY</span>
+                  <span className="font-bold text-xs text-[#a89d7c]">FUEL LEVEL</span>
                   <span className="font-tech text-xs font-bold text-[#ded6be] tabular-nums">
-                    {Math.round(fuel)} / {Math.round(maxFuel)}
+                    {Math.round(fuel)}%
                   </span>
                 </div>
                 <div className="h-2 hs-bar-track mt-0.5">
                   <div
                     className={`hs-bar-fill ${
-                      fuel > maxFuel * 0.2
-                        ? 'bg-gradient-to-r from-[#73470e] to-[#e5a820]'
-                        : 'bg-gradient-to-r from-[#7f1d1d] to-[#d32f2f] animate-pulse'
+                      fuel > 30
+                        ? 'bg-gradient-to-r from-[#1d4d60] to-[#3db8d8]'
+                        : 'bg-gradient-to-r from-[#6b1e1a] to-[#d6453d] animate-pulse'
                     }`}
-                    style={{ width: `${clampPercent((fuel / Math.max(1, maxFuel)) * 100)}%` }}
+                    style={{ width: `${clampPercent((fuel / maxFuel) * 100)}%` }}
                   />
                 </div>
               </div>
 
-              {/* Flares System */}
+              {/* Flare Charges */}
               {countermeasureInfo && (
                 <div className="flex items-center justify-between pt-1.5 border-t border-[#3d4a30]">
                   <div>
@@ -3595,14 +3715,17 @@ export default function App() {
               )}
             </div>
 
-            {/* Active Defensive Buffs */}
-            {statusInfo && (statusInfo.shield > 0 || statusInfo.damageBoost > 0 || statusInfo.speedBoost > 0 || statusInfo.afterburner) && (
+            {/* Active Defensive & Combat Buffs */}
+            {statusInfo && (statusInfo.shield > 0 || statusInfo.damageBoost > 0 || statusInfo.speedBoost > 0 || (statusInfo as any).magnetSurge > 0 || statusInfo.afterburner) && (
               <div className="flex flex-wrap gap-1.5">
                 {statusInfo.shield > 0 && (
                   <div className="hud-status flex items-center gap-1 border-[#00e5ff]/50 text-[#80f0ff] font-hud text-xs font-bold px-2 py-0.5"><Shield size={12} /> SHIELD {Math.ceil(statusInfo.shield)}S</div>
                 )}
                 {statusInfo.damageBoost > 0 && (
-                  <div className="hud-status flex items-center gap-1 border-[#ffcc00]/50 text-[#ffea80] font-hud text-xs font-bold px-2 py-0.5"><Bomb size={12} /> DAMAGE {Math.ceil(statusInfo.damageBoost)}S</div>
+                  <div className="hud-status flex items-center gap-1 border-[#ff3344]/60 text-[#ff7788] font-hud text-xs font-bold px-2 py-0.5"><Zap size={12} /> OVERDRIVE {Math.ceil(statusInfo.damageBoost)}S</div>
+                )}
+                {(statusInfo as any).magnetSurge > 0 && (
+                  <div className="hud-status flex items-center gap-1 border-[#00e5ff]/60 text-[#00e5ff] font-hud text-xs font-bold px-2 py-0.5"><Sparkles size={12} /> MAGNET {Math.ceil((statusInfo as any).magnetSurge)}S</div>
                 )}
                 {statusInfo.speedBoost > 0 && (
                   <div className="hud-status flex items-center gap-1 border-[#ff66cc]/50 text-[#ffa6e6] font-hud text-xs font-bold px-2 py-0.5"><Sparkles size={12} /> BOOST {Math.ceil(statusInfo.speedBoost)}S</div>
@@ -4052,8 +4175,11 @@ export default function App() {
                 AIR SLOTS: {perfStats.combatDirector.activeAirAttackers}/{perfStats.combatDirector.maxAirAttackSlots} · HEAVY: {perfStats.combatDirector.activeHeavyAttacks}/{perfStats.combatDirector.maxHeavyAttacks} · ROT GAP: {perfStats.combatDirector.attackRotationDelay.toFixed(2)}s
               </div>
               <div className="text-[#ff9b3d]">
-                SPAWN: {perfStats.combatDirector.spawnInterval.toFixed(2)}s · BIAS: {perfStats.combatDirector.currentDirectionalBias} ({perfStats.combatDirector.directionalMode})
+                SPAWN: {perfStats.combatDirector.spawnInterval.toFixed(2)}s · QUEUE: {perfStats.combatDirector.spawnQueueLength ?? 0} · BIAS: {perfStats.combatDirector.currentDirectionalBias} ({perfStats.combatDirector.directionalMode})
                 {perfStats.combatDirector.isMicroLull ? ` · [MICRO-LULL ${perfStats.combatDirector.microLullRemaining.toFixed(1)}s]` : ''}
+              </div>
+              <div className="text-[#e0aaff]">
+                EVENTS: PRIORITY {perfStats.combatDirector.priorityTargetActive ? 'ACTIVE' : 'NONE'} · RISK {perfStats.combatDirector.pickupRiskActive ? 'ACTIVE' : 'NONE'}
               </div>
               <div className="text-white/80">
                 SCALING: HP {perfStats.combatDirector.hpScale.toFixed(2)}× · DMG {perfStats.combatDirector.damageScale.toFixed(2)}× · SPD {perfStats.combatDirector.speedScale.toFixed(2)}×

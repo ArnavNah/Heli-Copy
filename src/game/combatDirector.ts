@@ -264,6 +264,38 @@ export class CombatDirector {
   }
 
   /**
+   * Returns a spawn angle based on the current directional pressure mode and active sectors.
+   */
+  getSectorSpawnAngle(enemyId: number, wave = 1, isOverdrive = false): number {
+    const mode = this.getDirectionalMode(wave, isOverdrive);
+    const hash = ((enemyId * 9301 + 49297) % 233280) / 233280;
+
+    if (mode === DirectionalPressureMode.SINGLE_SECTOR) {
+      const base = this.getCurrentDirectionalAngle();
+      const spread = (hash - 0.5) * Math.PI * 0.55;
+      return base + spread;
+    }
+
+    if (mode === DirectionalPressureMode.DOMINANT_AND_FLANK) {
+      const isFlank = hash < 0.28;
+      const base = isFlank ? this.getSecondaryDirectionalAngle() : this.getCurrentDirectionalAngle();
+      const spread = (hash - 0.5) * Math.PI * 0.65;
+      return base + spread;
+    }
+
+    if (mode === DirectionalPressureMode.DUAL_SECTORS) {
+      const pickSecondary = hash < 0.45;
+      const base = pickSecondary ? this.getSecondaryDirectionalAngle() : this.getCurrentDirectionalAngle();
+      const spread = (hash - 0.5) * Math.PI * 0.75;
+      return base + spread;
+    }
+
+    // PINCER_SURROUND (Overdrive)
+    const quadrant = Math.floor(hash * 4);
+    return quadrant * (Math.PI / 2) + (hash - 0.5) * (Math.PI * 0.4);
+  }
+
+  /**
    * Request an aerial attack slot for a Combat Drone entering ATTACK_RUN.
    */
   requestAirAttackSlot(
@@ -485,6 +517,9 @@ export class CombatDirector {
     overdriveMultiplier = 1.0,
     isBossActive = false,
     difficulty: "casual" | "normal" | "hard" = "normal",
+    priorityTargetActive = false,
+    pickupRiskActive = false,
+    spawnQueueLength = 0,
   ): CombatDirectorSnapshot {
     const attackingIds = Array.from(this.airReservations.keys());
     const mode = this.getDirectionalMode(wave, isOverdrive);
@@ -521,6 +556,9 @@ export class CombatDirector {
       speedScale: Math.round(enemySpeedScale(wave) * 100) / 100,
       attackingIds,
       preparingIds: [],
+      priorityTargetActive,
+      pickupRiskActive,
+      spawnQueueLength,
     };
   }
 }

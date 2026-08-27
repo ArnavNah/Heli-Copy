@@ -11,19 +11,19 @@ const ParticleVert = `
 
   void main() {
       float lifeTime = max(0.0, uTime - startTime);
-      float duration = pType == 1.0 ? 2.2 : (pType == 2.0 ? 0.4 : (pType == 3.0 ? 1.6 : 1.0)); // Smoke longest, sparks fastest, debris in between
+      float duration = pType == 1.0 ? 2.2 : (pType == 2.0 ? 0.4 : (pType == 3.0 ? 1.6 : (pType == 4.0 ? 0.35 : (pType == 5.0 ? 0.28 : 1.0))));
       vLife = max(0.0, 1.0 - (lifeTime / duration)); 
       vType = pType;
       
       vec3 currentPos = position + velocity * lifeTime;
-      // Gravity affects sparks (type 2), explosions (type 0) and debris (type 3); smoke (type 1) rises
-      float gravMult = pType == 1.0 ? -2.0 : (pType == 3.0 ? 16.0 : 9.8);
+      // Gravity affects sparks (type 2), explosions (type 0), debris (type 3); smoke (type 1) and vapor (type 5) rise slightly
+      float gravMult = pType == 1.0 ? -2.0 : (pType == 5.0 ? -1.0 : (pType == 3.0 ? 16.0 : 9.8));
       currentPos.y -= gravMult * lifeTime * lifeTime;
 
       vec4 mvPosition = modelViewMatrix * vec4(currentPos, 1.0);
       
       // Sizes based on type
-      float sizeMult = pType == 1.0 ? 38.0 : (pType == 2.0 ? 6.5 : (pType == 3.0 ? 7.0 : 24.0));
+      float sizeMult = pType == 1.0 ? 38.0 : (pType == 2.0 ? 6.5 : (pType == 3.0 ? 7.0 : (pType == 4.0 ? 8.5 : (pType == 5.0 ? 14.0 : 24.0))));
       gl_PointSize = (sizeMult * vLife) * (100.0 / length(mvPosition.xyz));
       gl_Position = projectionMatrix * mvPosition;
   }
@@ -59,6 +59,16 @@ const ParticleFrag = `
           color = mix(debrisEnd, debrisStart, vLife);
           color += vec3(1.0, 0.45, 0.05) * pow(1.0 - dist * 2.0, 2.0) * max(0.0, vLife - 0.75);
           alpha = vLife * 0.95 * softDisc;
+      } else if (vType == 4.0) {
+          // Electrical arcs / EMP sparks (brilliant cyan to electric blue)
+          vec3 arcStart = vec3(0.9, 1.0, 1.0);
+          vec3 arcEnd = vec3(0.1, 0.65, 1.0);
+          color = mix(arcEnd, arcStart, vLife);
+          alpha = vLife * softDisc * 1.1;
+      } else if (vType == 5.0) {
+          // Near-miss supersonic vapor trail
+          color = vec3(0.85, 0.95, 1.0);
+          alpha = vLife * 0.45 * softDisc;
       } else {
           // Default Explosion
           vec3 startColor = vec3(1.0, 0.96, 0.72); // White-Hot
@@ -276,7 +286,7 @@ export class GPUParticleSystem {
     this.mesh.matrixAutoUpdate = false;
   }
 
-  private dirty: boolean = false;
+  dirty: boolean = false;
 
   spawnExplosion(
     x: number,
@@ -339,7 +349,10 @@ export class GPUParticleSystem {
     this.dirty = true;
   }
 
-  /** Procedural rotor downwash vortex with vehicle-speed drag and radial outward puff. */
+  /**
+   * Procedural rotor downwash vortex with vehicle-speed drag and ground-surface dust kicking.
+   * Low hover (<6 u/s) produces circular radial puffs; fast low flight produces a directional trailing dust wake.
+   */
   spawnRotorDownwash(
     centerX: number,
     groundY: number,
@@ -351,6 +364,9 @@ export class GPUParticleSystem {
     now: number,
     count: number = 2,
   ) {
+    const hSpeed = Math.hypot(vx, vz);
+    const isHover = hSpeed < 6.0;
+
     for (let i = 0; i < count; i++) {
       const idx = this.currentIndex;
       const ang = Math.random() * Math.PI * 2;
@@ -358,10 +374,22 @@ export class GPUParticleSystem {
       const spawnX = centerX + Math.cos(ang) * r;
       const spawnZ = centerZ + Math.sin(ang) * r;
 
-      const outSpeed = (6 + Math.random() * 8) * strength;
-      const outVx = Math.cos(ang) * outSpeed + vx * 0.35;
-      const outVz = Math.sin(ang) * outSpeed + vz * 0.35;
-      const outVy = (0.8 + Math.random() * 2.0) * strength;
+      let outVx: number;
+      let outVz: number;
+      if (isHover) {
+        // Pure radial outward vortex on hover
+        const outSpeed = (6 + Math.random() * 8) * strength;
+        outVx = Math.cos(ang) * outSpeed;
+        outVz = Math.sin(ang) * outSpeed;
+      } else {
+        // Trailing slipstream dust wake on forward flight
+        const trailSpeed = (4 + Math.random() * 6) * strength;
+        const normVx = vx / hSpeed;
+        const normVz = vz / hSpeed;
+        outVx = -normVx * trailSpeed + Math.cos(ang) * (trailSpeed * 0.4);
+        outVz = -normVz * trailSpeed + Math.sin(ang) * (trailSpeed * 0.4);
+      }
+      const outVy = (0.8 + Math.random() * 2.2) * strength;
 
       this.positionAttr.setXYZ(idx, spawnX, groundY + 0.1, spawnZ);
       this.velocityAttr.setXYZ(idx, outVx, outVy, outVz);
@@ -384,6 +412,53 @@ export class GPUParticleSystem {
       );
       this.startTimeAttr.setX(idx, now);
       this.pTypeAttr.setX(idx, 2.0); // Spark type
+      this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    }
+    this.dirty = true;
+  }
+
+  /** Brilliant cyan/blue electrical spark arcs for Boss critical damage (<33%) and EMP pulses. */
+  spawnElectricalArc(x: number, y: number, z: number, now: number, count = 3, speed = 18) {
+    for (let i = 0; i < count; i++) {
+      const idx = this.currentIndex;
+      this.positionAttr.setXYZ(idx, x, y, z);
+      this.velocityAttr.setXYZ(
+        idx,
+        (Math.random() - 0.5) * speed,
+        (Math.random() - 0.5) * speed + 3,
+        (Math.random() - 0.5) * speed,
+      );
+      this.startTimeAttr.setX(idx, now);
+      this.pTypeAttr.setX(idx, 4.0); // Electrical arc type
+      this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    }
+    this.dirty = true;
+  }
+
+  /** Subtle supersonic vapor streak for near-miss high-danger projectiles. */
+  spawnNearMissStreak(x: number, y: number, z: number, vx: number, vy: number, vz: number, now: number) {
+    const idx = this.currentIndex;
+    this.positionAttr.setXYZ(idx, x, y, z);
+    this.velocityAttr.setXYZ(idx, vx * 0.1, vy * 0.1, vz * 0.1);
+    this.startTimeAttr.setX(idx, now);
+    this.pTypeAttr.setX(idx, 5.0); // Near-miss vapor streak type
+    this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
+    this.dirty = true;
+  }
+
+  /** Secondary missile propellant cook-off bursts for SAM site destruction. */
+  spawnCookOff(x: number, y: number, z: number, now: number, count = 4) {
+    for (let i = 0; i < count; i++) {
+      const idx = this.currentIndex;
+      this.positionAttr.setXYZ(idx, x + (Math.random() - 0.5) * 2, y + Math.random() * 1.5, z + (Math.random() - 0.5) * 2);
+      this.velocityAttr.setXYZ(
+        idx,
+        (Math.random() - 0.5) * 16,
+        Math.random() * 18 + 8,
+        (Math.random() - 0.5) * 16,
+      );
+      this.startTimeAttr.setX(idx, now);
+      this.pTypeAttr.setX(idx, 2.0); // Spark/fire pop
       this.currentIndex = (this.currentIndex + 1) % this.maxParticles;
     }
     this.dirty = true;

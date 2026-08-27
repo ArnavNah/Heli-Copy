@@ -2163,3 +2163,36 @@ export function computeCombatPay(input: CombatPayInput): number {
   const timePay = kills > 0 ? Math.floor(time / 30) * 4 : 0;
   return kills * 2 + wavesCleared * 12 + objectives * 15 + timePay;
 }
+
+// ---------------------------------------------------------------------------
+// Priority Targets (high-value marked units inside survival combat)
+// ---------------------------------------------------------------------------
+
+export const PRIORITY_TARGET_WAVE_CHANCE: Record<number, number> = {
+  1: 0,
+  2: 0,
+  3: 0,
+  4: 0.04,
+  5: 0.07,
+  6: 0.10,
+  7: 0.12,
+  8: 0.14,
+  9: 0.16,
+};
+export const PRIORITY_TARGET_OVERDRIVE_CHANCE = 0.18;
+
+export interface PriorityTargetReward {
+  credits: number;
+  xp: number;
+  salvage: number;
+}
+
+export function priorityTargetReward(wave: number): PriorityTargetReward {
+  const w = Math.max(1, Math.floor(wave));
+  const scale = 1 + Math.min(2.5, (w - 1) * 0.18);
+  return {
+    credits: Math.round(150 * scale),
+    xp: Math.round(18 * scale),
+    salvage: Math.max(2, Math.round(1 + w * 0.4)),
+  };
+}

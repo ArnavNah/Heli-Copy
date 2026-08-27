@@ -1087,6 +1087,268 @@ export class AudioManager {
     thudOsc.stop(now + 0.92);
   }
 
+  /**
+   * Supersonic near-miss projectile whoosh / whip-crack with directional panning.
+   * Triggered when high-danger projectile grazes the player's proximity bubble.
+   */
+  public playNearMiss(pan: number = 0) {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+    const panner = this.ctx.createStereoPanner();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(1450, now);
+    osc.frequency.exponentialRampToValueAtTime(280, now + 0.12);
+
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1800, now);
+    filter.frequency.exponentialRampToValueAtTime(450, now + 0.12);
+    filter.Q.value = 4.5;
+
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(panner);
+    panner.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
+
+  /**
+   * High-speed aircraft fly-by whoosh with Doppler pitch shift.
+   */
+  public playFlyby(speed: number = 40, pan: number = 0) {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+    const panner = this.ctx.createStereoPanner();
+
+    const startFreq = 880 + Math.min(speed * 4, 400);
+    const endFreq = 260;
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.28);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2400, now);
+    filter.frequency.exponentialRampToValueAtTime(600, now + 0.28);
+
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.14, now + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(panner);
+    panner.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.32);
+  }
+
+  /** Heavy deep tank cannon shot distinct from light vehicle fire. */
+  public playTankCannon(pan: number = 0) {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const panner = this.ctx.createStereoPanner();
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(120, now);
+    osc.frequency.exponentialRampToValueAtTime(32, now + 0.25);
+
+    g.gain.setValueAtTime(0.28, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+
+    osc.connect(g);
+    g.connect(panner);
+    panner.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.30);
+  }
+
+  /** Secondary missile propellant cook-off for SAM site destruction. */
+  public playSamCookOff() {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    for (let i = 0; i < 3; i++) {
+      const t = now + 0.08 + i * 0.12 + Math.random() * 0.05;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(260 + Math.random() * 200, t);
+      osc.frequency.exponentialRampToValueAtTime(80, t + 0.09);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.10);
+      osc.connect(g);
+      g.connect(this.sfxGain);
+      osc.start(t);
+      osc.stop(t + 0.11);
+    }
+  }
+
+  /** Electromagnetic pulse discharge sound for EMP power-up / disruption. */
+  public playEmpPulse() {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1200, now);
+    osc.frequency.exponentialRampToValueAtTime(60, now + 0.45);
+
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(800, now);
+    filter.frequency.linearRampToValueAtTime(2400, now + 0.2);
+    filter.frequency.exponentialRampToValueAtTime(200, now + 0.5);
+    filter.Q.value = 6.0;
+
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.22, now + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.52);
+
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.55);
+  }
+
+  /** Air enemy death spiral stalling turbine flutter / screaming pitch drop. */
+  public playAirDeathSpiral() {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(540, now);
+    osc.frequency.exponentialRampToValueAtTime(140, now + 0.65);
+
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.11, now + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.70);
+
+    osc.connect(g);
+    g.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.72);
+  }
+
+  /**
+   * Crisp synthesized audio stings for temporary power-ups.
+   */
+  public playPowerUpSting(name: string) {
+    this.resume();
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    switch (name) {
+      case 'OVERDRIVE': {
+        const notes = [440, 554, 659, 880];
+        notes.forEach((f, i) => {
+          const osc = this.ctx!.createOscillator();
+          const g = this.ctx!.createGain();
+          osc.type = 'sawtooth';
+          osc.frequency.value = f;
+          g.gain.setValueAtTime(0.0001, now + i * 0.05);
+          g.gain.exponentialRampToValueAtTime(0.12, now + i * 0.05 + 0.015);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.05 + 0.18);
+          osc.connect(g);
+          g.connect(this.sfxGain!);
+          osc.start(now + i * 0.05);
+          osc.stop(now + i * 0.05 + 0.20);
+        });
+        break;
+      }
+      case 'MAGNET_SURGE': {
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(420, now);
+        osc.frequency.linearRampToValueAtTime(1280, now + 0.22);
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.14, now + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+        osc.connect(g);
+        g.connect(this.sfxGain);
+        osc.start(now);
+        osc.stop(now + 0.26);
+        break;
+      }
+      case 'FIELD_REPAIR': {
+        const notes = [523, 659, 784];
+        notes.forEach((f, i) => {
+          const osc = this.ctx!.createOscillator();
+          const g = this.ctx!.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = f;
+          g.gain.setValueAtTime(0.0001, now + i * 0.07);
+          g.gain.exponentialRampToValueAtTime(0.15, now + i * 0.07 + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.07 + 0.22);
+          osc.connect(g);
+          g.connect(this.sfxGain!);
+          osc.start(now + i * 0.07);
+          osc.stop(now + i * 0.07 + 0.24);
+        });
+        break;
+      }
+      case 'EMP_PULSE':
+        this.playEmpPulse();
+        break;
+      case 'SALVAGE_CACHE': {
+        const notes = [659, 880, 1174];
+        notes.forEach((f, i) => {
+          const osc = this.ctx!.createOscillator();
+          const g = this.ctx!.createGain();
+          osc.type = 'square';
+          osc.frequency.value = f;
+          g.gain.setValueAtTime(0.0001, now + i * 0.06);
+          g.gain.exponentialRampToValueAtTime(0.11, now + i * 0.06 + 0.015);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.06 + 0.24);
+          osc.connect(g);
+          g.connect(this.sfxGain!);
+          osc.start(now + i * 0.06);
+          osc.stop(now + i * 0.06 + 0.26);
+        });
+        break;
+      }
+      default:
+        this.playPickup();
+        break;
+    }
+  }
+
   public dispose() {
     this.stopMusic();
 

@@ -4,21 +4,30 @@ export type LootTier = "BASIC" | "SPECIAL" | "ELITE" | "BOSS" | "MISSION";
 
 export interface LootPlan {
   salvage: number;
+  salvageCache: boolean;
   powerup: PowerUpType | null;
   countermeasure: boolean;
 }
 
-const USEFUL_POWERUPS = [PowerUpType.HEALTH, PowerUpType.AMMO, PowerUpType.FUEL, PowerUpType.SHIELD] as const;
+const USEFUL_POWERUPS = [
+  PowerUpType.HEALTH,
+  PowerUpType.AMMO,
+  PowerUpType.FUEL,
+  PowerUpType.SHIELD,
+  PowerUpType.DAMAGE_BOOST,
+  PowerUpType.MAGNET_SURGE,
+  PowerUpType.EMP_PULSE,
+] as const;
 
 /** Pure weighted loot decision. Callers provide rolls so tests and replays stay deterministic. */
 export function rollLoot(tier: LootTier, chanceRoll: number, typeRoll: number): LootPlan {
   const chance = Math.max(0, Math.min(0.999999, chanceRoll));
   const typeIndex = Math.floor(Math.max(0, Math.min(0.999999, typeRoll)) * USEFUL_POWERUPS.length);
-  if (tier === "BOSS") return { salvage: 6, powerup: USEFUL_POWERUPS[typeIndex], countermeasure: true };
-  if (tier === "MISSION") return { salvage: 3, powerup: chance < 0.5 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: chance >= 0.8 };
-  if (tier === "ELITE") return { salvage: 2 + (chance < 0.35 ? 1 : 0), powerup: chance < 0.78 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: chance >= 0.78 };
-  if (tier === "SPECIAL") return { salvage: chance < 0.28 ? 1 : 0, powerup: chance >= 0.28 && chance < 0.42 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: false };
-  return { salvage: chance < 0.08 ? 1 : 0, powerup: chance >= 0.08 && chance < 0.14 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: false };
+  if (tier === "BOSS") return { salvage: 6, salvageCache: true, powerup: USEFUL_POWERUPS[typeIndex], countermeasure: true };
+  if (tier === "MISSION") return { salvage: 3, salvageCache: chance < 0.65, powerup: chance < 0.6 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: chance >= 0.75 };
+  if (tier === "ELITE") return { salvage: 2 + (chance < 0.35 ? 1 : 0), salvageCache: chance < 0.45, powerup: chance < 0.78 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: chance >= 0.78 };
+  if (tier === "SPECIAL") return { salvage: chance < 0.28 ? 1 : 0, salvageCache: chance < 0.22, powerup: chance >= 0.28 && chance < 0.42 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: false };
+  return { salvage: chance < 0.08 ? 1 : 0, salvageCache: false, powerup: chance >= 0.08 && chance < 0.14 ? USEFUL_POWERUPS[typeIndex] : null, countermeasure: false };
 }
 
 export function salvageCreditValue(salvage: number): number {

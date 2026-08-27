@@ -953,6 +953,113 @@ a:focus-visible {
   color: #8c8266;
 }
 
+/* ── Left-Aligned Tactical Console (Steam/AAA Layout) ─────────────────── */
+.menu-backdrop-split {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    #060805 0%,
+    #060805 26%,
+    rgba(6, 8, 5, 0.94) 34%,
+    rgba(6, 8, 5, 0.65) 45%,
+    rgba(6, 8, 5, 0.15) 58%,
+    transparent 72%
+  );
+  z-index: 10;
+}
+
+.menu-left-zone {
+  position: relative;
+  z-index: 20;
+  width: min(440px, 28vw);
+  min-width: 300px;
+  max-width: 450px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2.75rem 1.75rem 2.25rem 3.5rem;
+  box-sizing: border-box;
+  animation: menuEnter 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (max-width: 768px) {
+  .menu-left-zone {
+    width: 100%;
+    min-width: unset;
+    max-width: unset;
+    padding: 1.5rem;
+  }
+  .menu-backdrop-split {
+    background: rgba(6, 8, 5, 0.88);
+  }
+}
+
+.menu-row-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 13px 16px;
+  background: linear-gradient(90deg, #1c2417 0%, #12180e 100%);
+  border: 1.5px solid #3d4e2e;
+  border-left: 3px solid #627e49;
+  border-radius: 3px;
+  color: #ded6be;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: all 0.15s cubic-bezier(0.2, 0.8, 0.4, 1);
+}
+
+.menu-row-btn:hover:not(:disabled) {
+  background: linear-gradient(90deg, #283520 0%, #182213 100%);
+  border-color: #5d7847;
+  border-left-color: #ffcc00;
+  color: #ffffff;
+  transform: translateX(4px);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.7),
+    0 0 12px rgba(255, 204, 0, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.menu-row-btn:active:not(:disabled) {
+  transform: translateX(2px) translateY(1px);
+  background: #0f140c;
+}
+
+/* Bottom-Right Aircraft Telemetry Card (Hero Zone) */
+.aircraft-telemetry-badge {
+  position: absolute;
+  bottom: 2rem;
+  right: 2.5rem;
+  width: min(340px, 30vw);
+  background: rgba(13, 17, 10, 0.82);
+  border: 1px solid #3d4e2e;
+  border-top: 2px solid #627e49;
+  border-radius: 4px;
+  padding: 14px 18px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  user-select: none;
+  animation: menuEnter 0.5s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (max-width: 1024px) {
+  .aircraft-telemetry-badge {
+    display: none;
+  }
+}
+
 .run-stat {
   background: linear-gradient(180deg, #1a2114 0%, #0f130c 100%);
   border: 1px solid #333f28;

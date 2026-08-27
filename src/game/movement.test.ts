@@ -397,3 +397,60 @@ describe('gun hierarchy & cross-aim independence', () => {
     expect(muzzleDirection.x).toBeGreaterThan(0.85);
   });
 });
+
+describe('responsiveness benchmarks & latency guarantees', () => {
+  it('tap input responds immediately on frame 1 without delay', () => {
+    const rig = createRig();
+    step(rig, 1 / 60, FORWARD, true);
+    // Instant response: velocity must be active on the very first frame
+    expect(Math.abs(rig.helicopter.body.velocity.z)).toBeGreaterThan(3.5);
+  });
+
+  it('reaches useful movement speed within 0.10–0.18 sec', () => {
+    const rig = createRig();
+    // Simulate exactly 0.12 seconds (7 frames at 60Hz)
+    simulate(rig, 0.12, 60, FORWARD);
+    const speed = Math.hypot(rig.helicopter.body.velocity.x, rig.helicopter.body.velocity.z);
+    // Useful combat speed is >= 30 u/s (approx half cruise speed)
+    expect(speed).toBeGreaterThanOrEqual(30);
+  });
+
+  it('reaches near full cruise speed within 0.22–0.30 sec', () => {
+    const rig = createRig();
+    simulate(rig, 0.25, 60, FORWARD);
+    const speed = Math.hypot(rig.helicopter.body.velocity.x, rig.helicopter.body.velocity.z);
+    expect(speed).toBeGreaterThanOrEqual(60);
+    expect(speed).toBeLessThanOrEqual(MOVEMENT_CONFIG.maxHorizontalSpeed);
+  });
+
+  it('counter-steers rapidly during 180° reversal within target window', () => {
+    const rig = createRig();
+    simulate(rig, 1, 60, FORWARD);
+    expect(-rig.helicopter.body.velocity.z).toBeCloseTo(MOVEMENT_CONFIG.maxHorizontalSpeed, 0);
+
+    const reverse: MovementCommand = { ...NEUTRAL, z: 1 };
+    // At 0.15s of counter-steering, forward speed should be broken below 20 u/s
+    simulate(rig, 0.15, 60, reverse);
+    expect(-rig.helicopter.body.velocity.z).toBeLessThan(20);
+
+    // At 0.25s, vehicle has crossed zero and is moving in the reverse direction
+    simulate(rig, 0.10, 60, reverse);
+    expect(rig.helicopter.body.velocity.z).toBeGreaterThan(5);
+  });
+
+  it('active braking stops the vehicle in 0.25–0.45s', () => {
+    const rig = createRig();
+    rig.helicopter.body.velocity.z = -MOVEMENT_CONFIG.maxHorizontalSpeed;
+
+    const dt = 1 / 120;
+    let stopTime = 0;
+    while ((Math.abs(rig.helicopter.body.velocity.x) > 0 || Math.abs(rig.helicopter.body.velocity.z) > 0) && stopTime < 1.0) {
+      step(rig, dt, NEUTRAL, false);
+      stopTime += dt;
+    }
+
+    expect(stopTime).toBeGreaterThanOrEqual(0.25);
+    expect(stopTime).toBeLessThanOrEqual(0.45);
+    expect(rig.helicopter.body.velocity.length()).toBe(0);
+  });
+});

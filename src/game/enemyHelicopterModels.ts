@@ -29,6 +29,7 @@ export interface EnemyDamagePoints {
   engineRight: THREE.Object3D;
   hull: THREE.Object3D;
   tail?: THREE.Object3D;
+  core?: THREE.Object3D;
 }
 
 export interface EnemyHelicopterModelResult {
@@ -1253,6 +1254,11 @@ export function buildBossHeavyGunship(options: EnemyHelicopterModelOptions): Ene
   tailPoint.position.set(0, 1.0, -8.5);
   visualRoot.add(tailPoint);
 
+  const corePoint = new THREE.Object3D();
+  corePoint.name = "CoreDamagePoint";
+  corePoint.position.set(0, 0.4, 1.2);
+  visualRoot.add(corePoint);
+
   return {
     root,
     visualRoot,
@@ -1264,7 +1270,7 @@ export function buildBossHeavyGunship(options: EnemyHelicopterModelOptions): Ene
     missilePoints,
     rocketPoints,
     targetPoint,
-    damagePoints: { engineLeft, engineRight, hull: hullPoint, tail: tailPoint },
+    damagePoints: { engineLeft, engineRight, hull: hullPoint, tail: tailPoint, core: corePoint },
     coreGlowMesh,
     rotorBlurDisc,
     submeshes,

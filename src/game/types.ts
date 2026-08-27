@@ -1,6 +1,7 @@
 import type * as THREE from "three";
 import type * as CANNON from "cannon-es";
-import type { SamState } from "./sam";
+import { SamState } from "./sam";
+export { SamState };
 import type { MissionType } from "./mission";
 
 /** Structural type compatible with both CANNON.Vec3 and THREE.Vector3.
@@ -124,6 +125,7 @@ export type MinimapEnemy = {
   variant?: EnemyVariant;
   elite: boolean;
   boss: boolean;
+  priority?: boolean;
 };
 
 export type MinimapDelivery = {
@@ -326,6 +328,19 @@ export enum DirectionalPressureMode {
   PINCER_SURROUND = "PINCER_SURROUND",
 }
 
+export type PriorityTargetInfo = {
+  enemyId: number;
+  variant: EnemyVariant;
+  announcedAt: number;
+  x: number;
+  y: number;
+  z: number;
+  hp: number;
+  maxHp: number;
+  hpRatio: number;
+  active: boolean;
+};
+
 export type CombatDirectorSnapshot = {
   wave: number;
   combatIntensity: number;
@@ -353,6 +368,9 @@ export type CombatDirectorSnapshot = {
   speedScale: number;
   attackingIds: number[];
   preparingIds: number[];
+  priorityTargetActive?: boolean;
+  pickupRiskActive?: boolean;
+  spawnQueueLength?: number;
 };
 
 export enum ObjectiveType {
@@ -459,6 +477,9 @@ export enum PowerUpType {
   XP_GEM,
   SALVAGE,
   COUNTERMEASURE,
+  SALVAGE_CACHE,
+  MAGNET_SURGE,
+  EMP_PULSE,
 }
 
 export enum PowerUpState {

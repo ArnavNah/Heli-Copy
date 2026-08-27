@@ -123,6 +123,7 @@ import {
   WeaponType,
   PowerUpType,
   type MinimapSnapshot,
+  type PriorityTargetInfo,
 } from "./types";
 import {
   accuracyFor,
@@ -200,6 +201,9 @@ import {
   enemyHPScale,
   enemyDamageScale,
   enemySpeedScale,
+  PRIORITY_TARGET_WAVE_CHANCE,
+  PRIORITY_TARGET_OVERDRIVE_CHANCE,
+  priorityTargetReward,
 } from "./logic";
 import type { Difficulty as DifficultySetting, PerkRanks, QualityGovernorState, TargetCategory, UpgradeId, UpgradeOption, WaveThemeConfig } from "./logic";
 import { armorMitigation, resolvePlayerDamage, resolveRepair, type PlayerDamageType } from "./combat";
@@ -407,6 +411,7 @@ export class GameEngine {
   lightningTimeout: number | null = null;
   disposed = false;
   isPlaying = false;
+  isPaused = false;
   gameOverDispatched = false;
 
   // Perf overlay support: a cheap rolling FPS counter and a public
@@ -504,6 +509,9 @@ export class GameEngine {
 
   // Stable camera state. No random or impulse offset is ever composed onto it.
   private baseCamPos = new THREE.Vector3(0, 62, 46);
+  private smoothedLookAhead = new THREE.Vector2(0, 0);
+  private cameraTargetPosScratch = new THREE.Vector3();
+  cameraFollowError: number = 0;
 
   // Free 360° Camera Orbit System
   cameraYaw: number = 0;
@@ -513,7 +521,7 @@ export class GameEngine {
   private recenterStartYaw: number = 0;
   private recenterTargetYaw: number = 0;
   private recenterTimer: number = 0;
-  readonly recenterDuration: number = 0.35;
+  readonly recenterDuration: number = 0.30;
   lastCameraInputTime: number = 0;
   cameraBoomFraction: number = 1.0;
   isMiddleMouseOrbiting: boolean = false;
@@ -588,6 +596,14 @@ export class GameEngine {
   postBossDecisionAvailable: boolean = false;
   private microLullTimer: number = 28.0;
   private microLullActiveTimer: number = 0;
+
+  // Priority Target & Pickup-Risk systems
+  priorityTargetEnemy: Enemy | null = null;
+  private priorityTargetCooldown: number = 18.0;
+  private priorityTargetAnnouncedAt: number = 0;
+  private priorityTargetInfo: PriorityTargetInfo | null = null;
+  pickupRiskActive: boolean = false;
+  private pickupRiskTimer: number = 0;
 
   // Weapon XP & levels
   weaponXp: Map<WeaponType, number> = new Map();
@@ -719,10 +735,11 @@ export class GameEngine {
   /** Level-ups queued when one gem crosses several thresholds (boss gems). */
   pendingLevelUps: number = 0;
 
-  // Damage Boost & Shield
+  // Damage Boost, Shield, Speed Boost & Magnet Surge
   damageBoostTimer: number = 0;
   shieldTimer: number = 0;
   speedBoostTimer: number = 0;
+  magnetSurgeTimer: number = 0;
 
   // Time dilation & Hit-Stop
   timeScale: number = 1.0;
@@ -1103,7 +1120,9 @@ export class GameEngine {
 
   startGame() {
     this.resetGame();
+    this.isPaused = false;
     this.isPlaying = true;
+    this.helicopter.mesh.visible = true;
     // First run only: teach the controls before the countdown begins.
     let tutorialDone = true;
     try {
@@ -1140,7 +1159,9 @@ export class GameEngine {
 
   setPaused(paused: boolean) {
     if (paused && this.tutorialActive) this.tutorialPausedOnce = true;
+    this.isPaused = paused;
     this.isPlaying = !paused;
+    this.helicopter.mesh.visible = true;
     this.isFiringMouse = false;
     this.isFiringGamepad = false;
     this.leftStick = { x: 0, y: 0, active: false };
@@ -1169,6 +1190,12 @@ export class GameEngine {
       enemy.destroy();
     }
     this.enemies = [];
+    this.priorityTargetEnemy = null;
+    this.priorityTargetInfo = null;
+    this.priorityTargetCooldown = 18.0;
+    this.priorityTargetAnnouncedAt = 0;
+    this.pickupRiskActive = false;
+    this.pickupRiskTimer = 0;
     for (const shadow of this.enemyShadows.values()) {
       this.scene.remove(shadow);
       shadow.geometry.dispose();
@@ -1318,6 +1345,7 @@ export class GameEngine {
     this.damageBoostTimer = 0;
     this.shieldTimer = 0;
     this.speedBoostTimer = 0;
+    this.magnetSurgeTimer = 0;
     this.hitMarkerTimer = 0;
     this.powerupSpawnTimer = 0;
     this.verticalInput = 0;
@@ -1607,8 +1635,16 @@ export class GameEngine {
       powerups: this.powerups.length,
       objectives: this.objectives.length,
       activeDamageTexts: this.floatingCombatText.getActiveCount(),
+      inputLatency: {
+        rawInputX: +this.gamepadMove.x.toFixed(2),
+        rawInputZ: +this.gamepadMove.z.toFixed(2),
+        desiredSpeed: +Math.hypot(this.helicopter.desiredVelocity.x, this.helicopter.desiredVelocity.z).toFixed(1),
+        actualSpeed: +Math.hypot(this.helicopter.body.velocity.x, this.helicopter.body.velocity.z).toFixed(1),
+        cameraFollowError: +this.cameraFollowError.toFixed(2),
+        orbitVelocity: +this.currentCameraYawVelocity.toFixed(2),
+      },
       combatDirector: this.combatDirector.getSnapshot(
-        this.enemies.filter((e) => e.type === EnemyType.DRONE && e.active).length,
+        this.enemies.filter((e) => (e.type === EnemyType.DRONE || e.type === EnemyType.SHOOTER) && e.active).length,
         this.enemies.filter((e) => e.active).length,
         this.currentGroundThreat,
         this.currentAirThreat,
@@ -1619,6 +1655,9 @@ export class GameEngine {
         this.overdriveMultiplier,
         this.enemies.some((e) => e.type === EnemyType.BOSS && e.active),
         this.settings.difficulty,
+        Boolean(this.priorityTargetEnemy?.active),
+        this.pickupRiskActive,
+        this.pendingVariantQueue.length + this.pendingSpawns,
       ),
     };
   }
@@ -2628,6 +2667,7 @@ export class GameEngine {
     if (key === "r") this.startReload();
 
     if (key === "c" && !e.repeat) this.deployCountermeasure(performance.now() / 1000);
+    if ((key === "x" || key === "v") && !e.repeat) this.recenterCamera(performance.now() / 1000);
 
     if (key === "q") {
       this.startPaintingLocks();
@@ -3768,16 +3808,24 @@ export class GameEngine {
     const stopScale = enemy.type === EnemyType.BOSS ? 0.02 : 0.05;
     if (source !== "BOMB") this.triggerHitStop(stopDuration, stopScale);
 
-    // Vampire-Survivors style: every kill drops an XP gem you fly through.
-    // Gems are the upgrade currency — collect them to level up and roll.
+    const isSpiralAirKill = enemy.type === EnemyType.DRONE && enemy.isDying && source !== "BOMB";
     const enemyXp = xpForEnemyType(enemy.type, enemy.isElite, enemy.variant);
-    this.dropXpGem(
-      enemy.body.position.x,
-      enemy.body.position.y,
-      enemy.body.position.z,
-      enemyXp,
-    );
-    this.dropEnemyLoot(enemy);
+
+    if (isSpiralAirKill) {
+      this.audio.playAirDeathSpiral();
+      // Initial lethal strike pop on the aircraft
+      this.particles.spawnExplosion(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, 28, time, 10);
+      this.particles.spawnSparks(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, time, 4, 14);
+    } else {
+      // Vampire-Survivors style: immediate kill drops XP gem and loot
+      this.dropXpGem(
+        enemy.body.position.x,
+        enemy.body.position.y,
+        enemy.body.position.z,
+        enemyXp,
+      );
+      this.dropEnemyLoot(enemy);
+    }
 
     if (enemy.type === EnemyType.BOSS) {
       this.floatingCombatText.spawnGroupedKill(
@@ -3813,40 +3861,42 @@ export class GameEngine {
       this.floatingCombatText.spawnReward(enemy.body.position, `+${enemyXp} XP`, "XP", undefined, enemyXp, time);
     }
 
-    // Bigger explosion for enemies based on type
-    const explosionSize = enemy.type === EnemyType.BOSS ? 200 : enemy.isElite ? 150 : enemy.type === EnemyType.TANK ? 120 : 80;
-    const volumetricScale = enemy.type === EnemyType.BOSS ? 30 : enemy.isElite ? 24 : enemy.type === EnemyType.TANK ? 18 : 12;
+    if (!isSpiralAirKill) {
+      // Bigger explosion for enemies based on type
+      const explosionSize = enemy.type === EnemyType.BOSS ? 200 : enemy.isElite ? 150 : enemy.type === EnemyType.TANK ? 120 : 80;
+      const volumetricScale = enemy.type === EnemyType.BOSS ? 30 : enemy.isElite ? 24 : enemy.type === EnemyType.TANK ? 18 : 12;
 
-    this.particles.spawnExplosion(
-      enemy.body.position.x,
-      enemy.body.position.y,
-      enemy.body.position.z,
-      explosionSize,
-      time,
-      explosionSize * 0.4,
-    );
-    // Debris chunks + smoke + sparks make each kill read as a real detonation
-    // (boss/elites throw more debris, tanks kick up extra sparks).
-    this.particles.spawnDebris(
-      enemy.body.position.x,
-      enemy.body.position.y,
-      enemy.body.position.z,
-      time,
-      enemy.type === EnemyType.BOSS ? 30 : enemy.isElite ? 22 : enemy.type === EnemyType.TANK ? 16 : 8,
-      enemy.type === EnemyType.BOSS ? 40 : 28,
-    );
-    this.particles.spawnSmoke(enemy.body.position.x, enemy.body.position.y + 1, enemy.body.position.z, time);
-    this.particles.spawnSparks(
-      enemy.body.position.x,
-      enemy.body.position.y,
-      enemy.body.position.z,
-      time,
-      enemy.type === EnemyType.TANK ? 6 : 3,
-      enemy.type === EnemyType.BOSS ? 40 : 24,
-    );
-    this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, volumetricScale, volumetricScale * 0.6);
-    this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, enemy.type === EnemyType.BOSS ? 40 : 22, 95);
-    this.audio.playExplosion(enemy.type === EnemyType.BOSS ? 2.5 : 1.5);
+      this.particles.spawnExplosion(
+        enemy.body.position.x,
+        enemy.body.position.y,
+        enemy.body.position.z,
+        explosionSize,
+        time,
+        explosionSize * 0.4,
+      );
+      // Debris chunks + smoke + sparks make each kill read as a real detonation
+      // (boss/elites throw more debris, tanks kick up extra sparks).
+      this.particles.spawnDebris(
+        enemy.body.position.x,
+        enemy.body.position.y,
+        enemy.body.position.z,
+        time,
+        enemy.type === EnemyType.BOSS ? 30 : enemy.isElite ? 22 : enemy.type === EnemyType.TANK ? 16 : 8,
+        enemy.type === EnemyType.BOSS ? 40 : 28,
+      );
+      this.particles.spawnSmoke(enemy.body.position.x, enemy.body.position.y + 1, enemy.body.position.z, time);
+      this.particles.spawnSparks(
+        enemy.body.position.x,
+        enemy.body.position.y,
+        enemy.body.position.z,
+        time,
+        enemy.type === EnemyType.TANK ? 6 : 3,
+        enemy.type === EnemyType.BOSS ? 40 : 24,
+      );
+      this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, volumetricScale, volumetricScale * 0.6);
+      this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, enemy.type === EnemyType.BOSS ? 40 : 22, 95);
+      this.audio.playExplosion(enemy.type === EnemyType.BOSS ? 2.5 : 1.5);
+    }
 
     // B2: elite-affix death behaviors
     if (enemy.modifier & EnemyModifier.EXPLOSIVE) this.detonateExplosiveAffix(enemy, time);
@@ -4107,8 +4157,12 @@ export class GameEngine {
     this.powerups.push(pu);
   };
 
-  private dropLootPickup(x: number, y: number, z: number, type: PowerUpType, value = 1) {
-    const pickup = new PowerUp(this.scene, x, y + 2, z, type);
+  private dropLootPickup(x: number, y: number, z: number, type: PowerUpType, value = 1, scatter = 1.6) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * scatter;
+    const spawnX = x + Math.cos(angle) * r;
+    const spawnZ = z + Math.sin(angle) * r;
+    const pickup = new PowerUp(this.scene, spawnX, y + 2, spawnZ, type);
     pickup.spawnTime = performance.now() / 1000;
     pickup.value = value;
     this.powerups.push(pickup);
@@ -4124,36 +4178,86 @@ export class GameEngine {
           : "BASIC" as const;
     const plan = rollLoot(tier, Math.random(), Math.random());
     const { x, y, z } = enemy.body.position;
-    if (plan.salvage > 0) this.dropLootPickup(x - 1.2, y, z, PowerUpType.SALVAGE, plan.salvage);
-    if (plan.powerup !== null) this.dropLootPickup(x + 1.2, y, z, plan.powerup);
-    if (plan.countermeasure) this.dropLootPickup(x, y, z + 1.5, PowerUpType.COUNTERMEASURE);
+    if (plan.salvage > 0) this.dropLootPickup(x - 1.2, y, z, PowerUpType.SALVAGE, plan.salvage, 1.8);
+    if (plan.salvageCache) this.dropLootPickup(x, y, z, PowerUpType.SALVAGE_CACHE, 8, 1.2);
+    if (plan.powerup !== null) this.dropLootPickup(x + 1.2, y, z, plan.powerup, 1, 1.8);
+    if (plan.countermeasure) this.dropLootPickup(x, y, z + 1.5, PowerUpType.COUNTERMEASURE, 1, 1.8);
   }
 
   applyPowerUp = (type: PowerUpType, time: number) => {
     switch (type) {
       case PowerUpType.HEALTH:
-        // Cap at the actual max (hangar armor / maxed weapons push it past 100)
-        // so health pickups never silently waste healing.
-        this.repairPlayer(30);
+        // Field Repair: restores 35 Hull
+        this.repairPlayer(35);
+        this.audio.playPowerUpSting('FIELD_REPAIR');
+        this.announce('🔧 FIELD REPAIR', '+35 HULL RESTORED', '#22ff44');
         break;
       case PowerUpType.AMMO:
-        const weapon = this.weapons.get(this.currentWeapon);
-        if (weapon) weapon.ammo = weapon.maxAmmo;
+        // Ammo Pack: restocks all weapon systems
+        for (const [, config] of this.weapons.entries()) {
+          config.ammo = config.maxAmmo;
+        }
+        this.audio.playPowerUpSting('AMMO_PACK');
+        this.announce('📦 AMMO PACK', 'ORDNANCE RESTOCKED', '#ffdd22');
         break;
       case PowerUpType.DAMAGE_BOOST:
+        // Overdrive: 8 seconds of doubled firepower
         for (const [wType, config] of this.weapons.entries()) {
           config.damage = WEAPON_CONFIGS[wType].damage * 2;
         }
-        this.damageBoostTimer = 10.0;
+        this.damageBoostTimer = 8.0;
+        this.audio.playPowerUpSting('OVERDRIVE');
+        this.announce('⚡ OVERDRIVE', '8 SEC FIREPOWER SURGE', '#ff3344');
         break;
+      case PowerUpType.MAGNET_SURGE:
+        // Magnet Surge: 8 seconds of wide-radius item suction
+        this.magnetSurgeTimer = 8.0;
+        this.audio.playPowerUpSting('MAGNET_SURGE');
+        this.announce('🧲 MAGNET SURGE', '8 SEC XP VACUUM', '#00e5ff');
+        break;
+      case PowerUpType.EMP_PULSE: {
+        // EMP Pulse: 4s disruption of all nearby enemies + cancel incoming missile locks
+        const px = this.helicopter.body.position.x;
+        const py = this.helicopter.body.position.y;
+        const pz = this.helicopter.body.position.z;
+        for (const e of this.enemies) {
+          if (!e.active) continue;
+          const dx = e.body.position.x - px;
+          const dz = e.body.position.z - pz;
+          if (dx * dx + dz * dz <= 4225) { // 65m
+            e.applyStatus("emp", time);
+          }
+        }
+        for (const proj of this.enemyProjectiles.pool) {
+          if (proj.active && proj.homingStrength > 0) {
+            proj.targetType = "DECOY";
+          }
+        }
+        this.particles.spawnExplosion(px, py, pz, 75, time, 30);
+        this.particles.spawnElectricalArc(px, py, pz, time, 18, 24);
+        this.audio.playPowerUpSting('EMP_PULSE');
+        this.announce('⚡ EMP PULSE', 'SURROUNDING THREATS DISABLED', '#aa44ff');
+        break;
+      }
+      case PowerUpType.SALVAGE_CACHE: {
+        this.addSalvage(8);
+        this.score += 250;
+        this.audio.playPowerUpSting('SALVAGE_CACHE');
+        this.floatingCombatText.spawnReward(this.helicopter.body.position, '+8 CACHE SALVAGE', 'SALVAGE', '#ffd700', 8, time);
+        this.announce('🏆 SALVAGE CACHE', '+8 HIGH-VALUE SALVAGE', '#ffd700');
+        break;
+      }
       case PowerUpType.SHIELD:
         this.shieldTimer = 8.0;
+        this.audio.playPickup();
         break;
       case PowerUpType.SPEED_BOOST:
         this.speedBoostTimer = 6.0;
+        this.audio.playPickup();
         break;
       case PowerUpType.FUEL:
         this.currentFuel = Math.min(this.maxFuel, this.currentFuel + 35);
+        this.audio.playPickup();
         break;
       case PowerUpType.BOMB:
         // Every damage source uses the same idempotent enemy-death pipeline.
@@ -4286,6 +4390,7 @@ export class GameEngine {
             damageBoost: this.damageBoostTimer,
             shield: this.shieldTimer,
             speedBoost: this.speedBoostTimer,
+            magnetSurge: this.magnetSurgeTimer,
             threat: this.combatIntensity,
             afterburner: this.afterburnerActive,
             risk: risk > 1 ? risk : null,
@@ -4360,6 +4465,7 @@ export class GameEngine {
         variant: e.variant,
         elite: e.isElite,
         boss: isBoss,
+        priority: Boolean(e.isPriorityTarget),
       });
     }
 
@@ -4921,11 +5027,24 @@ export class GameEngine {
       const dx = proj.pos.x - player.x;
       const dz = proj.pos.z - player.z;
       const distance = Math.hypot(dx, dz);
-      if (distance > 280) continue;
+      if (distance < 0.001 || distance > 280) continue;
 
-      const closingSpeed = Math.max(25, proj.vel ? Math.hypot(proj.vel.x, proj.vel.z) : 95);
-      const tti = distance / closingSpeed;
-      const danger: "YELLOW" | "ORANGE" | "RED" = tti < 1.2 ? "RED" : (tti < 2.5 ? "ORANGE" : "YELLOW");
+      const toPlayerX = -dx / distance;
+      const toPlayerZ = -dz / distance;
+      // Closing velocity along line of sight toward player
+      const closingVel = proj.vel ? (proj.vel.x * toPlayerX + proj.vel.z * toPlayerZ) : 95;
+
+      let danger: "YELLOW" | "ORANGE" | "RED";
+      let tti: number;
+
+      // If missile is moving away or decoyed: downgrade immediately
+      if (isDecoyed || closingVel <= 2) {
+        danger = "YELLOW";
+        tti = Math.max(9.9, distance / Math.max(10, Math.abs(closingVel)));
+      } else {
+        tti = distance / Math.max(15, closingVel);
+        danger = tti < 1.4 ? "RED" : (tti < 2.8 ? "ORANGE" : "YELLOW");
+      }
 
       const screenRelX = camRight.x * dx + camRight.z * dz;
       const screenRelY = camFwd.x * dx + camFwd.z * dz;
@@ -4935,7 +5054,7 @@ export class GameEngine {
         id: proj.index,
         distance: Math.round(distance),
         bearing,
-        tti,
+        tti: +tti.toFixed(1),
         danger,
         isDecoyed,
       });
@@ -5047,9 +5166,24 @@ export class GameEngine {
     this.particles.spawnExplosion(obj.position.x, obj.position.y, obj.position.z, 160, time, 50);
     this.volumetricExplosions.spawn(obj.position.x, obj.position.y, obj.position.z, 22, 9);
     this.addExplosionImpulse(obj.position.x, obj.position.y, obj.position.z, 4.5);
+    
     if (obj.type === ObjectiveType.RADAR_TOWER) {
       this.audio.playRadarDestruction();
-      this.particles.spawnDebris(obj.position.x, obj.position.y + 3, obj.position.z, time, 16, 26);
+      this.particles.spawnDebris(obj.position.x, obj.position.y + 3, obj.position.z, time, 18, 26);
+      this.particles.spawnSparks(obj.position.x, obj.position.y + 3, obj.position.z, time, 8, 16);
+      this.dropLootPickup(obj.position.x, obj.position.y, obj.position.z, PowerUpType.SALVAGE_CACHE, 8, 2.0);
+    } else if (obj.type === ObjectiveType.SAM_SITE) {
+      this.audio.playExplosion(2.0);
+      this.audio.playSamCookOff();
+      this.particles.spawnDebris(obj.position.x, obj.position.y + 1, obj.position.z, time, 18, 26);
+      this.particles.spawnCookOff(obj.position.x, obj.position.y, obj.position.z, time, 6);
+      this.dropLootPickup(obj.position.x, obj.position.y, obj.position.z, PowerUpType.SALVAGE_CACHE, 8, 2.0);
+      // Immediately cancel any active lock or decoy incoming SAM missiles
+      for (const proj of this.enemyProjectiles.pool) {
+        if (proj.active && proj.homingStrength > 0 && Math.hypot(proj.pos.x - obj.position.x, proj.pos.z - obj.position.z) < 40) {
+          proj.targetType = "DECOY";
+        }
+      }
     } else {
       this.audio.playExplosion(2.0);
     }
@@ -5174,8 +5308,27 @@ export class GameEngine {
           this.pendingVariantQueue.push(EnemyVariant.STANDARD);
         }
       } else {
-        type = EnemyType.DRONE;
-        variant = EnemyVariant.STANDARD;
+        // Wave 1-5 Early Game Progression:
+        // Wave 1: 100% Air (Light Helis / Combat Drones)
+        // Wave 2: ~80% Air + ~20% Infantry
+        // Wave 3: ~75% Air + ~25% Tank (FLAK_TANK)
+        // Wave 4: ~70% Air + ~20% Tank + ~10% Infantry
+        // Wave 5: ~70% Air + ~20% Tank + ~10% Infantry
+        const groundRoll = Math.random();
+        if (directorWave >= 3 && groundRoll < (directorWave >= 4 ? 0.25 : 0.20)) {
+          variant = EnemyVariant.FLAK_TANK;
+          type = EnemyType.TANK;
+        } else if (directorWave >= 2 && groundRoll < 0.35) {
+          variant = EnemyVariant.STANDARD;
+          type = EnemyType.BASIC;
+        } else {
+          type = EnemyType.DRONE;
+          if (directorWave >= 2 && Math.random() < 0.35) {
+            variant = EnemyVariant.SCOUT_DRONE;
+          } else {
+            variant = EnemyVariant.STANDARD;
+          }
+        }
       }
       if (this.pendingVariantQueue.length > PERFORMANCE_CAPS.MAX_SPAWN_QUEUE) {
         this.pendingVariantQueue.length = PERFORMANCE_CAPS.MAX_SPAWN_QUEUE;
@@ -5398,10 +5551,20 @@ export class GameEngine {
     const SPAWN_INNER_RADIUS = 120;
     const SPAWN_OUTER_RADIUS = 200;
 
-    let angle = Math.random() * Math.PI * 2;
-    if (Math.random() < 0.45) {
-      // 45% bias towards front 120-degree sector
-      angle = -Math.PI / 2 + (Math.random() - 0.5) * (Math.PI * 0.7);
+    let angle: number;
+    if (type === EnemyType.DRONE || type === EnemyType.SHOOTER || type === EnemyType.BOSS) {
+      const sectorAngle = this.combatDirector.getSectorSpawnAngle(
+        Math.floor(Math.random() * 10000) + index * 17,
+        this.currentWave,
+        this.isOverdrive,
+      );
+      angle = sectorAngle + (Math.random() - 0.5) * 0.35;
+    } else {
+      angle = Math.random() * Math.PI * 2;
+      if (Math.random() < 0.45) {
+        // 45% bias towards front 120-degree sector
+        angle = -Math.PI / 2 + (Math.random() - 0.5) * (Math.PI * 0.7);
+      }
     }
     
     const stagger = (index - (formationSize - 1) / 2) * 14;
@@ -5470,8 +5633,118 @@ export class GameEngine {
     }
   }
 
+  private trySpawnPriorityTarget(time: number) {
+    if (this.currentWave < 4 || this.priorityTargetEnemy?.active || this.currentWave % 5 === 0) {
+      return;
+    }
+    if (this.priorityTargetCooldown > 0) {
+      return;
+    }
+
+    const waveChance = this.isOverdrive
+      ? PRIORITY_TARGET_OVERDRIVE_CHANCE
+      : (PRIORITY_TARGET_WAVE_CHANCE[this.currentWave] ?? 0.12);
+
+    if (Math.random() > waveChance) {
+      this.priorityTargetCooldown = 6.0;
+      return;
+    }
+
+    const candidates = this.enemies.filter(
+      (e) => e.active && !e.isElite && e.type !== EnemyType.BOSS && !e.isDying,
+    );
+    if (candidates.length === 0) {
+      this.priorityTargetCooldown = 5.0;
+      return;
+    }
+
+    // Prefer air gunships/drones or heavy tanks
+    candidates.sort((a, b) => {
+      const weightA = a.type === EnemyType.SHOOTER ? 3 : a.type === EnemyType.DRONE ? 2 : 1;
+      const weightB = b.type === EnemyType.SHOOTER ? 3 : b.type === EnemyType.DRONE ? 2 : 1;
+      return weightB - weightA;
+    });
+
+    const target = candidates[0];
+    target.setPriorityTarget(true);
+    target.maxHp = Math.round(target.maxHp * 1.30);
+    target.hp = target.maxHp;
+    this.priorityTargetEnemy = target;
+    this.priorityTargetAnnouncedAt = time;
+    this.priorityTargetCooldown = 28.0 + Math.random() * 8.0;
+
+    const label =
+      target.variant === EnemyVariant.ATTACK_GUNSHIP
+        ? "GUNSHIP COMMANDER"
+        : target.variant === EnemyVariant.FLAK_TANK
+        ? "ARMORED FLAK LEADER"
+        : target.variant === EnemyVariant.ROCKET_GUNSHIP
+        ? "ROCKET GUNSHIP ACE"
+        : "HIGH-VALUE TARGET";
+
+    this.announce("⚡ PRIORITY TARGET DETECTED ⚡", `${label} marked · High value bounty`, "#ffd43b");
+    this.audio.playEnemySpawn();
+  }
+
+  private updatePriorityTarget(time: number, delta: number) {
+    if (this.priorityTargetCooldown > 0) {
+      this.priorityTargetCooldown = Math.max(0, this.priorityTargetCooldown - delta);
+    }
+
+    if (this.priorityTargetEnemy) {
+      if (this.priorityTargetEnemy.active) {
+        this.priorityTargetInfo = {
+          enemyId: this.priorityTargetEnemy.id,
+          variant: this.priorityTargetEnemy.variant,
+          announcedAt: this.priorityTargetAnnouncedAt,
+          x: this.priorityTargetEnemy.mesh.position.x,
+          y: this.priorityTargetEnemy.mesh.position.y + 2.5,
+          z: this.priorityTargetEnemy.mesh.position.z,
+          hp: this.priorityTargetEnemy.hp,
+          maxHp: this.priorityTargetEnemy.maxHp,
+          hpRatio: this.priorityTargetEnemy.hp / Math.max(1, this.priorityTargetEnemy.maxHp),
+          active: true,
+        };
+      } else {
+        // Target was destroyed
+        const reward = priorityTargetReward(this.currentWave);
+        this.delivery.awardCredits(reward.credits);
+        this.addSalvage(reward.salvage);
+        this.grantRunXp(reward.xp, time);
+        this.floatingCombatText.spawnReward(
+          this.priorityTargetEnemy.mesh.position,
+          `+${reward.credits} CR [PRIORITY]`,
+          "CREDITS",
+        );
+        this.announce(
+          "PRIORITY TARGET ELIMINATED",
+          `+${reward.credits} CR · +${reward.salvage} Salvage · Pressure Reduced`,
+          "#55f2a2",
+        );
+        // Grant temporary pressure relief: trigger a micro-lull
+        this.combatDirector.triggerMicroLull(3.0);
+
+        this.priorityTargetEnemy.setPriorityTarget(false);
+        this.priorityTargetEnemy = null;
+        this.priorityTargetInfo = null;
+      }
+    } else {
+      this.priorityTargetInfo = null;
+      this.trySpawnPriorityTarget(time);
+    }
+
+    // Pickup risk timer
+    if (this.pickupRiskActive) {
+      this.pickupRiskTimer -= delta;
+      if (this.pickupRiskTimer <= 0) {
+        this.pickupRiskActive = false;
+      }
+    }
+  }
+
   updateAIDirector(time: number, delta: number) {
     this.survivalTime += delta;
+    this.updatePriorityTarget(time, delta);
     if (this.waveFireSilenceTimer > 0) {
       this.waveFireSilenceTimer = Math.max(0, this.waveFireSilenceTimer - delta);
     }
@@ -5602,8 +5875,24 @@ export class GameEngine {
         const totalDeficit = Math.max(0, groundDeficit) + Math.max(0, airDeficit);
 
         if (totalDeficit > 0.5 && this.enemies.length < maxActiveEnemies) {
-          if (airDeficit >= 1.5 && this.currentWave >= 6 && Math.random() < 0.5) {
-            this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
+          if (airDeficit >= 1.5) {
+            if (this.currentWave >= 8 && Math.random() < 0.14) {
+              this.pendingVariantQueue.push(EnemyVariant.KAMIKAZE_DRONE);
+            } else if (this.currentWave >= 7 && Math.random() < 0.22) {
+              this.pendingVariantQueue.push(EnemyVariant.ROCKET_GUNSHIP);
+            } else if (this.currentWave >= 6 && Math.random() < 0.28) {
+              this.pendingVariantQueue.push(EnemyVariant.ATTACK_GUNSHIP);
+            } else if (this.currentWave >= 2 && Math.random() < 0.38) {
+              this.pendingVariantQueue.push(EnemyVariant.SCOUT_DRONE);
+            } else {
+              this.pendingVariantQueue.push(EnemyVariant.STANDARD);
+            }
+          } else if (groundDeficit >= 1.5 && this.currentWave >= 3) {
+            if (this.currentWave >= 5 && Math.random() < 0.25) {
+              this.pendingVariantQueue.push(EnemyVariant.MISSILE_CARRIER);
+            } else {
+              this.pendingVariantQueue.push(EnemyVariant.FLAK_TANK);
+            }
           }
           this.pendingSpawns = Math.min(
             maxActiveEnemies - this.enemies.length,
@@ -5668,7 +5957,32 @@ export class GameEngine {
     const eventRoll = Math.random();
     const eventZ = player.z - 95 - Math.random() * 80;
 
-    if (eventRoll < 0.34) {
+    if (eventRoll < 0.25 && this.currentWave >= 2) {
+      // ⚡ TACTICAL SALVAGE DROP (Pickup-Risk Tactical Event)
+      this.waveMessage = "SALVAGE DROP DETECTED";
+      this.waveTransitionTimer = 1.4;
+      this.pickupRiskActive = true;
+      this.pickupRiskTimer = 16.0;
+
+      // Spawn high-value salvage cache 70-95m away
+      const cacheX = player.x + (Math.random() < 0.5 ? -1 : 1) * (55 + Math.random() * 30);
+      const cacheZ = player.z - (70 + Math.random() * 25);
+      const cacheY = Math.max(2, this.city.getHeightAt(cacheX, cacheZ, 2.0));
+      this.dropLootPickup(cacheX, cacheY, cacheZ, PowerUpType.SALVAGE_CACHE, 10, 3.0);
+
+      // Queue 2-3 aggressive Air attackers setting up in that sector
+      for (let i = 0; i < 3; i++) {
+        this.pendingVariantQueue.push(
+          this.currentWave >= 6 && Math.random() < 0.35
+            ? EnemyVariant.ATTACK_GUNSHIP
+            : this.currentWave >= 2 && Math.random() < 0.45
+            ? EnemyVariant.SCOUT_DRONE
+            : EnemyVariant.STANDARD,
+        );
+      }
+      this.pendingSpawns += 3;
+      this.announce("⚡ SALVAGE CACHE DETECTED ⚡", "Contested zone · Air attackers moving in", "#ffd43b");
+    } else if (eventRoll < 0.50) {
       this.waveMessage = "MISSILE STORM";
       this.waveTransitionTimer = 1.4;
       for (let i = 0; i < 7 + this.combatIntensity * 6; i++) {
@@ -5679,7 +5993,7 @@ export class GameEngine {
         const len = Math.sqrt(dx * dx + dz * dz) || 1;
         this.enemyProjectiles.spawn(x, player.y + 8 + Math.random() * 12, z, dx / len, dz / len, time, (115 + this.combatIntensity * 85) * this.difficulty.enemyProjectileSpeed);
       }
-    } else if (eventRoll < 0.68) {
+    } else if (eventRoll < 0.75) {
       this.waveMessage = "CONVOY AMBUSH";
       this.waveTransitionTimer = 1.4;
       // Queue the convoy — tanks/shooters construct and arrive over the next
@@ -5760,11 +6074,11 @@ export class GameEngine {
       this.hasInputThisFrame = true;
       const normX = rawX / lMag;
       const normY = rawY / lMag;
+      // Linear radial deadzone remapping (0..1) with immediate input response
       const clampedMag = Math.min(1, (lMag - DEADZONE) / (1 - DEADZONE));
-      const curvedMag = Math.pow(clampedMag, 1.05);
 
-      this.gamepadMove.x = normX * curvedMag;
-      this.gamepadMove.z = normY * curvedMag; // Stores screen Y in gamepadMove.z
+      this.gamepadMove.x = normX * clampedMag;
+      this.gamepadMove.z = normY * clampedMag; // Stores screen Y in gamepadMove.z
 
       this.audio.resume();
     } else {
@@ -5783,11 +6097,11 @@ export class GameEngine {
     const rMag = Math.hypot(rx, ry);
 
     if (isCameraModifierHeld) {
-      // Camera Orbit Mode: Right stick X rotates camera yaw smoothly
+      // Camera Orbit Mode: Right stick X rotates camera yaw smoothly and responsively
       const camSensitivity = (this.settings.cameraSensitivity ?? 1.0) * (this.settings.gamepadSensitivity ?? 1.5);
       if (Math.abs(rx) > DEADZONE) {
         const normRx = (rx - Math.sign(rx) * DEADZONE) / (1 - DEADZONE);
-        this.targetCameraYawVelocity = -normRx * 2.8 * camSensitivity; // ~160 deg/sec base
+        this.targetCameraYawVelocity = -normRx * 3.5 * camSensitivity; // ~200 deg/sec base
         this.lastCameraInputTime = time;
       } else {
         this.targetCameraYawVelocity = 0;
@@ -5896,9 +6210,8 @@ export class GameEngine {
       const TOUCH_DEADZONE = 0.12;
       if (lMag > TOUCH_DEADZONE) {
         const clamped = Math.min(1, (lMag - TOUCH_DEADZONE) / (1 - TOUCH_DEADZONE));
-        const curved = Math.pow(clamped, 1.1);
-        touchX = (rawX / lMag) * curved;
-        touchY = (rawY / lMag) * curved;
+        touchX = (rawX / lMag) * clamped;
+        touchY = (rawY / lMag) * clamped;
       }
     }
 
@@ -6048,12 +6361,14 @@ export class GameEngine {
     if (!this.isPlaying) {
       this.innerRing.rotation.z += 0.025;
       this.outerRing.rotation.z -= 0.01;
-      this.helicopter.animateRotors(0, 60, delta);
-      this.helicopter.updateNavLights(time);
-      // Hangar idle bob — presentation only; the physics body stays parked
-      // and reset() re-syncs the mesh before the next run.
-      this.helicopter.mesh.position.y =
-        this.helicopter.body.position.y + Math.sin(time * 1.6) * 0.22;
+      this.helicopter.mesh.visible = this.isPaused;
+      if (this.isPaused) {
+        this.helicopter.animateRotors(0, 60, delta);
+        this.helicopter.updateNavLights(time);
+        // Hangar/pause idle bob
+        this.helicopter.mesh.position.y =
+          this.helicopter.body.position.y + Math.sin(time * 1.6) * 0.22;
+      }
       this.updateShadowRig();
       this.updateCamera(delta);
       this.syncBlobShadows();
@@ -6242,6 +6557,9 @@ export class GameEngine {
     const activeEnemyIds = new Set<number>();
     for (const e of this.enemies) {
       if (e.active) activeEnemyIds.add(e.id);
+    }
+    for (const obj of this.objectives) {
+      if (obj.active) activeEnemyIds.add(obj.id);
     }
     this.combatDirector.update(delta, time, this.currentWave, activeEnemyIds, this.isOverdrive);
 
@@ -6533,6 +6851,55 @@ export class GameEngine {
     }
     this.helicopter.syncBodyTransform();
 
+    // --- Procedural Rotor Downwash (Desert Dust) ---
+    if (this.city && this.particles) {
+      const pPos = this.helicopter.body.position;
+      const pVel = this.helicopter.body.velocity;
+      const pFloor = this.city.getHeightAt(pPos.x, pPos.z, 1.2);
+      const pAltitudeAGL = pPos.y - pFloor;
+      if (pAltitudeAGL > 0 && pAltitudeAGL <= 14.0) {
+        const pStrength = Math.min(1.0, Math.max(0.0, 1.0 - pAltitudeAGL / 14.0));
+        const pCount = Math.ceil(pStrength * 2);
+        this.particles.spawnRotorDownwash(
+          pPos.x,
+          pFloor,
+          pPos.z,
+          pVel.x,
+          pVel.z,
+          3.2,
+          pStrength,
+          time,
+          pCount,
+        );
+      }
+
+      // Air Enemies downwash (up to 2 nearest within 80u)
+      let enemyEmitters = 0;
+      for (const e of this.enemies) {
+        if (!e.active || e.type !== EnemyType.DRONE || e.isDying) continue;
+        const eDistSq = (e.body.position.x - pPos.x) ** 2 + (e.body.position.z - pPos.z) ** 2;
+        if (eDistSq > 6400) continue; // 80u max
+        const eFloor = this.city.getHeightAt(e.body.position.x, e.body.position.z, 1.0);
+        const eAlt = e.body.position.y - eFloor;
+        if (eAlt > 0 && eAlt <= 14.0) {
+          const eStrength = Math.min(1.0, Math.max(0.0, 1.0 - eAlt / 14.0));
+          this.particles.spawnRotorDownwash(
+            e.body.position.x,
+            eFloor,
+            e.body.position.z,
+            e.smoothVelX,
+            e.smoothVelZ,
+            2.6,
+            eStrength * 0.85,
+            time,
+            1,
+          );
+          enemyEmitters++;
+          if (enemyEmitters >= 2) break;
+        }
+      }
+    }
+
     // Engine sound based on speed
     const currentSpeed = Math.sqrt(
       this.helicopter.body.velocity.x ** 2 +
@@ -6588,9 +6955,20 @@ export class GameEngine {
         if (e.isDying) {
           const finished = e.updateDeathSpiral(delta, this.city, time, this.particles);
           if (finished || e.readyForRemoval) {
-            this.particles.spawnExplosion(e.body.position.x, e.body.position.y, e.body.position.z, 55, time, 18);
-            this.volumetricExplosions.spawn(e.body.position.x, e.body.position.y, e.body.position.z, 14, 5);
-            this.audio.playExplosion(0.85);
+            const crashFloor = this.city ? this.city.getHeightAt(e.body.position.x, e.body.position.z, 0.8) : 0;
+            const crashY = Math.max(crashFloor, e.body.position.y);
+            this.particles.spawnExplosion(e.body.position.x, crashY, e.body.position.z, 75, time, 28);
+            this.particles.spawnDebris(e.body.position.x, crashY, e.body.position.z, time, 12, 22);
+            this.particles.spawnSparks(e.body.position.x, crashY, e.body.position.z, time, 6, 16);
+            this.particles.spawnRotorDownwash(e.body.position.x, crashFloor, e.body.position.z, 0, 0, 4.5, 1.4, time, 4);
+            this.volumetricExplosions.spawn(e.body.position.x, crashY, e.body.position.z, 16, 6);
+            this.audio.playExplosion(1.1);
+
+            // Drop crash loot at the ground impact location
+            const enemyXp = xpForEnemyType(e.type, e.isElite, e.variant);
+            this.dropXpGem(e.body.position.x, crashY, e.body.position.z, enemyXp);
+            this.dropEnemyLoot(e);
+
             this.releaseShieldAuras(e);
             e.destroy();
             this.enemies.splice(i, 1);
@@ -6606,6 +6984,26 @@ export class GameEngine {
         }
         continue;
       }
+
+      // Air enemy close fly-by feedback (play both turbine whine & whoosh, reset on separation)
+      if ((e.type === EnemyType.DRONE || e.movementClass === EnemyMovementClass.FLYING) && !e.flybyTriggered) {
+        const eSpeed = Math.hypot(e.smoothVelX, e.smoothVelZ);
+        if (eSpeed >= 28) {
+          const pDist = Math.hypot(e.body.position.x - this.helicopter.body.position.x, e.body.position.z - this.helicopter.body.position.z);
+          if (pDist < 18.0) {
+            e.flybyTriggered = true;
+            const pan = (e.body.position.x - this.helicopter.body.position.x) / 18.0;
+            this.audio.playFlyby(eSpeed, pan);
+            this.audio.playDroneFlyby(pDist);
+          }
+        }
+      } else if (e.flybyTriggered) {
+        const pDist = Math.hypot(e.body.position.x - this.helicopter.body.position.x, e.body.position.z - this.helicopter.body.position.z);
+        if (pDist > 32.0) {
+          e.flybyTriggered = false;
+        }
+      }
+
       // 3d: distance-based culling — skip expensive AI/visual updates for
       // enemies far from the player. They still exist (collision, death)
       // but don't run direction updates, status-drip particles, or firing.
@@ -6667,34 +7065,49 @@ export class GameEngine {
         this.addCameraImpulse(2.0); // boss phase slam
         this.triggerHitStop(0.2, 0.4);
       }
-      // Boss visual damage phases (Phase 2: left engine damage, Phase 1: both engines + hull critical)
+      // Boss progressive visual damage feedback (100-66% clean, 66-33% left engine, <33% critical)
       if (e.type === EnemyType.BOSS && e.active) {
-        if (e.phase <= 2 && e.damagePoints?.engineLeft && this.frameCount % 4 === 0) {
-          const pt = new THREE.Vector3();
+        const hpRatio = e.hp / Math.max(1, e.maxHp);
+        // 66% - 33%: Left engine smoking and sparking
+        if (hpRatio <= 0.66 && e.damagePoints?.engineLeft && this.frameCount % 4 === 0) {
+          const pt = GameEngine._scratchVec3;
           e.damagePoints.engineLeft.getWorldPosition(pt);
           this.particles.spawnSmoke(pt.x, pt.y, pt.z, time);
           if (Math.random() < 0.35) {
             this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 2, 10);
           }
         }
-        if (e.phase <= 1) {
+        // < 33%: Both engines heavily smoking + hull electrical arcs + core instability
+        if (hpRatio <= 0.33) {
           if (e.damagePoints?.engineRight && this.frameCount % 4 === 2) {
-            const pt = new THREE.Vector3();
+            const pt = GameEngine._scratchVec3;
             e.damagePoints.engineRight.getWorldPosition(pt);
             this.particles.spawnSmoke(pt.x, pt.y, pt.z, time);
-            if (Math.random() < 0.35) {
-              this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 2, 10);
+            if (Math.random() < 0.45) {
+              this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 3, 12);
             }
           }
           if (e.damagePoints?.hull && this.frameCount % 5 === 0) {
-            const pt = new THREE.Vector3();
+            const pt = GameEngine._scratchVec3;
             e.damagePoints.hull.getWorldPosition(pt);
             this.particles.spawnSparks(pt.x, pt.y, pt.z, time, 3, 14);
+            this.particles.spawnElectricalArc(pt.x, pt.y, pt.z, time, 2, 16);
           }
+          if (e.coreGlowMesh) {
+            const flicker = 0.3 + (Math.sin(time * 30) > 0 ? 0.7 : 0.1) * (Math.random() > 0.3 ? 1 : 0.3);
+            (e.coreGlowMesh.material as THREE.MeshBasicMaterial).opacity = flicker;
+          }
+        } else if (e.coreGlowMesh) {
+          (e.coreGlowMesh.material as THREE.MeshBasicMaterial).opacity = 0.75 + Math.sin(time * 4) * 0.2;
         }
       }
       if (fired && time - this.lastEnemyFireSoundTime >= 0.15) {
-        this.audio.playEnemyFire();
+        if (e.type === EnemyType.TANK) {
+          const pan = (e.body.position.x - this.helicopter.body.position.x) / 40.0;
+          this.audio.playTankCannon(pan);
+        } else {
+          this.audio.playEnemyFire();
+        }
         this.lastEnemyFireSoundTime = time;
       }
 
@@ -6764,8 +7177,35 @@ export class GameEngine {
       proj.deactivate();
     }
 
+    const playerProjPos = this.helicopter.body.position;
+    const camFwd = GameEngine._scratchCamFwd;
+    this.camera.getWorldDirection(camFwd);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() < 0.0001) camFwd.set(0, 0, -1);
+    else camFwd.normalize();
+    const camRight = GameEngine._scratchCamRight;
+    camRight.crossVectors(camFwd, this.worldUp).normalize();
+
     for (const proj of this.enemyProjectiles.pool) {
       if (!proj.active) continue;
+
+      // Near-Miss Detection: triggers subtle whoosh & vapor streak when high-danger projectile narrowly misses
+      if (!proj.nearMissTriggered) {
+        const dx = proj.pos.x - playerProjPos.x;
+        const dy = proj.pos.y - playerProjPos.y;
+        const dz = proj.pos.z - playerProjPos.z;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        // Detection bubble: 5.5u to 14.0u (30.25 to 196 sq)
+        if (distSq > 30.25 && distSq <= 196.0) {
+          proj.nearMissTriggered = true;
+          const pan = (camRight.x * dx + camRight.z * dz) / 14.0;
+          this.audio.playNearMiss(pan);
+          if (proj.vel) {
+            this.particles.spawnNearMissStreak(proj.pos.x, proj.pos.y, proj.pos.z, proj.vel.x, proj.vel.y, proj.vel.z, time);
+          }
+        }
+      }
+
       const hitBlock = this.city.damageProjectilePath(
         proj.prevPos,
         proj.pos,
@@ -6970,18 +7410,36 @@ export class GameEngine {
     for (let i = this.powerups.length - 1; i >= 0; i--) {
       const pu = this.powerups[i];
 
-      // Magnet: XP gems drift toward the player when close (VS feel). Pull is
-      // strong enough to actually catch the helicopter (cruise ~68 u/s), so
-      // gems dropped beside/behind the flight path aren't left behind.
-      if (pu.type === PowerUpType.XP_GEM || pu.type === PowerUpType.SALVAGE || pu.type === PowerUpType.COUNTERMEASURE) {
+      // Magnet: XP gems, Salvage, Flares & Caches drift toward the player with distance-based acceleration
+      if (
+        pu.type === PowerUpType.XP_GEM ||
+        pu.type === PowerUpType.SALVAGE ||
+        pu.type === PowerUpType.COUNTERMEASURE ||
+        pu.type === PowerUpType.SALVAGE_CACHE
+      ) {
         const dx = playerPos.x - pu.mesh.position.x;
         const dz = playerPos.z - pu.mesh.position.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        const magnetRadius = 24 * (1 + this.runUpgrades.xpMagnet * 0.3) * (1 + perkEffect("magnet", this.perks.magnet));
+        const dist = Math.hypot(dx, dz);
+        const isMagnetSurge = this.magnetSurgeTimer > 0;
+        const baseMagnetRadius = 24 * (1 + this.runUpgrades.xpMagnet * 0.3) * (1 + perkEffect("magnet", this.perks.magnet));
+        const magnetRadius = isMagnetSurge ? Math.max(75, baseMagnetRadius * 2.8) : baseMagnetRadius;
+
         if (dist > 0.1 && dist < magnetRadius) {
-          const pull = (1 - dist / magnetRadius) * 52 * delta;
-          pu.position.x += (dx / dist) * pull;
-          pu.position.z += (dz / dist) * pull;
+          const t = Math.max(0, 1 - dist / magnetRadius);
+          // Distance-accelerated velocity: builds speed from 38 up to 140 u/s smoothly
+          const targetSpeed = 38 + t * t * 115;
+          const targetVx = (dx / dist) * targetSpeed;
+          const targetVz = (dz / dist) * targetSpeed;
+          const accelAlpha = 1 - Math.exp(-9.0 * delta);
+          pu.velocity.x += (targetVx - pu.velocity.x) * accelAlpha;
+          pu.velocity.z += (targetVz - pu.velocity.z) * accelAlpha;
+
+          pu.position.x += pu.velocity.x * delta;
+          pu.position.z += pu.velocity.z * delta;
+        } else {
+          pu.velocity.multiplyScalar(Math.exp(-4.0 * delta));
+          pu.position.x += pu.velocity.x * delta;
+          pu.position.z += pu.velocity.z * delta;
         }
       }
 
@@ -7000,18 +7458,26 @@ export class GameEngine {
         if (pu.type === PowerUpType.XP_GEM) {
           this.grantRunXp(pu.value, time);
           this.floatingCombatText.spawnReward(playerPos, `+${pu.value} XP`, 'XP', undefined, pu.value, time);
+          this.audio.playPickup();
         } else if (pu.type === PowerUpType.SALVAGE) {
           this.addSalvage(pu.value);
           this.floatingCombatText.spawnReward(playerPos, `+${pu.value} SALVAGE`, 'SALVAGE', undefined, pu.value, time);
+          this.audio.playPickup();
         } else if (pu.type === PowerUpType.COUNTERMEASURE) {
           this.countermeasures.replenish(1);
           this.floatingCombatText.spawnReward(playerPos, "+1 FLARE", "CREDITS", "#ffe66d", 1, time);
+          this.audio.playPickup();
+        } else if (pu.type === PowerUpType.SALVAGE_CACHE) {
+          const val = pu.value || 8;
+          this.addSalvage(val);
+          this.score += 250;
+          this.floatingCombatText.spawnReward(playerPos, `+${val} CACHE SALVAGE`, 'SALVAGE', '#ffd700', val, time);
+          this.audio.playPowerUpSting('SALVAGE_CACHE');
         } else {
           this.applyPowerUp(pu.type, time);
         }
         pu.destroy(this.scene);
         this.powerups.splice(i, 1);
-        this.audio.playPickup();
       }
     }
 
@@ -7032,6 +7498,9 @@ export class GameEngine {
       if (this.speedBoostTimer <= 0) {
         // Reset speed - handled in helicopter update
       }
+    }
+    if (this.magnetSurgeTimer > 0) {
+      this.magnetSurgeTimer -= delta;
     }
 
     if (this.health <= 0) {
@@ -7262,9 +7731,9 @@ export class GameEngine {
 
     const speed = Math.hypot(velocity.x, velocity.z);
 
-    // 1. Angular Yaw Velocity Integration (Frame-rate independent)
-    const accelRate = 18;
-    const dampingRate = 22;
+    // 1. Angular Yaw Velocity Integration (Immediate responsiveness: <0.08s start, ~0.10s stop)
+    const accelRate = 28;
+    const dampingRate = 32;
     if (Math.abs(this.targetCameraYawVelocity) > 0.001) {
       this.currentCameraYawVelocity += (this.targetCameraYawVelocity - this.currentCameraYawVelocity) * (1 - Math.exp(-accelRate * delta));
       this.lastCameraInputTime = performance.now() / 1000;
@@ -7309,43 +7778,55 @@ export class GameEngine {
     const sinYaw = Math.sin(this.cameraYaw);
     const cosYaw = Math.cos(this.cameraYaw);
 
-    // 2. Base Radial Distance & Height (Strictly preserving original camera parameters)
+    // 2. Base Radial Distance & Height (Strictly preserving original camera geometry & pitch invariants)
     const pullback = Math.min(speed * 0.12, 9);
     const baseDistance = 36 + pullback + this.combatIntensity * 6;
     const baseHeight = 28 + Math.min(speed * 0.08, 6) + this.combatIntensity * 4;
 
-    const leadX = THREE.MathUtils.clamp(velocity.x * 0.22, -9, 9);
-    const leadZ = THREE.MathUtils.clamp(velocity.z * 0.16, -8, 8);
+    // Smooth, subtle velocity look-ahead (avoids target jumping lag while providing natural preview)
+    const targetLookAheadX = THREE.MathUtils.clamp(velocity.x * 0.08, -3.5, 3.5);
+    const targetLookAheadZ = THREE.MathUtils.clamp(velocity.z * 0.08, -3.5, 3.5);
+    const lookAheadAlpha = 1 - Math.exp(-12.0 * delta);
+    this.smoothedLookAhead.x += (targetLookAheadX - this.smoothedLookAhead.x) * lookAheadAlpha;
+    this.smoothedLookAhead.y += (targetLookAheadZ - this.smoothedLookAhead.y) * lookAheadAlpha;
 
     const offsetX = sinYaw * baseDistance;
     const offsetZ = cosYaw * baseDistance;
 
-    // 3. Camera Boom Collision Compression (smoothly shorten if camera intersects tall structure)
-    const testCamX = heli.x + offsetX + leadX;
-    const testCamZ = heli.z + offsetZ + leadZ;
+    // 3. Camera Boom Collision Compression (Fast in on obstruction, smooth fast out on clear)
+    const testCamX = heli.x + offsetX + this.smoothedLookAhead.x;
+    const testCamZ = heli.z + offsetZ + this.smoothedLookAhead.y;
     const buildingHeight = this.city ? this.city.getHeightAt(testCamX, testCamZ, 1.8) : 0;
     let targetBoom = 1.0;
     const minCamY = heli.y + baseHeight;
     if (buildingHeight > minCamY - 3.5) {
       targetBoom = 0.65;
     }
-    this.cameraBoomFraction += (targetBoom - this.cameraBoomFraction) * (1 - Math.exp(-8 * delta));
+    const boomAlpha = 1 - Math.exp(-(targetBoom < this.cameraBoomFraction ? 16 : 10) * delta);
+    this.cameraBoomFraction += (targetBoom - this.cameraBoomFraction) * boomAlpha;
 
-    // 4. Target Camera Position
-    const camTargetX = heli.x + offsetX * this.cameraBoomFraction + leadX;
+    // 4. Target Camera Position (Single Fast Damping Layer: sharpness = 14.0 uniform across X, Y, Z)
+    const camTargetX = heli.x + offsetX * this.cameraBoomFraction + this.smoothedLookAhead.x;
     const camTargetY = heli.y + baseHeight * Math.max(0.85, this.cameraBoomFraction);
-    const camTargetZ = heli.z + offsetZ * this.cameraBoomFraction + leadZ;
+    const camTargetZ = heli.z + offsetZ * this.cameraBoomFraction + this.smoothedLookAhead.y;
 
-    const camLerp = 1 - Math.exp(-(this.isPlaying ? 10 : 3.5) * delta);
-    this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camLerp;
-    this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camLerp;
+    this.cameraTargetPosScratch.set(camTargetX, camTargetY, camTargetZ);
 
-    const camYLerp = 1 - Math.exp(-6 * delta);
-    this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camYLerp;
+    const followSharpness = this.isPlaying ? 14.0 : 4.0;
+    const camAlpha = 1 - Math.exp(-followSharpness * delta);
+    this.baseCamPos.x += (camTargetX - this.baseCamPos.x) * camAlpha;
+    this.baseCamPos.y += (camTargetY - this.baseCamPos.y) * camAlpha;
+    this.baseCamPos.z += (camTargetZ - this.baseCamPos.z) * camAlpha;
+
+    this.cameraFollowError = Math.hypot(
+      camTargetX - this.baseCamPos.x,
+      camTargetY - this.baseCamPos.y,
+      camTargetZ - this.baseCamPos.z,
+    );
 
     // 5. FOV (Unchanged)
     const targetFov = 52 + Math.min(speed * 0.07, 6) + this.combatIntensity * 4;
-    this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-4 * delta));
+    this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-6 * delta));
     this.camera.updateProjectionMatrix();
     this.camera.position.copy(this.baseCamPos);
 
@@ -7371,20 +7852,19 @@ export class GameEngine {
       this.isPlaying,
     );
 
-    // 8. LookAt Target (Forward along yaw direction with speed look-ahead)
+    // 8. LookAt Target (Forward along yaw direction with unified smoothed look-ahead)
     const lookDist = 9;
     const lookOffsetX = -sinYaw * lookDist;
     const lookOffsetZ = -cosYaw * lookDist;
 
-    const laScale = 1 + Math.min(speed * 0.008, 0.8);
-    const desiredLookX = heli.x + lookOffsetX + THREE.MathUtils.clamp(velocity.x * 0.14 * laScale, -6, 6);
+    const desiredLookX = heli.x + lookOffsetX + this.smoothedLookAhead.x;
     const desiredLookY = Math.max(8, Math.min(70, heli.y + 2));
-    const desiredLookZ = heli.z + lookOffsetZ + THREE.MathUtils.clamp(velocity.z * 0.16 * laScale, -10, 5);
+    const desiredLookZ = heli.z + lookOffsetZ + this.smoothedLookAhead.y;
 
-    const lookLerp = 1 - Math.exp(-12 * delta);
-    this.cameraLookAtTarget.x += (desiredLookX - this.cameraLookAtTarget.x) * lookLerp;
-    this.cameraLookAtTarget.y += (desiredLookY - this.cameraLookAtTarget.y) * lookLerp;
-    this.cameraLookAtTarget.z += (desiredLookZ - this.cameraLookAtTarget.z) * lookLerp;
+    const lookAlpha = 1 - Math.exp(-16.0 * delta);
+    this.cameraLookAtTarget.x += (desiredLookX - this.cameraLookAtTarget.x) * lookAlpha;
+    this.cameraLookAtTarget.y += (desiredLookY - this.cameraLookAtTarget.y) * lookAlpha;
+    this.cameraLookAtTarget.z += (desiredLookZ - this.cameraLookAtTarget.z) * lookAlpha;
 
     if (
       Number.isFinite(this.camera.position.x) &&
