@@ -109,17 +109,14 @@ function disableShadowCasting(root: THREE.Object3D) {
 export const MOVEMENT_CONFIG = {
   /** Normal cruise speed cap (u/s). */
   maxHorizontalSpeed: 68,
-  /** Snappy normal acceleration — reaches useful speed in ~0.11s, cruise in ~0.24s. */
-  horizontalAcceleration: 260,
-  /** Strong active braking — release-to-hover in ~0.32s from cruise. */
-  horizontalBraking: 210,
-  /** Aggressive counter-steering for responsive 180° combat reversal (~1.5x normal). */
-  reverseAcceleration: 420,
-  /** Directional steering acceleration for curved physical turn transitions. */
-  steeringAcceleration: 300,
-  /** Strong low-speed authority, maintaining full steering authority at speed. */
-  lowSpeedSteeringMultiplier: 1.25,
-  highSpeedSteeringMultiplier: 0.95,
+  /** Forward/maneuver thrust acceleration (u/s²). Reaches cruise in ~0.24s. */
+  thrust: 340,
+  /** In-flight drag coefficient (frame-independent baseline, per 60Hz frame). */
+  flightDrag: 0.968,
+  /** Active braking drag when input is released (per 60Hz frame, settles in ~0.30s). */
+  brakingDrag: 0.72,
+  /** Counter-thrust multiplier when reversing direction (180° turn responsiveness). */
+  reverseThrustMultiplier: 1.60,
   /** Analog stick radial deadzone. */
   analogDeadzone: 0.15,
   /** Body yaw critically-damped spring dynamics (rad/s² and rad/s, zeta = 1.0). */
@@ -127,12 +124,12 @@ export const MOVEMENT_CONFIG = {
   bodyYawDamping: 23.0,
   maxYawSpeed: 6.80, // ~390°/sec max angular velocity
   maxYawAcceleration: 52.0, // max angular acceleration rate
-  /** Max bank roll and pitch limits (radians). Deep, dynamic physical tilt. */
-  maxRoll: 0.45, // ~25.8° (was 18.3°)
-  maxPitch: 0.25, // ~14.3° (was 9.2°)
+  /** Max bank roll and pitch limits (radians). Roll: ~18.3° (0.32 rad), Pitch: ~9.2° (0.16 rad). */
+  maxRoll: 0.32, // ~18.3° (arcade-readable bank)
+  maxPitch: 0.16, // ~9.2° (subtle forward lean)
   /** Bank response speeds (/s). */
   bankResponse: 16.0,
-  bankReturnResponse: 11.0,
+  bankReturnResponse: 12.0,
   visualAccelerationSmoothing: 24.0,
   /** Vertical flight is deliberately a little heavier than horizontal flight. */
   maxVerticalSpeed: 32,
@@ -143,10 +140,9 @@ export const MOVEMENT_CONFIG = {
   dashSpeed: 150,
   dashDuration: 0.22,
   dashCooldown: 0.75,
-  /** Afterburner changes the speed envelope and slightly improves acceleration. */
+  /** Afterburner increases speed cap (1.55x) and thrust (1.30x). */
   afterburnerMultiplier: 1.55,
-  afterburnerAccelerationMultiplier: 1.08,
-  afterburnerSteeringMultiplier: 0.90,
+  afterburnerThrustMultiplier: 1.30,
   /** Speed-boost power-up multiplier. */
   speedBoostMultiplier: 1.24,
   /** Minimum altitude above terrain/buildings (u). */
@@ -1136,10 +1132,8 @@ export class Helicopter extends Entity {
 
     // ---- Phase 2: velocity-based arcade movement -------------------------
     // Input (world-space, normalized 0..1) → desired velocity → accelerate the
-    // actual body velocity toward it. No position-target chasing: the body's
-    // velocity IS the gameplay transform, so movement is predictable, capped,
-    // and easy to correct. Diagonal input is normalized upstream, so W+D moves
-    // at the same max speed as W alone.
+    // ---- Arcade Velocity & Drag Momentum Model ---------------------------
+    // INPUT -> THRUST -> PERSISTENT VELOCITY -> FRAME-INDEPENDENT DRAG -> MAX SPEED CLAMP -> POSITION
     const cfg = MOVEMENT_CONFIG;
     const profile = MODEL_MOVEMENT[this.model];
     const moveX = move?.x ?? 0;
@@ -1147,101 +1141,118 @@ export class Helicopter extends Entity {
     const moveY = move?.y ?? 0;
     const cargoMultiplier = move?.cargoMultiplier ?? 1;
     const isAfterburner = (move?.afterburner ?? 1) > 1;
-    const speedMult =
-      (move?.afterburner ?? 1) *
-      (speedBoostActive ? cfg.speedBoostMultiplier : 1) *
-      engineEff *
-      cargoMultiplier;
-    const maxSpeed = cfg.maxHorizontalSpeed * speedMult * profile.speed;
 
-    let desiredVx = moveX * maxSpeed + this.impulseVelocity.x;
-    let desiredVz = moveZ * maxSpeed + this.impulseVelocity.y;
+    let vx = this.body.velocity.x;
+    let vz = this.body.velocity.z;
+    const inputMag = Math.hypot(moveX, moveZ);
 
-    // Storm wind nudges the aircraft — a gentle, always-present drift that
-    // scales with storm intensity. Small next to full-throttle control, but
-    // it makes weather a real (minor) flying condition at idle and low speed.
-    if (windForce && (windForce.x !== 0 || windForce.z !== 0)) {
-      desiredVx += THREE.MathUtils.clamp(windForce.x * 0.055, -9, 9);
-      desiredVz += THREE.MathUtils.clamp(windForce.z * 0.055, -9, 9);
-    }
-    this.desiredVelocity.x = desiredVx;
-    this.desiredVelocity.z = desiredVz;
+    // 1. Direct Input Thrust
+    if (inputMag > 0.001) {
+      const normInputX = moveX / inputMag;
+      const normInputZ = moveZ / inputMag;
+      const inputIntensity = Math.min(1.0, inputMag);
 
-    const vx = this.body.velocity.x;
-    const vz = this.body.velocity.z;
-    const speedBefore = Math.hypot(vx, vz);
-    const desiredSpeed = Math.hypot(desiredVx, desiredVz);
+      // Boost multiplies thrust
+      const thrustScale = (isAfterburner ? cfg.afterburnerThrustMultiplier : 1) * engineEff * cargoMultiplier * profile.accel;
+      let effectiveThrust = cfg.thrust * thrustScale;
 
-    // Compute dot product of current velocity and desired velocity to pick acceleration mode
-    const dotProduct = vx * desiredVx + vz * desiredVz;
-    const isReversing = speedBefore > 2.0 && desiredSpeed > 2.0 && dotProduct < 0;
-    const isStopping = desiredSpeed < 0.01;
-    const isTurn = speedBefore > 3.0 && desiredSpeed > 3.0 && !isReversing;
+      // Reversal counter-thrust boost: when actively turning around (input opposes current velocity),
+      // apply counter-acceleration for snappy arcade 180° responsiveness
+      const currentSpeed = Math.hypot(vx, vz);
+      if (currentSpeed > 2.0) {
+        const dot = (vx * normInputX + vz * normInputZ) / currentSpeed;
+        if (dot < -0.1) {
+          const reversalFactor = THREE.MathUtils.clamp(-dot, 0, 1);
+          effectiveThrust *= THREE.MathUtils.lerp(1.0, cfg.reverseThrustMultiplier, reversalFactor);
+        }
+      }
 
-    // Pick situation-aware acceleration mode (normal, braking, reversal, turn)
-    let baseAcceleration: number = cfg.horizontalAcceleration;
-    if (isReversing) {
-      const reverseFactor = Math.min(1, -dotProduct / (speedBefore * desiredSpeed));
-      baseAcceleration = THREE.MathUtils.lerp(cfg.horizontalAcceleration, cfg.reverseAcceleration, reverseFactor);
-    } else if (isStopping || desiredSpeed < speedBefore - 2.0) {
-      baseAcceleration = cfg.horizontalBraking;
-    } else if (isTurn) {
-      baseAcceleration = cfg.steeringAcceleration;
+      vx += normInputX * effectiveThrust * inputIntensity * delta;
+      vz += normInputZ * effectiveThrust * inputIntensity * delta;
     }
 
-    if (isAfterburner) baseAcceleration *= cfg.afterburnerAccelerationMultiplier;
+    // 2. Frame-Independent Directional Drag
+    if (inputMag > 0.01) {
+      const normInputX = moveX / inputMag;
+      const normInputZ = moveZ / inputMag;
+      // Parallel velocity (along input thrust vector)
+      const vParallel = vx * normInputX + vz * normInputZ;
+      // Perpendicular velocity (orthogonal drift to be damped during turns)
+      const vPerpX = vx - vParallel * normInputX;
+      const vPerpZ = vz - vParallel * normInputZ;
 
-    // Speed-dependent steering responsiveness (high agility at low speed, physical arcs at high speed)
-    const speedRatio = THREE.MathUtils.clamp(speedBefore / Math.max(maxSpeed, 1), 0, 1);
-    let steeringResponsiveness = THREE.MathUtils.lerp(
-      cfg.lowSpeedSteeringMultiplier,
-      cfg.highSpeedSteeringMultiplier,
-      speedRatio,
-    );
-    if (isAfterburner) steeringResponsiveness *= cfg.afterburnerSteeringMultiplier;
+      const fwdDrag = Math.pow(cfg.flightDrag, delta * 60);
+      const turnDamp = Math.pow(0.88, delta * 60);
 
-    const totalAcceleration =
-      baseAcceleration * steeringResponsiveness * rotorEff * cargoMultiplier * profile.accel;
-
-    const deltaVx = desiredVx - vx;
-    const deltaVz = desiredVz - vz;
-    const deltaSpeed = Math.hypot(deltaVx, deltaVz);
-    const maxVelocityChange = totalAcceleration * delta;
-
-    if (deltaSpeed <= maxVelocityChange || deltaSpeed < 0.0001) {
-      this.body.velocity.x = desiredVx;
-      this.body.velocity.z = desiredVz;
+      vx = vParallel * fwdDrag * normInputX + vPerpX * turnDamp;
+      vz = vParallel * fwdDrag * normInputZ + vPerpZ * turnDamp;
     } else {
-      const step = maxVelocityChange / deltaSpeed;
-      this.body.velocity.x += deltaVx * step;
-      this.body.velocity.z += deltaVz * step;
+      const brakeDrag = Math.pow(cfg.brakingDrag, delta * 60);
+      vx *= brakeDrag;
+      vz *= brakeDrag;
     }
 
-    if (isStopping && Math.abs(this.body.velocity.x) < 0.05) this.body.velocity.x = 0;
-    if (isStopping && Math.abs(this.body.velocity.z) < 0.05) this.body.velocity.z = 0;
-
-    // A3: decay external knockback — as it fades, the desired velocity
-    // returns to pure input and the controller brakes back to normal flight.
+    // External knockback / storm wind impulse (sustained aerodynamic drift)
+    if (windForce && (windForce.x !== 0 || windForce.z !== 0)) {
+      const targetWindVx = THREE.MathUtils.clamp(windForce.x * 0.055, -9, 9);
+      const targetWindVz = THREE.MathUtils.clamp(windForce.z * 0.055, -9, 9);
+      if (inputMag <= 0.01) {
+        vx += targetWindVx * (1 - Math.pow(cfg.brakingDrag, delta * 60));
+        vz += targetWindVz * (1 - Math.pow(cfg.brakingDrag, delta * 60));
+      } else {
+        vx += targetWindVx * 4.0 * delta;
+        vz += targetWindVz * 4.0 * delta;
+      }
+    }
     if (this.impulseVelocity.x !== 0 || this.impulseVelocity.y !== 0) {
+      vx += this.impulseVelocity.x * 6.0 * delta;
+      vz += this.impulseVelocity.y * 6.0 * delta;
       this.impulseVelocity.multiplyScalar(Math.exp(-Helicopter.IMPULSE_DECAY * delta));
       if (Math.abs(this.impulseVelocity.x) < 0.05 && Math.abs(this.impulseVelocity.y) < 0.05) {
         this.impulseVelocity.set(0, 0);
       }
     }
 
-    // Step 8/9: vertical is separate from horizontal — climb/descend with its
-    // own accel/brake/cap, plus a terrain-safety floor and altitude cap.
+    // 3. Max Speed Cap (preserving analog magnitude scaling)
+    const maxSpeed =
+      cfg.maxHorizontalSpeed *
+      (isAfterburner ? cfg.afterburnerMultiplier : 1) *
+      (speedBoostActive ? cfg.speedBoostMultiplier : 1) *
+      engineEff *
+      cargoMultiplier *
+      profile.speed;
+
+    const targetMaxSpeed = inputMag > 0.01 ? maxSpeed * Math.min(1.0, inputMag) : maxSpeed;
+    const speed = Math.hypot(vx, vz);
+    if (speed > targetMaxSpeed && inputMag > 0.01) {
+      const s = targetMaxSpeed / speed;
+      vx *= s;
+      vz *= s;
+    }
+
+    // Settle cleanly near zero when no input is given
+    if (inputMag <= 0.01 && speed < 0.05) {
+      vx = 0;
+      vz = 0;
+    }
+
+    this.body.velocity.x = vx;
+    this.body.velocity.z = vz;
+    this.desiredVelocity.x = vx;
+    this.desiredVelocity.z = vz;
+
+    // Vertical flight control (climb/descend & terrain safety)
     this.applyVerticalControl(time, delta, moveY, engineEff, rotorEff, cargoMultiplier);
     this.updateAccelerationState(delta);
 
     const newVx = this.body.velocity.x;
     const newVz = this.body.velocity.z;
     const newVy = this.body.velocity.y;
-    const speed = Math.hypot(newVx, newVz);
+    const currentHorizSpeed = Math.hypot(newVx, newVz);
 
     // Step 19 movement safety: abnormal speed ⇒ corrupted body — clamp and log
     // instead of letting it fly off the map and corrupt the whole sim.
-    const totalSpeed = Math.hypot(speed, newVy);
+    const totalSpeed = Math.hypot(currentHorizSpeed, newVy);
     if (totalSpeed > cfg.safetyMaxSpeed) {
       if (import.meta.env.DEV) {
         console.warn(
@@ -1255,7 +1266,7 @@ export class Helicopter extends Entity {
       this.body.velocity.z *= s;
     }
 
-    const isIdle = !hasInput && speed < 3.0; // Player resting?
+    const isIdle = !hasInput && currentHorizSpeed < 3.0; // Player resting?
     // Idle hover: ease in/out of a breathing bob so a parked aircraft visibly
     // "hangs" in its own rotor wash instead of freezing mid-air.
     const idleTarget = isIdle ? 1 : 0;
@@ -1265,13 +1276,12 @@ export class Helicopter extends Entity {
     // - Low speed / stationary: follow input direction
     // - High speed: follow actual velocity vector with subtle anticipation blend
     // - Zero speed & no input: hold current heading
-    const inputMag = Math.hypot(moveX, moveZ);
     let targetAngle = this.mesh.rotation.y;
-    if (speed > 1.5 || inputMag > 0.05) {
-      if (speed < 4.0 && inputMag > 0.05) {
+    if (currentHorizSpeed > 1.5 || inputMag > 0.05) {
+      if (currentHorizSpeed < 4.0 && inputMag > 0.05) {
         // Low speed start-up: follow input direction
         targetAngle = Math.atan2(moveX, moveZ);
-      } else if (speed >= 4.0) {
+      } else if (currentHorizSpeed >= 4.0) {
         const velHeading = Math.atan2(newVx, newVz);
         if (inputMag > 0.05) {
           const inputHeading = Math.atan2(moveX, moveZ);
@@ -1282,13 +1292,13 @@ export class Helicopter extends Entity {
           const inputWeight = THREE.MathUtils.lerp(
             0.30,
             0.12,
-            THREE.MathUtils.clamp((speed - 4.0) / 30.0, 0, 1),
+            THREE.MathUtils.clamp((currentHorizSpeed - 4.0) / 30.0, 0, 1),
           );
           targetAngle = velHeading + hDiff * inputWeight;
         } else {
           targetAngle = velHeading;
         }
-      } else if (speed > 1.5) {
+      } else if (currentHorizSpeed > 1.5) {
         targetAngle = Math.atan2(newVx, newVz);
       }
     }
@@ -1466,7 +1476,7 @@ export class Helicopter extends Entity {
     // Rotor animation never perturbs the helicopter transform.
     this.mainRotor.position.y = 2.1;
 
-    this.animateRotors(speed, 80, delta);
+    this.animateRotors(currentHorizSpeed, 80, delta);
     this.updateNavLights(time);
   }
 
