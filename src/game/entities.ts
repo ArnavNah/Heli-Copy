@@ -251,6 +251,8 @@ export class Helicopter extends Entity {
   private static readonly GUN_RECOIL_RESPONSE = 22; // /s — fast spring back
   private static readonly FIRE_PITCH_MAX = 0.09;
   private static readonly FIRE_PITCH_RESPONSE = 10; // /s
+  private tintedMaterials: Array<{ mat: THREE.MeshLambertMaterial | THREE.MeshToonMaterial; baseColor: THREE.Color }> = [];
+  private lastTonedHullDamage = -1;
 
   // Gun turret config
   static readonly GUN_YAW_MIN: number = -2.09; // -120°
@@ -448,6 +450,19 @@ export class Helicopter extends Entity {
     world.addBody(this.body);
 
     this.mesh.rotation.y = Math.PI;
+
+    this.mesh.traverse((child) => {
+      if (
+        child instanceof THREE.Mesh &&
+        (child.material instanceof THREE.MeshLambertMaterial ||
+          child.material instanceof THREE.MeshToonMaterial)
+      ) {
+        const baseColor = child.material.userData.baseColor as THREE.Color | undefined;
+        if (baseColor) {
+          this.tintedMaterials.push({ mat: child.material, baseColor: baseColor.clone() });
+        }
+      }
+    });
   }
 
   /** Default Apache attack helicopter (original design). */
@@ -1082,26 +1097,17 @@ export class Helicopter extends Entity {
     const engineEff = 0.5 + (this.engineHealth / 100) * 0.5; // Up to 50% thrust loss
     const rotorEff = 0.4 + (this.rotorHealth / 100) * 0.6; // Up to 60% agility loss
 
-    // Hull Damage Visuals
+    // Hull Damage Visuals (cached fast update on threshold change)
     const hullDamage =
       1.0 - (this.rotorHealth * 0.3 + this.engineHealth * 0.7) / 100;
-    this.mesh.traverse((child) => {
-      if (
-        child instanceof THREE.Mesh &&
-        (child.material instanceof THREE.MeshLambertMaterial ||
-          child.material instanceof THREE.MeshToonMaterial)
-      ) {
-        const baseColor = child.material.userData.baseColor as
-          | THREE.Color
-          | undefined;
-        if (baseColor) {
-          tempColor.setHex(0x4d171a);
-          child.material.color
-            .copy(baseColor)
-            .lerp(tempColor, hullDamage * 0.75);
-        }
+    if (Math.abs(hullDamage - this.lastTonedHullDamage) > 0.008) {
+      this.lastTonedHullDamage = hullDamage;
+      for (let i = 0; i < this.tintedMaterials.length; i++) {
+        const item = this.tintedMaterials[i];
+        tempColor.setHex(0x4d171a);
+        item.mat.color.copy(item.baseColor).lerp(tempColor, hullDamage * 0.75);
       }
-    });
+    }
 
     // Damage effects use a stable cadence and never perturb player transforms.
     if (
@@ -2449,7 +2455,8 @@ export class Enemy extends Entity {
           this.hp -= overkill;
         }
         if (this.hp <= 0) {
-          if (this.type === EnemyType.DRONE && !this.isDying) {
+          const isFlying = (this.type === EnemyType.DRONE || this.movementClass === EnemyMovementClass.FLYING) && this.type !== EnemyType.BOSS;
+          if (isFlying && !this.isDying) {
             this.isDying = true;
             this.active = false;
             this.deathSpiralYawRate = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 3.5);
@@ -2468,7 +2475,8 @@ export class Enemy extends Entity {
     }
     this.hp -= amt;
     if (this.hp <= 0) {
-      if (this.type === EnemyType.DRONE && !this.isDying) {
+      const isFlying = (this.type === EnemyType.DRONE || this.movementClass === EnemyMovementClass.FLYING) && this.type !== EnemyType.BOSS;
+      if (isFlying && !this.isDying) {
         this.isDying = true;
         this.active = false;
         this.deathSpiralYawRate = (Math.random() > 0.5 ? 1 : -1) * (5.5 + Math.random() * 3.5);
@@ -3961,8 +3969,16 @@ export class Enemy extends Entity {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const dz = z2 - z1;
+    const minX = Math.min(x1, x2) - 10;
+    const maxX = Math.max(x1, x2) + 10;
+    const minZ = Math.min(z1, z2) - 10;
+    const maxZ = Math.max(z1, z2) + 10;
+    const candidateBlocks = city && typeof city.getBlocksInAABB === "function"
+      ? city.getBlocksInAABB(minX, maxX, minZ, maxZ)
+      : (city?.blocks ?? []);
 
-    for (const block of city.blocks) {
+    for (let i = 0; i < candidateBlocks.length; i++) {
+      const block = candidateBlocks[i];
       if (block.destroyed) continue;
       if (block.height <= y1 - 0.5) continue;
       const minX = block.x - block.width / 2;
@@ -4072,8 +4088,13 @@ export class Enemy extends Entity {
     let avoidForceX = 0;
     let avoidForceZ = 0;
     const avoidRange = this.radius * 2 + 3;
-    if (city && Array.isArray(city.blocks)) {
-      for (const block of city.blocks) {
+    const nearbyBlocks = city && typeof city.getBlocksNear === "function"
+      ? city.getBlocksNear(this.body.position.x, this.body.position.z, avoidRange + 30)
+      : (city?.blocks ?? []);
+
+    if (nearbyBlocks.length > 0) {
+      for (let i = 0; i < nearbyBlocks.length; i++) {
+        const block = nearbyBlocks[i];
         if (block.destroyed) continue;
         // Flying above the roof? No need to steer around it (mirrors the 3D overlap check).
         if (this.body.position.y - this.radius * 0.75 > block.height) continue;
@@ -4098,7 +4119,8 @@ export class Enemy extends Entity {
       }
 
       // AABB Building Collision Resolution
-      for (const block of city.blocks) {
+      for (let i = 0; i < nearbyBlocks.length; i++) {
+        const block = nearbyBlocks[i];
         if (block.destroyed) continue;
 
         const dxBlock = this.body.position.x - block.x;

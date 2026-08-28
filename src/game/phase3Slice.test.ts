@@ -189,22 +189,22 @@ describe('Phase 3: One Air Enemy, Two-Budget Director, and Heavy Gunship Boss', 
       ]);
 
       const compA = MIXED_COMPOSITIONS.find((c) => c.templateId === 'MIXED_A')!;
-      expect(compA.air).toBe(1);
-      expect(compA.infantry).toBe(2);
+      expect(compA.air).toBe(3);
+      expect(compA.infantry).toBe(1);
       expect(compA.tanks).toBe(0);
 
       const compB = MIXED_COMPOSITIONS.find((c) => c.templateId === 'MIXED_B')!;
-      expect(compB.air).toBe(1);
+      expect(compB.air).toBe(2);
       expect(compB.tanks).toBe(1);
 
       const compE = MIXED_COMPOSITIONS.find((c) => c.templateId === 'MIXED_E')!;
-      expect(compE.air).toBe(1);
+      expect(compE.air).toBe(3);
       expect(compE.tanks).toBe(1);
       expect(compE.sam).toBe(1);
 
       const compF = MIXED_COMPOSITIONS.find((c) => c.templateId === 'MIXED_F')!;
-      expect(compF.air).toBe(2);
-      expect(compF.tanks).toBe(2);
+      expect(compF.air).toBe(4);
+      expect(compF.tanks).toBe(1);
     });
   });
 
@@ -264,13 +264,13 @@ describe('Phase 3: One Air Enemy, Two-Budget Director, and Heavy Gunship Boss', 
       const comp3TanksSam = GROUND_COMPOSITIONS.find((c) => c.templateId === 'E')!;
 
       // Verify distinct unit footprints
-      expect(compAirTank.air).toBe(1);
+      expect(compAirTank.air).toBe(2);
       expect(compAirTank.tanks).toBe(1);
 
-      expect(compAir2Tanks.air).toBe(1);
-      expect(compAir2Tanks.tanks).toBe(2);
+      expect(compAir2Tanks.air).toBe(3);
+      expect(compAir2Tanks.tanks).toBe(1);
 
-      expect(compAirTankSam.air).toBe(1);
+      expect(compAirTankSam.air).toBe(3);
       expect(compAirTankSam.sam).toBe(1);
 
       expect(comp3TanksSam.tanks).toBe(3);

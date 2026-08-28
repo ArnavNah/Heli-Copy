@@ -108,6 +108,8 @@ export type CityBlock = {
   occlusionTarget?: number;
   /** District landmark kind (e.g. "HELIPAD_TOWER") — used to place extraction pads on real LZs. */
   landmarkKind?: string;
+  /** Internal query deduplication stamp for zero-allocation spatial grid queries. */
+  lastQueryStamp?: number;
 };
 
 export type EnemyLock = {

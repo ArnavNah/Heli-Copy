@@ -146,8 +146,8 @@ export class CityEnvironment {
   sideAvenueHalf = 8; // 16 wide
   serviceRoadX = 104; // dirt service road, fixed alignment (clear of gx=4 buildings)
   serviceRoadHalf = 3; // 6 wide
-  activeBehind = 1;
-  activeAhead = 2;
+  activeBehind = 2;
+  activeAhead = 3;
 
   // Staggered chunk generation (smoothness pass): missing chunks are queued
   // and drained a bounded number per frame instead of being constructed
@@ -161,6 +161,12 @@ export class CityEnvironment {
   private maxChunksPerFrame = 1;
   private chunkQueueCap = 8;
   onBuildingDestroyed: ((x: number, y: number, z: number) => void) | null = null;
+
+  // 2D Spatial Hash Grid for O(1) building collision, line-of-sight and height queries
+  private spatialGrid = new Map<string, CityBlock[]>();
+  static readonly SPATIAL_CELL_SIZE = 48;
+  private spatialQueryStamp = 0;
+  private scratchQueryBlocks: CityBlock[] = [];
 
   // Drifting cloud layer — a global sky feature, not chunked
   clouds: Cloud[] = [];
@@ -201,7 +207,18 @@ export class CityEnvironment {
     scene.add(this.cloudGroup);
     this.buildCloudLayer();
 
-    this.update({ x: 0, y: 20, z: 0 }, world);
+    this.prewarmInitialChunks(world);
+  }
+
+  /** Pre-generate initial active chunks so taking off has zero streaming stutters. */
+  private prewarmInitialChunks(world: CANNON.World) {
+    const center = 0;
+    for (let id = center - this.activeAhead; id <= center + this.activeBehind; id++) {
+      if (!this.chunks.has(id)) {
+        this.generateChunk(id, world);
+      }
+    }
+    this.rebuildCaches();
   }
 
   /** Build a field of puffy low-poly clouds scattered around the origin. */
@@ -283,10 +300,9 @@ export class CityEnvironment {
     this.chunkBeacons.clear();
     this.disposeBillboardTextures(this.chunkBillboards);
     this.depotHubs.clear();
-    this.explosiveProps = [];
     this.pendingChunks.length = 0;
     this.pendingChunkSet.clear();
-    this.update({ x: 0, y: 20, z: 0 }, world);
+    this.prewarmInitialChunks(world);
   }
 
   /** Return and register the deterministic depot for a chunk, loaded or not. */
@@ -650,7 +666,9 @@ export class CityEnvironment {
     const maxX = x + radius + 35;
     const minZ = z - radius - 35;
     const maxZ = z + radius + 35;
-    for (const block of this.blocks) {
+    const candidateBlocks = this.getBlocksInAABB(minX, maxX, minZ, maxZ, this.scratchQueryBlocks);
+    for (let i = 0; i < candidateBlocks.length; i++) {
+      const block = candidateBlocks[i];
       if (block.destroyed) continue;
       if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
       const distSq = this.distanceToBlockFootprintSq(x, z, block);
@@ -699,7 +717,9 @@ export class CityEnvironment {
     const maxX = x + radius + 35;
     const minZ = z - radius - 35;
     const maxZ = z + radius + 35;
-    for (const block of this.blocks) {
+    const candidateBlocks = this.getBlocksInAABB(minX, maxX, minZ, maxZ, this.scratchQueryBlocks);
+    for (let i = 0; i < candidateBlocks.length; i++) {
+      const block = candidateBlocks[i];
       if (block.destroyed) continue;
       if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
       const distSq = this.distanceToBlockFootprintSq(x, z, block);
@@ -740,7 +760,10 @@ export class CityEnvironment {
     const minZ = Math.min(from.z, to.z) - 35;
     const maxZ = Math.max(from.z, to.z) + 35;
 
-    for (const block of this.blocks) {
+    const candidateBlocks = this.getBlocksInAABB(minX, maxX, minZ, maxZ, this.scratchQueryBlocks);
+
+    for (let i = 0; i < candidateBlocks.length; i++) {
+      const block = candidateBlocks[i];
       if (block.destroyed) continue;
       // Fast broadphase bounding box check (filters 98%+ of blocks per bullet)
       if (block.x < minX || block.x > maxX || block.z < minZ || block.z > maxZ) continue;
@@ -765,14 +788,23 @@ export class CityEnvironment {
   }
 
   getHeightAt(x: number, z: number, clearanceRadius = 0) {
+    const pad = clearanceRadius;
+    const candidateBlocks = this.getBlocksInAABB(
+      x - pad - 26,
+      x + pad + 26,
+      z - pad - 26,
+      z + pad + 26,
+      this.scratchQueryBlocks,
+    );
     let height = 0;
-    for (const block of this.blocks) {
+    for (let i = 0; i < candidateBlocks.length; i++) {
+      const block = candidateBlocks[i];
       if (block.destroyed) continue;
       if (
         Math.abs(x - block.x) <= block.width * 0.5 + clearanceRadius &&
         Math.abs(z - block.z) <= block.depth * 0.5 + clearanceRadius
       ) {
-        height = Math.max(height, block.height);
+        if (block.height > height) height = block.height;
       }
     }
     return height;
@@ -3261,6 +3293,9 @@ export class CityEnvironment {
     };
     const bg = bgByDistrict[config.name] ?? bgByDistrict.downtown;
     const accent = `#${signColor.toString(16).padStart(6, '0')}`;
+    if (typeof document === "undefined") {
+      return new THREE.MeshBasicMaterial({ color: signColor });
+    }
     const canvas = document.createElement("canvas");
     canvas.width = 256;
     canvas.height = 128;
@@ -3307,12 +3342,12 @@ export class CityEnvironment {
   private disposeBillboardTextures(map: Map<number, Billboard[]>, id?: number) {
     if (id !== undefined) {
       const boards = map.get(id);
-      if (boards) for (const board of boards) board.tex.dispose();
+      if (boards) for (const board of boards) board.tex?.dispose?.();
       map.delete(id);
       return;
     }
     for (const boards of map.values()) {
-      for (const board of boards) board.tex.dispose();
+      for (const board of boards) board.tex?.dispose?.();
     }
     map.clear();
   }
@@ -3321,6 +3356,9 @@ export class CityEnvironment {
     this.blocks = [];
     this.rooftopSpots = [];
     this.turrets = [];
+    this.spatialGrid.clear();
+    const cellSize = CityEnvironment.SPATIAL_CELL_SIZE;
+
     for (const chunk of this.chunks.values()) {
       this.blocks.push(...chunk.blocks);
       this.rooftopSpots.push(...chunk.spots);
@@ -3328,6 +3366,68 @@ export class CityEnvironment {
     for (const turrets of this.chunkTurrets.values()) {
       this.turrets.push(...turrets);
     }
+
+    for (let i = 0; i < this.blocks.length; i++) {
+      const block = this.blocks[i];
+      const minCx = Math.floor((block.x - block.width * 0.5) / cellSize);
+      const maxCx = Math.floor((block.x + block.width * 0.5) / cellSize);
+      const minCz = Math.floor((block.z - block.depth * 0.5) / cellSize);
+      const maxCz = Math.floor((block.z + block.depth * 0.5) / cellSize);
+      for (let cx = minCx; cx <= maxCx; cx++) {
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          const key = `${cx},${cz}`;
+          let list = this.spatialGrid.get(key);
+          if (!list) {
+            list = [];
+            this.spatialGrid.set(key, list);
+          }
+          list.push(block);
+        }
+      }
+    }
+  }
+
+  /** Zero-allocation spatial query: returns all intact blocks intersecting the given bounding box. */
+  getBlocksInAABB(minX: number, maxX: number, minZ: number, maxZ: number, out: CityBlock[] = []): CityBlock[] {
+    out.length = 0;
+    const cellSize = CityEnvironment.SPATIAL_CELL_SIZE;
+    const minCx = Math.floor(minX / cellSize);
+    const maxCx = Math.floor(maxX / cellSize);
+    const minCz = Math.floor(minZ / cellSize);
+    const maxCz = Math.floor(maxZ / cellSize);
+
+    // Fast path: single cell (no duplicates possible)
+    if (minCx === maxCx && minCz === maxCz) {
+      const list = this.spatialGrid.get(`${minCx},${minCz}`);
+      if (list) {
+        for (let i = 0; i < list.length; i++) {
+          const b = list[i];
+          if (!b.destroyed) out.push(b);
+        }
+      }
+      return out;
+    }
+
+    // Multi-cell: use query stamp to deduplicate without Set allocation
+    this.spatialQueryStamp++;
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      for (let cz = minCz; cz <= maxCz; cz++) {
+        const list = this.spatialGrid.get(`${cx},${cz}`);
+        if (!list) continue;
+        for (let i = 0; i < list.length; i++) {
+          const b = list[i];
+          if (b.destroyed || b.lastQueryStamp === this.spatialQueryStamp) continue;
+          b.lastQueryStamp = this.spatialQueryStamp;
+          out.push(b);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Zero-allocation radial query: returns all intact blocks within radius of (x, z). */
+  getBlocksNear(x: number, z: number, radius: number, out: CityBlock[] = []): CityBlock[] {
+    return this.getBlocksInAABB(x - radius, x + radius, z - radius, z + radius, out);
   }
 
   /**
@@ -3660,14 +3760,16 @@ export class CityEnvironment {
     const segLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (segLen < 0.001) return; // camera on top of the player — nothing to ghost
     const midX = (camX + tx) * 0.5;
-    const midZ = (camZ + tz) * 0.5;
+    const minX = Math.min(camX, tx) - 30;
+    const maxX = Math.max(camX, tx) + 30;
+    const minZ = Math.min(camZ, tz) - 30;
+    const maxZ = Math.max(camZ, tz) + 30;
 
     this.occlusionScratch.length = 0;
-    for (const block of this.blocks) {
+    const candidates = this.getBlocksInAABB(minX, maxX, minZ, maxZ, this.scratchQueryBlocks);
+    for (let i = 0; i < candidates.length; i++) {
+      const block = candidates[i];
       if (block.destroyed) continue;
-      // Coarse pre-cull: the view segment is short (≤ ~120u), so anything
-      // beyond 100u around its midpoint can never touch it.
-      if (Math.abs(block.x - midX) > 100 || Math.abs(block.z - midZ) > 100) continue;
       const tEntry = this.segmentIntersectsBlockVolume(camX, camY, camZ, dx, dy, dz, block);
       if (tEntry === null) continue;
       const strength = occlusionStrength(tEntry);

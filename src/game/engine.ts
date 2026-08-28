@@ -3804,6 +3804,7 @@ export class GameEngine {
       this.audio.playKillCombo(Math.min(this.killStreakCount, 5));
       if (this.killStreakCount >= 3) {
         this.triggerHitStop(0.3, 0.35); // slow-mo on multi-kills
+        this.combatDirector.triggerMicroLull(3.0); // 3-second breathing window to collect XP
       }
     }
 
@@ -3821,7 +3822,11 @@ export class GameEngine {
     const stopScale = enemy.type === EnemyType.BOSS ? 0.02 : 0.05;
     if (source !== "BOMB") this.triggerHitStop(stopDuration, stopScale);
 
-    const isSpiralAirKill = enemy.type === EnemyType.DRONE && enemy.isDying && source !== "BOMB";
+    const isSpiralAirKill =
+      (enemy.type === EnemyType.DRONE || enemy.movementClass === EnemyMovementClass.FLYING) &&
+      enemy.isDying &&
+      source !== "BOMB" &&
+      enemy.type !== EnemyType.BOSS;
     const enemyXp = xpForEnemyType(enemy.type, enemy.isElite, enemy.variant);
 
     if (isSpiralAirKill) {
@@ -4726,35 +4731,35 @@ export class GameEngine {
     // Determine wave banner — milestones keep their iconic lines, the rest use
     // the rolled theme so roguelite variety shows up on the screen.
     if (this.currentWave === 1) {
-      this.waveMessage = "WAVE 1\nINFANTRY PATROL";
+      this.waveMessage = "WAVE 1\nLIGHT AIR PATROL";
     } else if (this.currentWave === 2) {
-      this.waveMessage = "WAVE 2\nARMORED PATROL";
+      this.waveMessage = "WAVE 2\nAIR ASSAULT & INFANTRY";
     } else if (this.currentWave === 3) {
-      this.waveMessage = "WAVE 3\nTANK COLUMN & RADAR";
+      this.waveMessage = "WAVE 3\nAIR STRIKE & ARMORED FLANK";
     } else if (this.currentWave === 4) {
-      this.waveMessage = "WAVE 4\nANTI-AIR BATTERY";
+      this.waveMessage = "WAVE 4\nHEAVY AIR SQUADRON & TANKS";
     } else if (this.currentWave === 5) {
-      this.waveMessage = "WAVE 5\nRADAR COMBINED ARMS";
+      this.waveMessage = "WAVE 5\nAIR-HEAVY RADAR ASSAULT";
     } else if (this.currentWave === 6) {
-      this.waveMessage = "WAVE 6\nCOMBAT DRONES DETECTED";
+      this.waveMessage = "WAVE 6\nCOMBAT GUNSHIPS & REINFORCEMENTS";
       if (!this.airThreatAnnouncedThisRun) {
         this.airThreatAnnouncedThisRun = true;
-        this.announce("COMBAT DRONES DETECTED", "Hostile aircraft inbound", "#ff3344");
+        this.announce("TACTICAL AIR SQUADRON", "Heavy combat gunships inbound", "#ff3344");
       }
     } else if (this.currentWave === 7) {
-      this.waveMessage = "WAVE 7\nCOMBINED ARMS PATROL";
+      this.waveMessage = "WAVE 7\nCOMBINED AIR & ARMORED OFFENSIVE";
     } else if (this.currentWave === 8) {
-      this.waveMessage = "WAVE 8\nAIR & AA DEFENSE";
+      this.waveMessage = "WAVE 8\nTACTICAL AIR & SAM BATTERY";
     } else if (this.currentWave === 9) {
-      this.waveMessage = "WAVE 9\nMAXIMUM GROUND & AIR PRESSURE";
+      this.waveMessage = "WAVE 9\nMAXIMUM AIR COMBAT PRESSURE";
     } else if (this.currentWave === 10) {
-      this.waveMessage = "WAVE 10\n⚠ HEAVY GUNSHIP INBOUND ⚠";
+      this.waveMessage = "WAVE 10\n⚠ HEAVY GUNSHIP BOSS INBOUND ⚠";
       this.startBossBattle(performance.now() / 1000);
     } else if (this.currentWave % 10 === 0) {
-      this.waveMessage = `WAVE ${this.currentWave}\n⚠ HEAVY GUNSHIP INBOUND ⚠`;
+      this.waveMessage = `WAVE ${this.currentWave}\n⚠ HEAVY GUNSHIP BOSS INBOUND ⚠`;
       this.startBossBattle(performance.now() / 1000);
     } else if (this.currentWave % 5 === 0) {
-      this.waveMessage = `WAVE ${this.currentWave}\nRADAR COMBINED ARMS`;
+      this.waveMessage = `WAVE ${this.currentWave}\nAIR-HEAVY RADAR ASSAULT`;
     } else {
       this.waveMessage = waveThemeBanner(theme, this.currentWave);
     }
@@ -4764,13 +4769,13 @@ export class GameEngine {
     if (theme) this.totalEnemiesInWave = Math.round(this.totalEnemiesInWave * theme.enemyCountMult);
 
     // Destroyable objectives: spawn on the battlefield based on wave progression
-    if (this.currentWave >= 3) {
+    if (this.currentWave >= 5) {
       const activeRadars = this.objectives.filter((o) => o.active && o.type === ObjectiveType.RADAR_TOWER).length;
       if (activeRadars === 0) {
         this.spawnObjective(ObjectiveType.RADAR_TOWER);
       }
     }
-    if (this.currentWave >= 4) {
+    if (this.currentWave >= 8) {
       const activeSams = this.objectives.filter((o) => o.active && o.type === ObjectiveType.SAM_SITE).length;
       if (activeSams === 0) {
         this.spawnObjective(ObjectiveType.SAM_SITE);
@@ -6800,10 +6805,10 @@ export class GameEngine {
         );
       }
 
-      // Combat Drone downwash — bounded to nearest low-altitude drones
+      // Aerial enemy downwash — bounded to nearest low-altitude aircraft
       let droneWashCount = 0;
       for (const e of this.enemies) {
-        if (!e.active || e.type !== EnemyType.DRONE || droneWashCount >= 2) continue;
+        if (!e.active || (e.type !== EnemyType.DRONE && e.movementClass !== EnemyMovementClass.FLYING) || droneWashCount >= 3) continue;
         const dx = e.body.position.x - hp.x;
         const dz = e.body.position.z - hp.z;
         if (dx * dx + dz * dz > 7200) continue; // within ~85m

@@ -1019,13 +1019,13 @@ export interface MixedComposition {
 }
 
 export const MIXED_COMPOSITIONS: MixedComposition[] = [
-  { name: 'A', templateId: 'MIXED_A', label: 'AIR HARASSMENT PATROL', air: 1, infantry: 2, tanks: 0, sam: 0, weight: 1.2, minWave: 6 },
-  { name: 'B', templateId: 'MIXED_B', label: 'ARMORED AIR STRIKE', air: 1, infantry: 0, tanks: 1, sam: 0, weight: 1.0, minWave: 6 },
-  { name: 'C', templateId: 'MIXED_C', label: 'AIR TANK COLUMN', air: 1, infantry: 0, tanks: 2, sam: 0, weight: 0.9, minWave: 7 },
-  { name: 'D', templateId: 'MIXED_D', label: 'COMBINED ARMS SQUAD', air: 1, infantry: 2, tanks: 1, sam: 0, weight: 0.8, minWave: 7 },
-  { name: 'E', templateId: 'MIXED_E', label: 'AIR AA FLANK', air: 1, infantry: 0, tanks: 1, sam: 1, weight: 0.7, minWave: 8 },
-  { name: 'F', templateId: 'MIXED_F', label: 'DUAL AIR DIVISION', air: 2, infantry: 0, tanks: 2, sam: 0, weight: 0.6, minWave: 9 },
-  { name: 'G', templateId: 'MIXED_G', label: 'HEAVY COMBINED ASSAULT', air: 1, infantry: 0, tanks: 3, sam: 1, weight: 0.5, minWave: 9 },
+  { name: 'A', templateId: 'MIXED_A', label: 'AIR HARASSMENT PATROL', air: 3, infantry: 1, tanks: 0, sam: 0, weight: 1.2, minWave: 6 },
+  { name: 'B', templateId: 'MIXED_B', label: 'ARMORED AIR STRIKE', air: 2, infantry: 0, tanks: 1, sam: 0, weight: 1.0, minWave: 6 },
+  { name: 'C', templateId: 'MIXED_C', label: 'AIR TANK COLUMN', air: 3, infantry: 0, tanks: 1, sam: 0, weight: 0.9, minWave: 7 },
+  { name: 'D', templateId: 'MIXED_D', label: 'COMBINED ARMS SQUAD', air: 3, infantry: 1, tanks: 1, sam: 0, weight: 0.8, minWave: 7 },
+  { name: 'E', templateId: 'MIXED_E', label: 'AIR AA FLANK', air: 3, infantry: 0, tanks: 1, sam: 1, weight: 0.7, minWave: 8 },
+  { name: 'F', templateId: 'MIXED_F', label: 'DUAL AIR DIVISION', air: 4, infantry: 0, tanks: 1, sam: 0, weight: 0.6, minWave: 9 },
+  { name: 'G', templateId: 'MIXED_G', label: 'HEAVY COMBINED ASSAULT', air: 4, infantry: 0, tanks: 2, sam: 1, weight: 0.5, minWave: 9 },
 ];
 
 export function pickMixedComposition(wave: number, rng: () => number = Math.random): MixedComposition | null {
