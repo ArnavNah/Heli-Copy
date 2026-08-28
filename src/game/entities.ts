@@ -109,30 +109,30 @@ function disableShadowCasting(root: THREE.Object3D) {
 export const MOVEMENT_CONFIG = {
   /** Normal cruise speed cap (u/s). */
   maxHorizontalSpeed: 68,
-  /** Snappy normal acceleration — reaches useful speed in ~0.11s, cruise in ~0.22s. */
-  horizontalAcceleration: 300,
-  /** Strong active braking — release-to-hover in ~0.28s from cruise. */
-  horizontalBraking: 240,
+  /** Snappy normal acceleration — reaches useful speed in ~0.11s, cruise in ~0.24s. */
+  horizontalAcceleration: 260,
+  /** Strong active braking — release-to-hover in ~0.32s from cruise. */
+  horizontalBraking: 210,
   /** Aggressive counter-steering for responsive 180° combat reversal (~1.5x normal). */
-  reverseAcceleration: 450,
+  reverseAcceleration: 420,
   /** Directional steering acceleration for curved physical turn transitions. */
-  steeringAcceleration: 340,
+  steeringAcceleration: 300,
   /** Strong low-speed authority, maintaining full steering authority at speed. */
-  lowSpeedSteeringMultiplier: 1.20,
-  highSpeedSteeringMultiplier: 1.00,
+  lowSpeedSteeringMultiplier: 1.25,
+  highSpeedSteeringMultiplier: 0.95,
   /** Analog stick radial deadzone. */
   analogDeadzone: 0.15,
   /** Body yaw critically-damped spring dynamics (rad/s² and rad/s, zeta = 1.0). */
-  bodyYawSpring: 120.0,
-  bodyYawDamping: 22.0,
-  maxYawSpeed: 6.28, // ~360°/sec max angular velocity
-  maxYawAcceleration: 48.0, // max angular acceleration rate
-  /** Max bank roll and pitch limits (radians). */
-  maxRoll: 0.32, // ~18.3°
-  maxPitch: 0.16, // ~9.2°
+  bodyYawSpring: 130.0,
+  bodyYawDamping: 23.0,
+  maxYawSpeed: 6.80, // ~390°/sec max angular velocity
+  maxYawAcceleration: 52.0, // max angular acceleration rate
+  /** Max bank roll and pitch limits (radians). Deep, dynamic physical tilt. */
+  maxRoll: 0.45, // ~25.8° (was 18.3°)
+  maxPitch: 0.25, // ~14.3° (was 9.2°)
   /** Bank response speeds (/s). */
-  bankResponse: 14.0,
-  bankReturnResponse: 12.0,
+  bankResponse: 16.0,
+  bankReturnResponse: 11.0,
   visualAccelerationSmoothing: 24.0,
   /** Vertical flight is deliberately a little heavier than horizontal flight. */
   maxVerticalSpeed: 32,
@@ -1414,21 +1414,22 @@ export class Helicopter extends Entity {
     // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
     const tiltMultiplier = isIdle ? 0.22 : 1.0;
 
-    // Lateral acceleration creates roll (banking into turn)
+    // Lateral acceleration + centrifugal turn angular velocity creates deep dynamic banking
+    const turnCentrifugalRoll = -this.bodyYawVelocity * 0.055;
     let targetTiltZ = -THREE.MathUtils.clamp(
-      localAx * 0.00155 * tiltMultiplier,
+      (localAx * 0.0022 + turnCentrifugalRoll) * tiltMultiplier,
       -ROLL_LIMIT,
       ROLL_LIMIT,
     );
 
-    // Longitudinal acceleration creates pitch (nose-down on accel, nose-up on brake)
+    // Longitudinal acceleration creates pitch (nose-down on forward thrust, nose-up on braking)
     const targetTiltX = THREE.MathUtils.clamp(
-      localAz * 0.00115 * tiltMultiplier,
+      localAz * 0.00175 * tiltMultiplier,
       -PITCH_LIMIT,
       PITCH_LIMIT,
     );
 
-    const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0011, -0.06, 0.06);
+    const climbPitch = THREE.MathUtils.clamp(-newVy * 0.0022, -0.09, 0.09);
 
     // Gentle figure-eight sway while hovering idle — the hull drifts a few
     // degrees in roll/pitch like a real helicopter holding station.
