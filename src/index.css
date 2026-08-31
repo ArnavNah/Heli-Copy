@@ -817,30 +817,24 @@ a:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
-  padding: 16px 28px;
+  padding: 14px 24px;
   font-family: var(--font-military);
-  font-size: clamp(1.1rem, 2.4vw, 1.35rem);
-  letter-spacing: 0.16em;
+  font-size: clamp(1rem, 2.2vw, 1.25rem);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  font-weight: 400;
-  color: #1a1002;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
-  background: linear-gradient(180deg, #ffcc00 0%, #e69500 50%, #b86e00 100%);
-  border: 2.5px solid #ffe680;
-  border-top-color: #ffffff;
-  border-bottom-color: #5c3500;
+  font-weight: 700;
+  color: #120e00;
+  background: linear-gradient(180deg, #ffcc00 0%, #e6a800 100%);
+  border: 1px solid #ffe680;
   border-radius: 4px;
   cursor: pointer;
   user-select: none;
   box-shadow:
-    0 0 0 2px #381f00,
-    0 6px 0 #4a2800,
-    0 12px 28px rgba(255, 170, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.2);
-  transition: all 0.1s cubic-bezier(0.2, 0.8, 0.4, 1);
+    0 4px 18px rgba(255, 204, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
 }
 
@@ -848,36 +842,31 @@ a:focus-visible {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.25) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.3) 50%, transparent 100%);
   transform: translateX(-100%);
-  animation: heroSheen 3.6s infinite ease-in-out;
+  animation: heroSheen 4.0s infinite ease-in-out;
   pointer-events: none;
 }
 
 @keyframes heroSheen {
-  0%, 70% { transform: translateX(-100%); }
+  0%, 75% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
 }
 
 .mil-btn-hero:hover:not(:disabled) {
-  background: linear-gradient(180deg, #ffe04d 0%, #ffa700 50%, #cc7a00 100%);
-  border-top-color: #ffffff;
+  background: linear-gradient(180deg, #ffd700 0%, #f0b400 100%);
   color: #000000;
   box-shadow:
-    0 0 0 2px #381f00,
-    0 6px 0 #4a2800,
-    0 16px 36px rgba(255, 204, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.7);
-  transform: translateY(-2px);
+    0 6px 24px rgba(255, 204, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  transform: translateY(-1.5px);
 }
 
 .mil-btn-hero:active:not(:disabled) {
-  transform: translateY(4px);
+  transform: translateY(1px);
   box-shadow:
-    0 0 0 2px #381f00,
-    0 1px 0 #4a2800,
-    0 4px 10px rgba(0, 0, 0, 0.6),
-    inset 0 2px 6px rgba(0, 0, 0, 0.4);
+    0 2px 8px rgba(255, 204, 0, 0.25),
+    inset 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 /* Secondary Navigation Buttons */
@@ -960,11 +949,11 @@ a:focus-visible {
   pointer-events: none;
   background: linear-gradient(
     90deg,
-    #060805 0%,
-    #060805 26%,
-    rgba(6, 8, 5, 0.94) 34%,
-    rgba(6, 8, 5, 0.65) 45%,
-    rgba(6, 8, 5, 0.15) 58%,
+    #080b07 0%,
+    #080b07 24%,
+    rgba(8, 11, 7, 0.92) 35%,
+    rgba(8, 11, 7, 0.55) 48%,
+    rgba(8, 11, 7, 0.12) 60%,
     transparent 72%
   );
   z-index: 10;
@@ -973,16 +962,16 @@ a:focus-visible {
 .menu-left-zone {
   position: relative;
   z-index: 20;
-  width: min(440px, 28vw);
-  min-width: 300px;
-  max-width: 450px;
+  width: min(420px, 30vw);
+  min-width: 320px;
+  max-width: 440px;
   height: 100%;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 2.75rem 1.75rem 2.25rem 3.5rem;
+  padding: 2.5rem 2rem 2rem 3rem;
   box-sizing: border-box;
-  animation: menuEnter 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: menuEnter 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @media (max-width: 768px) {
@@ -993,7 +982,7 @@ a:focus-visible {
     padding: 1.5rem;
   }
   .menu-backdrop-split {
-    background: rgba(6, 8, 5, 0.88);
+    background: rgba(8, 11, 7, 0.92);
   }
 }
 
@@ -1003,35 +992,33 @@ a:focus-visible {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 13px 16px;
-  background: linear-gradient(90deg, #1c2417 0%, #12180e 100%);
-  border: 1.5px solid #3d4e2e;
-  border-left: 3px solid #627e49;
+  padding: 11px 14px;
+  background: rgba(18, 24, 15, 0.75);
+  border: 1px solid rgba(61, 78, 46, 0.5);
+  border-left: 2.5px solid #4a6136;
   border-radius: 3px;
   color: #ded6be;
   cursor: pointer;
   user-select: none;
-  box-shadow:
-    0 2px 6px rgba(0, 0, 0, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  transition: all 0.15s cubic-bezier(0.2, 0.8, 0.4, 1);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .menu-row-btn:hover:not(:disabled) {
-  background: linear-gradient(90deg, #283520 0%, #182213 100%);
-  border-color: #5d7847;
+  background: rgba(30, 42, 24, 0.85);
+  border-color: rgba(93, 120, 71, 0.7);
   border-left-color: #ffcc00;
   color: #ffffff;
-  transform: translateX(4px);
+  transform: translateX(3px);
   box-shadow:
-    0 4px 14px rgba(0, 0, 0, 0.7),
-    0 0 12px rgba(255, 204, 0, 0.15),
-    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    0 4px 14px rgba(0, 0, 0, 0.6),
+    0 0 12px rgba(255, 204, 0, 0.12);
 }
 
 .menu-row-btn:active:not(:disabled) {
-  transform: translateX(2px) translateY(1px);
-  background: #0f140c;
+  transform: translateX(1px);
+  background: rgba(14, 18, 11, 0.9);
 }
 
 /* Bottom-Right Aircraft Telemetry Card (Hero Zone) */
@@ -1039,19 +1026,17 @@ a:focus-visible {
   position: absolute;
   bottom: 2rem;
   right: 2.5rem;
-  width: min(340px, 30vw);
-  background: rgba(13, 17, 10, 0.82);
-  border: 1px solid #3d4e2e;
-  border-top: 2px solid #627e49;
+  width: min(320px, 28vw);
+  background: rgba(10, 14, 9, 0.78);
+  border: 1px solid rgba(61, 78, 46, 0.45);
+  border-top: 2px solid #5a7345;
   border-radius: 4px;
-  padding: 14px 18px;
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.75),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(8px);
+  padding: 12px 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(10px);
   pointer-events: auto;
   user-select: none;
-  animation: menuEnter 0.5s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: menuEnter 0.4s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @media (max-width: 1024px) {

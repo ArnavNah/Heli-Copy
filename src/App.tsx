@@ -1140,32 +1140,26 @@ function HeroHelicopterViewport({ playerModel }: { playerModel: HelicopterModel 
 
       {/* Bottom-Right Aircraft Telemetry Card (Hero Zone) */}
       <div className="aircraft-telemetry-badge">
-        <span className="mil-bracket mil-bracket-tl" />
-        <span className="mil-bracket mil-bracket-tr" />
-        <span className="mil-bracket mil-bracket-bl" />
-        <span className="mil-bracket mil-bracket-br" />
-
-        <div className="flex items-center justify-between gap-3 border-b border-[#3d4a30]/80 pb-1.5 mb-1.5">
+        <div className="flex items-center justify-between gap-3 border-b border-[#2d3822] pb-1.5 mb-1.5">
           <div className="flex items-center gap-1.5 text-[9px] font-military tracking-[0.2em] text-[#ffcc00]">
             <span className="h-1.5 w-1.5 rounded-full bg-[#6ee740] shadow-[0_0_6px_#6ee740] animate-pulse" />
-            <span>PRIMARY CHASSIS</span>
+            <span>READY FOR SORTIE</span>
           </div>
-          <span className="text-[9px] font-tech text-[#a89d7c] tracking-widest">
+          <span className="text-[9px] font-tech text-[#8e9985] tracking-widest">
             {telemetry.designation}
           </span>
         </div>
 
-        <div className="font-display text-xl sm:text-2xl text-white tracking-wider leading-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]">
+        <div className="font-display text-xl sm:text-2xl text-white tracking-wider leading-none drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)]">
           {telemetry.codename}
         </div>
-        <div className="text-[10px] font-military tracking-[0.16em] text-[#8df578] mt-0.5">
+        <div className="text-[10px] font-military tracking-[0.14em] text-[#8df578] mt-0.5">
           {telemetry.role}
         </div>
 
-        <div className="mt-2 pt-1.5 border-t border-[#3d4a30]/60 grid grid-cols-1 gap-0.5 text-[9px] font-tech text-[#a89d7c]">
-          <div><span className="text-[#6d7a62]">ARMAMENT:</span> <span className="text-[#ded6be]">{telemetry.armament}</span></div>
-          <div><span className="text-[#6d7a62]">AIRFRAME:</span> <span className="text-[#ded6be]">{telemetry.airframe}</span></div>
-          <div><span className="text-[#6d7a62]">CLEARANCE:</span> <span className="text-[#ffcc00]">{telemetry.threatRating}</span></div>
+        <div className="mt-2 pt-1.5 border-t border-[#2d3822] grid grid-cols-1 gap-0.5 text-[9px] font-tech text-[#8e9985]">
+          <div><span className="text-[#5b6652]">ARMAMENT:</span> <span className="text-[#ded6be]">{telemetry.armament}</span></div>
+          <div><span className="text-[#5b6652]">AIRFRAME:</span> <span className="text-[#ded6be]">{telemetry.airframe}</span></div>
         </div>
       </div>
     </div>
@@ -1336,28 +1330,22 @@ function ThreeDMenu({
 
         {/* Left 25–30% Tactical Operations Console */}
         <div className="menu-left-zone">
-          {/* 1. Header / Logo Block on Grid */}
+          {/* 1. Header / Logo Block */}
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
-              <Crosshair size={11} className="text-[#ffcc00]" />
-              <span>TACTICAL AIR ASSAULT</span>
+              <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] shadow-[0_0_8px_#ffcc00] animate-pulse" />
+              <span>TACTICAL AIR COMBAT</span>
             </div>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display tracking-wider text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.95)] leading-none my-0.5">
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-display tracking-wider text-white drop-shadow-[0_4px_20px_rgba(0,0,0,0.9)] leading-none my-0.5">
               HELI-STRIKE
             </h1>
-            <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c]">
-              URBAN FIELD COMMAND · AIR WING 07
-            </div>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[2px] bg-[#142612]/90 border border-[#58a72b]/50 text-[9px] font-tech tracking-wider text-[#8df578]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#6ee740] shadow-[0_0_6px_#6ee740] animate-pulse" />
-                <span>DEFCON 1 · SYS.ONLINE</span>
-              </span>
+            <div className="text-[10px] font-military tracking-[0.18em] text-[#8e9985]">
+              SURVIVAL ARCADE SHOOTER
             </div>
           </div>
 
-          {/* 2. Vertical Menu Options on Grid */}
-          <div className="flex flex-col gap-2.5 my-auto" role="menu" aria-label="Main Menu">
+          {/* 2. Vertical Menu Options */}
+          <div className="flex flex-col gap-2 my-auto" role="menu" aria-label="Main Menu">
             {/* Hero Deploy CTA Button */}
             <button
               type="button"
@@ -1365,18 +1353,15 @@ function ThreeDMenu({
               onMouseEnter={() => { setFocusedIndex(0); onUiHover?.(); }}
               className={`mil-btn-hero ${focusedIndex === 0 ? 'is-nav-focused' : ''}`}
             >
-              <span className="flex items-center gap-2">
-                <Play size={18} className="fill-current text-[#1a1002]" />
-                <span>DEPLOY HELICOPTER</span>
-              </span>
-              <span className="hidden sm:inline-block rounded bg-[#1f1402]/25 px-2 py-0.5 text-[9px] font-tech font-bold text-[#1f1402] border border-[#1f1402]/30">
-                [ENTER]
+              <span className="flex items-center gap-2.5">
+                <Play size={18} className="fill-current text-[#120e00]" />
+                <span>DEPLOY (ENTER)</span>
               </span>
             </button>
 
-            {/* Integrated Operational Threat Rating */}
-            <div className="flex items-center justify-between px-3 py-1.5 mil-panel bg-[#151c11]/85 border-[#3d4e2e] text-xs">
-              <span className="font-hud font-bold text-[#a89d7c] tracking-wider text-[10px]">
+            {/* Integrated Threat Level */}
+            <div className="flex items-center justify-between px-3 py-2 bg-[#12160f]/80 border border-[#2d3822] rounded-[3px] text-xs">
+              <span className="font-hud font-bold text-[#8e9985] tracking-wider text-[10px]">
                 THREAT LEVEL
               </span>
               <DifficultyChip difficulty={difficulty} />
@@ -1389,14 +1374,14 @@ function ThreeDMenu({
               onMouseEnter={() => { setFocusedIndex(1); onUiHover?.(); }}
               className={`menu-row-btn ${focusedIndex === 1 ? 'is-nav-focused' : ''}`}
             >
-              <div className="flex items-center gap-2 text-xs font-military text-[#ffcc00]">
-                <Wrench size={14} />
+              <div className="flex items-center gap-2.5 text-xs font-military text-[#ded6be]">
+                <Wrench size={14} className="text-[#ffcc00]" />
                 <span>HANGAR & ARMORY</span>
                 {isNewPilot && (
                   <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] animate-ping" />
                 )}
               </div>
-              <span className="text-[9px] font-tech text-[#8c8266]">[H] KEY</span>
+              <span className="text-[9px] font-tech text-[#717d68]">[H]</span>
             </button>
 
             <button
@@ -1405,11 +1390,11 @@ function ThreeDMenu({
               onMouseEnter={() => { setFocusedIndex(2); onUiHover?.(); }}
               className={`menu-row-btn ${focusedIndex === 2 ? 'is-nav-focused' : ''}`}
             >
-              <div className="flex items-center gap-2 text-xs font-military text-[#ded6be]">
-                <Sliders size={14} />
-                <span>SYSTEM SETTINGS</span>
+              <div className="flex items-center gap-2.5 text-xs font-military text-[#ded6be]">
+                <Sliders size={14} className="text-[#8df578]" />
+                <span>SETTINGS</span>
               </div>
-              <span className="text-[9px] font-tech text-[#8c8266]">[O] KEY</span>
+              <span className="text-[9px] font-tech text-[#717d68]">[O]</span>
             </button>
 
             <button
@@ -1418,60 +1403,57 @@ function ThreeDMenu({
               onMouseEnter={() => { setFocusedIndex(3); onUiHover?.(); }}
               className={`menu-row-btn ${focusedIndex === 3 ? 'is-nav-focused' : ''}`}
             >
-              <div className="flex items-center gap-2 text-xs font-military text-[#ded6be]">
-                <BookOpen size={14} />
-                <span>FIELD MANUAL</span>
+              <div className="flex items-center gap-2.5 text-xs font-military text-[#ded6be]">
+                <BookOpen size={14} className="text-[#50ebff]" />
+                <span>MANUAL & CONTROLS</span>
               </div>
-              <span className="text-[9px] font-tech text-[#8c8266]">[M] KEY</span>
+              <span className="text-[9px] font-tech text-[#717d68]">[M]</span>
             </button>
           </div>
 
           {/* 3. Stats & Guidance on Grid */}
-          <div className="flex flex-col gap-2.5">
+          <div className="flex flex-col gap-2">
             {isNewPilot && (
-              <div className="mil-panel px-3 py-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#9df578] border-[#58a72b]/60 bg-[#142612]/90 shadow-[0_0_10px_rgba(88,167,43,0.2)]">
-                <Sparkles size={12} className="text-[#ffcc00] shrink-0 animate-spin" />
-                <span>Starter credits granted — open Hangar to equip upgrades</span>
+              <div className="px-3 py-1.5 rounded-[3px] flex items-center gap-2 text-[10px] font-bold tracking-wider text-[#9df578] border border-[#58a72b]/50 bg-[#142612]/80">
+                <Sparkles size={11} className="text-[#ffcc00] shrink-0 animate-spin" />
+                <span>Starter credits ready — open Hangar to equip</span>
               </div>
             )}
 
-            {/* High Score / Credits / Sortie Micro Grid */}
+            {/* High Score / Credits / Sortie Minimalist Bar */}
             <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="menu-stat-card menu-stat-card-blue !p-1.5">
-                <div className="menu-stat-label !text-[9px]">
-                  <Trophy size={10} className="text-[#00b4d8]" />
-                  <span>BEST</span>
-                </div>
-                <strong className="menu-stat-val !text-sm text-[#7df9ff]">
+              <div className="bg-[#12160f]/80 border border-[#2d3822] rounded-[3px] p-1.5 flex flex-col items-center">
+                <span className="text-[8.5px] font-military tracking-wider text-[#717d68] flex items-center gap-1">
+                  <Trophy size={10} className="text-[#50ebff]" /> BEST
+                </span>
+                <strong className="text-sm font-tech font-bold text-[#50ebff] mt-0.5">
                   {highScore.toLocaleString()}
                 </strong>
               </div>
 
-              <div className="menu-stat-card menu-stat-card-gold !p-1.5">
-                <div className="menu-stat-label !text-[9px]">
-                  <Coins size={10} className="text-[#ffd700]" />
-                  <span>CREDITS</span>
-                </div>
-                <strong className="menu-stat-val !text-sm text-[#ffd700]">
+              <div className="bg-[#12160f]/80 border border-[#2d3822] rounded-[3px] p-1.5 flex flex-col items-center">
+                <span className="text-[8.5px] font-military tracking-wider text-[#717d68] flex items-center gap-1">
+                  <Coins size={10} className="text-[#ffd700]" /> CREDITS
+                </span>
+                <strong className="text-sm font-tech font-bold text-[#ffd700] mt-0.5">
                   {credits.toLocaleString()}
                 </strong>
               </div>
 
-              <div className="menu-stat-card menu-stat-card-green !p-1.5">
-                <div className="menu-stat-label !text-[9px]">
-                  <Crosshair size={10} className="text-[#7de04a]" />
-                  <span>SORTIE</span>
-                </div>
-                <strong className="menu-stat-val !text-sm text-[#8df578]">
+              <div className="bg-[#12160f]/80 border border-[#2d3822] rounded-[3px] p-1.5 flex flex-col items-center">
+                <span className="text-[8.5px] font-military tracking-wider text-[#717d68] flex items-center gap-1">
+                  <Crosshair size={10} className="text-[#8df578]" /> SORTIE
+                </span>
+                <strong className="text-sm font-tech font-bold text-[#8df578] mt-0.5">
                   {wave > 0 ? `WAVE ${wave}` : '—'}
                 </strong>
               </div>
             </div>
 
             {/* Footer Navigation Hints */}
-            <div className="flex items-center justify-between text-[9px] font-tech text-[#8c8266] tracking-wider pt-1 border-t border-[#28331e]">
-              <span>HELI-STRIKE v1.4.0 · STEAM EDITION</span>
-              <span className="hidden sm:inline">🎮 [W/S/↑/↓] NAVIGATE</span>
+            <div className="flex items-center justify-between text-[9px] font-tech text-[#717d68] tracking-wider pt-1 border-t border-[#1f2818]">
+              <span>v1.4.0</span>
+              <span>[W / S / ↑ / ↓] NAVIGATE</span>
             </div>
           </div>
         </div>
@@ -1485,36 +1467,21 @@ function ThreeDMenu({
   }
 
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/75 px-3 py-4 backdrop-blur-[2px]">
-      <div className="menu-perspective">
-        <div className="menu-rig">
-          <div className="menu-card">
-            {/* Tactical Corner Brackets */}
-              <span className="mil-bracket mil-bracket-tl" />
-              <span className="mil-bracket mil-bracket-tr" />
-              <span className="mil-bracket mil-bracket-bl" />
-              <span className="mil-bracket mil-bracket-br" />
-
-              <span className="mil-rivet mil-rivet-tl" />
-              <span className="mil-rivet mil-rivet-tr" />
-              <span className="mil-rivet mil-rivet-bl" />
-              <span className="mil-rivet mil-rivet-br" />
-
-              <div className={stats?.status === 'EXTRACTED' ? 'mil-hazard-strip rounded-[1px] mb-3' : 'mil-hazard-strip-danger rounded-[1px] mb-3'} />
-
-              <div className="menu-title-block text-center">
-                <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00] text-center w-full">
-                  <span>★</span>
-                  <span>AFTER ACTION REPORT</span>
-                  <span>★</span>
-                </div>
-                <span className={`my-1 text-center w-full whitespace-nowrap ${stats?.status === 'EXTRACTED' ? 'arcade-title-lg arcade-title-success' : 'arcade-title-lg arcade-title-danger'}`}>
-                  {stats?.status === 'EXTRACTED' ? 'MISSION ACCOMPLISHED' : 'AIRCRAFT DESTROYED'}
-                </span>
-                <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center w-full">
-                  {stats?.status === 'EXTRACTED' ? 'TACTICAL EXTRACTION SUCCESSFUL' : 'HULL INTEGRITY COMPROMISED'}
-                </div>
-              </div>
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-black/80 px-3 py-4 backdrop-blur-[6px]">
+      <div className="w-[min(460px,calc(100vw-32px))] bg-[#0c100a]/92 border border-[#2d3822] rounded-lg p-5 sm:p-6 shadow-[0_16px_48px_rgba(0,0,0,0.9)] animate-in fade-in zoom-in-95 duration-150">
+        <div className="menu-title-block text-center">
+          <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00] text-center w-full">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] shadow-[0_0_8px_#ffcc00]" />
+            <span>AFTER ACTION REPORT</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] shadow-[0_0_8px_#ffcc00]" />
+          </div>
+          <h2 className={`my-1 text-center w-full text-2xl sm:text-3xl font-display tracking-wider ${stats?.status === 'EXTRACTED' ? 'text-[#8df578]' : 'text-[#ff4444]'}`}>
+            {stats?.status === 'EXTRACTED' ? 'MISSION ACCOMPLISHED' : 'AIRCRAFT DESTROYED'}
+          </h2>
+          <div className="text-[10px] font-military tracking-[0.18em] text-[#8e9985] text-center w-full">
+            {stats?.status === 'EXTRACTED' ? 'TACTICAL EXTRACTION SUCCESSFUL' : 'HULL INTEGRITY COMPROMISED'}
+          </div>
+        </div>
 
               {stats?.status === 'EXTRACTED' ? (
                 <div className="mt-3 border border-[#58a72b] bg-[#1a2e10] px-3 py-1.5 text-center text-[11px] font-military tracking-[0.14em] text-[#8df578]">
@@ -1664,9 +1631,6 @@ function ThreeDMenu({
                 </div>
               )}
 
-              <div className="mil-hazard-strip mt-3 rounded-[1px]" />
-            </div>
-        </div>
       </div>
     </div>
   );
@@ -1841,38 +1805,24 @@ function PauseOverlay({
   onQuit: () => void;
 }) {
   return (
-    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-[#0d0f0a]/80 px-4 backdrop-blur-[2px]">
-      <div className="menu-perspective">
-        <div className="menu-rig">
-          <div className="menu-card w-[min(420px,calc(100vw-32px))] text-center">
-            <span className="mil-rivet mil-rivet-tl" />
-            <span className="mil-rivet mil-rivet-tr" />
-            <span className="mil-rivet mil-rivet-bl" />
-            <span className="mil-rivet mil-rivet-br" />
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-black/75 px-4 backdrop-blur-[6px]">
+      <div className="w-[min(380px,calc(100vw-32px))] bg-[#0d120a]/90 border border-[#2d3822] rounded-lg p-6 text-center shadow-[0_12px_40px_rgba(0,0,0,0.85)] animate-in fade-in zoom-in-95 duration-150">
+        <div className="flex items-center justify-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#ffcc00] shadow-[0_0_8px_#ffcc00]" />
+          <span>GAME PAUSED</span>
+        </div>
+        <h2 className="text-3xl font-display tracking-wider text-white my-1">
+          TACTICAL PAUSE
+        </h2>
+        <div className="text-[10px] font-military tracking-[0.16em] text-[#8e9985]">
+          PRESS ESC OR P TO RESUME
+        </div>
 
-            <div className="mil-hazard-strip mb-3 rounded-[1px]" />
-
-            <div className="menu-title-slab">
-              <div className="flex items-center gap-2 text-[10px] font-military tracking-[0.24em] text-[#ffcc00]">
-                <span>★</span>
-                <span>COMBAT HALTED</span>
-                <span>★</span>
-              </div>
-              <h2 className="arcade-title-lg my-0.5 text-center">TACTICAL PAUSE</h2>
-              <div className="text-[10px] font-military tracking-[0.2em] text-[#a89d7c] text-center">
-                ESC / P TO RESUME ENGAGEMENT
-              </div>
-            </div>
-
-            <div className="mt-6 flex flex-col items-center gap-3">
-              <MenuButton size="lg" onClick={onResume}>RESUME RUN</MenuButton>
-              <MenuButton secondary onClick={onRestart}>RESTART WAVE</MenuButton>
-              <MenuButton secondary onClick={onSettings}>SYSTEM SETTINGS</MenuButton>
-              <MenuButton secondary onClick={onQuit}>ABORT TO MENU</MenuButton>
-            </div>
-
-            <div className="mil-hazard-strip mt-5 rounded-[1px]" />
-          </div>
+        <div className="mt-6 flex flex-col items-stretch gap-2.5">
+          <MenuButton size="lg" onClick={onResume}>RESUME (ESC)</MenuButton>
+          <MenuButton secondary onClick={onRestart}>RESTART WAVE</MenuButton>
+          <MenuButton secondary onClick={onSettings}>SETTINGS</MenuButton>
+          <MenuButton secondary onClick={onQuit}>ABORT TO MENU</MenuButton>
         </div>
       </div>
     </div>
